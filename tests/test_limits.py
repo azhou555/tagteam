@@ -98,11 +98,27 @@ class Breaker(unittest.TestCase):
         h = mock.Mock(reviewer=R())
         with mock.patch.object(runner.harnesses, "get", return_value=h), \
                 mock.patch.object(runner, "_spawn", return_value=("", "boom", 1, False)):
-            for _ in range(2):
+            for attempt in range(2):
                 runner.run_one("agy", CFG, "p", ".", 100, tempfile.mkdtemp())
-                if _ == 0:
+                if attempt == 0:
                     self.assertFalse(quota.cooling("agy"))
         self.assertTrue(quota.cooling("agy"))
+
+
+    def test_breaker_state_error_does_not_break_the_run(self):
+        h = mock.Mock(reviewer=mock.Mock(**{"argv.return_value": (["x"], None, None), "parse.return_value": None,
+                                            "usage.return_value": {}}))
+        real = state.locked
+
+        def locked(name="global"):
+            if name == "failures":
+                raise OSError("disk")
+            return real(name)
+        with mock.patch.object(runner.harnesses, "get", return_value=h), \
+                mock.patch.object(runner, "_spawn", return_value=("", "boom", 1, False)), \
+                mock.patch.object(state, "locked", locked):
+            rec, result = runner.run_one("agy", CFG, "p", ".", 100, tempfile.mkdtemp())
+        self.assertEqual((rec["ok"], result), (False, None))
 
 
 class Guards(HookRig, unittest.TestCase):
@@ -216,6 +232,77 @@ class Guards(HookRig, unittest.TestCase):
         self.rewind()
         self.stop(change=False)
         self.assertEqual(len(self.calls), 2)
+
+    def test_session_lock_error_is_not_reviewed_notice(self):
+        self.start()
+        import fcntl
+        real_flock = fcntl.flock
+
+        def flaky(f, op):
+            if op & fcntl.LOCK_NB:
+                raise OSError(5, "io")
+            return real_flock(f, op)
+        with mock.patch("fcntl.flock", flaky):
+            out = self.stop()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(out["systemMessage"], "[tagteam] ⚠ Not reviewed: state error, see tagteam.log")
+        self.assertEqual(state.read_jsonl(state.path("runs.jsonl"))[-1]["reason"], "state error, see tagteam.log")
+        self.calls.clear()
+        real_open = open
+
+        def bad_open(f, *a, **k):
+            if "session-" in str(f):
+                raise OSError("denied")
+            return real_open(f, *a, **k)
+        with mock.patch("builtins.open", bad_open):
+            out = self.stop()
+        self.assertEqual(self.calls, [])
+        self.assertIn("state error", out["systemMessage"])
+
+    def test_session_lock_contention_is_silent_not_error(self):
+        with limits.session_lock("claude", "s") as outer:
+            with limits.session_lock("claude", "s") as inner:
+                self.assertEqual((outer, inner), (limits.HELD, limits.BUSY))
+
+    def test_remember_state_error_keeps_the_block(self):
+        self.start()
+        key = self.core._session_file(mock.Mock(agent="claude", session_id="sess1")).stem
+        real, raised = state.locked, []
+
+        def locked(name="global"):
+            if name == key and not raised:
+                raised.append(1)
+                raise OSError("disk")
+            return real(name)
+        runs = len(state.read_jsonl(state.path("runs.jsonl")))
+        with mock.patch.object(state, "locked", locked):
+            out = self.stop(self.blocker())
+        self.assertEqual(raised, [1])
+        self.assertEqual(out["decision"], "block")
+        recorded = state.read_jsonl(state.path("runs.jsonl"))
+        self.assertEqual((len(recorded) - runs, recorded[-1]["action"]), (1, "block"))
+
+    def test_session_lock_taken_once_per_stop(self):
+        """turn_end holds the lock from before it reads the round; review does not re-take it."""
+        self.start()
+        seen = []
+        real = limits.session_lock
+
+        def spy(*a):
+            seen.append("lock")
+            return real(*a)
+        with mock.patch.object(limits, "session_lock", spy):
+            self.stop()
+        self.assertEqual(seen, ["lock"])                 # once per Stop: review does not re-take it
+
+    def test_same_plan_twice_is_reviewed_once(self):
+        self.start()
+        plan = {"hook_event_name": "PreToolUse", "tool_name": "ExitPlanMode", "session_id": "sess1",
+                "cwd": self.repo, "tool_input": {"plan": "1. do a thing\n2. do another\n"}}
+        for _ in range(2):
+            with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+                self.run_hook("claude", "x", plan)
+        self.assertEqual(len(self.calls), 1)
 
     def test_digest_memory_is_capped_at_50(self):
         self.start()

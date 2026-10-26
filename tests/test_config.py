@@ -134,6 +134,15 @@ class RepoTightens(ConfigCase):
         self.assertEqual((cfg["limits"]["max_rounds_per_turn"], cfg["review"]["max_diff_chars"]), (1, 100))
         self.assertEqual(src["limits.max_rounds_per_turn"], "repo")
 
+    def test_repo_may_only_lengthen_cooldown(self):
+        self.repo_file('[limits]\ncooldown_min = 0\n')
+        cfg, src = config.load_with_sources(str(self.repo))
+        self.assertEqual(cfg["limits"]["cooldown_min"], 15)
+        self.assertEqual(src["limits.cooldown_min"], "default")
+        self.repo_file('[limits]\ncooldown_min = 60\n')
+        cfg, src = config.load_with_sources(str(self.repo))
+        self.assertEqual((cfg["limits"]["cooldown_min"], src["limits.cooldown_min"]), (60, "repo"))
+
     def test_legacy_repo_routing_keys_log_no_false_drop(self):
         self.repo_file('[routing]\nsmall = 2\n')
         cfg = config.load(str(self.repo))

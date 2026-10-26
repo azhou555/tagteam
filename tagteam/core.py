@@ -71,15 +71,32 @@ def completion(run, lines_changed):
     return msg + (f" · unavailable: {', '.join(run['failed'])}" if run["failed"] else "")
 
 
-def review(ev, cfg, s, artifacts, round_no, run_tag):
-    """Guard, route, run, decide. Returns (action, message, run_dir, blocking); message is the block reason or,
-    on allow, a one-line completion notice. run_dir None means no run happened: allow with no message is a
-    silent skip, block is a re-issued block."""
-    with limits.session_lock(ev.agent, ev.session_id) as got:
-        if not got:
+STATE_ERROR = "state error, see tagteam.log"
+
+
+def review(ev, cfg, s, artifacts, round_no, run_tag, lock=limits.HELD):
+    """Guard, route, run, decide. The caller holds the session lock (`lock` says how that went). Returns
+    (action, message, run_dir, blocking); message is the block reason or, on allow, a one-line completion
+    notice. run_dir None means no run was spawned: a block is a re-issued one, an allow with a message is a
+    state-error notice, and an allow without one is a silent skip."""
+    if lock != limits.HELD:
+        state.log("session lock failed, not reviewing", author=ev.agent, session=ev.session_id)
+        run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:4]
+        run = {"ts": time.time(), "run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
+               "round": round_no, "reviewers": [], "action": "allow", "blocking": 0, "advisory": 0, "failed": [],
+               "duration": 0.0, "reason": STATE_ERROR}
+        live.record_run(run)
+        return "allow", completion(run, 0), None, []
+    return _review(ev, cfg, s, artifacts, round_no, run_tag)
+
+
+def _session_guard(ev, handler, *args):
+    """Run handler(*args, lock=...) holding this session's lock; a second trigger for the session is skipped."""
+    with limits.session_lock(ev.agent, ev.session_id) as lock:
+        if lock == limits.BUSY:
             state.log("review already running for this session; skipped", author=ev.agent, session=ev.session_id)
-            return "allow", None, None, []
-        return _review(ev, cfg, s, artifacts, round_no, run_tag)
+            return None
+        return handler(*args, lock)
 
 
 def _review(ev, cfg, s, artifacts, round_no, run_tag):
@@ -166,6 +183,10 @@ def wanted(ev, cfg, artifacts):
 
 
 def turn_end(ev, cfg):
+    return _session_guard(ev, _turn_end, ev, cfg)
+
+
+def _turn_end(ev, cfg, lock):
     sf = _session_file(ev)
     s = state.read_json(sf)
     if not s:
@@ -181,9 +202,9 @@ def turn_end(ev, cfg):
     round_no = s["round"] + 1
     if round_no > cfg["limits"]["max_rounds_per_turn"]:
         return None
-    action, msg, run_dir, blocking = review(ev, cfg, s, artifacts, round_no, "turn")
-    if run_dir is None and action == "allow":
-        return None                                  # skipped: another review is running, or this diff passed already
+    action, msg, run_dir, blocking = review(ev, cfg, s, artifacts, round_no, "turn", lock)
+    if run_dir is None and action == "allow":        # no round spent: diff already passed, or a state-error notice
+        return {"action": action, "message": msg} if msg else None
     with state.locked(sf.stem):
         s = state.read_json(sf) or s
         s["round"] = round_no
@@ -201,6 +222,10 @@ def turn_end(ev, cfg):
 
 def plan_gate(ev, cfg):
     """Review a plan before the user approves it (Claude ExitPlanMode)."""
+    return _session_guard(ev, _plan_gate, ev, cfg)
+
+
+def _plan_gate(ev, cfg, lock):
     if not ev.plan_text.strip():
         return None
     s = state.read_json(_session_file(ev)) or {"prompt": "", "repo": changes.repo_root(ev.cwd), "prior": []}
@@ -211,9 +236,9 @@ def plan_gate(ev, cfg):
     gate_rounds = s.get("plan_rounds", 0) + 1
     if gate_rounds > cfg["limits"]["max_rounds_per_turn"]:
         return None
-    action, msg, run_dir, _ = review(ev, cfg, {**s, "prior": []}, [art], gate_rounds, "plan-gate")
+    action, msg, run_dir, _ = review(ev, cfg, {**s, "prior": []}, [art], gate_rounds, "plan-gate", lock)
     if run_dir is None and action == "allow":
-        return None
+        return {"action": action, "message": msg} if msg else None
     with state.locked(_session_file(ev).stem):
         cur = state.read_json(_session_file(ev))
         if cur:

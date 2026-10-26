@@ -106,11 +106,13 @@ def _bad_list(cfg):
 
 
 def _conservative(cfg, over):
-    """A repo file may only tighten: lower limits and diff size, add ignore patterns. Drops no-op keys."""
+    """A repo file may only tighten: lower limits and diff size, longer cooldowns, add ignore patterns. Drops no-op keys."""
     num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
     for t, k in [("limits", k) for k in over.get("limits", {})] + [("review", "max_diff_chars")]:
         if k in over.get(t, {}) and num(over[t][k]) and num(cfg.get(t, {}).get(k)):
-            if over[t][k] >= cfg[t][k]:
+            # a longer cooldown is the safer one; every other limit is safer lower
+            looser = over[t][k] <= cfg[t][k] if k == "cooldown_min" else over[t][k] >= cfg[t][k]
+            if looser:
                 del over[t][k]
     rv = over.get("review", {})
     if "ignore" in rv:

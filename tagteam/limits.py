@@ -1,5 +1,6 @@
 """Hard loop stops: hourly reservation, per-session digest memory, per-session lock, failure breaker."""
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
@@ -53,48 +54,62 @@ def remembered(session_key, dig):
 
 
 def remember(session_key, dig, action, blocking, message=None):
-    with state.locked(session_key):
-        p = _session_path(session_key)
-        s = state.read_json(p)
-        if not s:
-            return
-        d = s.setdefault("digests", {})
-        d.pop(dig, None)
-        d[dig] = {"action": action, "blocking": blocking, "message": message}
-        while len(d) > MAX_DIGESTS:
-            del d[next(iter(d))]
-        state.write_json(p, s)
+    """Best effort: a finished verdict is never lost to a state error."""
+    try:
+        with state.locked(session_key):
+            p = _session_path(session_key)
+            s = state.read_json(p)
+            if not s:
+                return
+            d = s.setdefault("digests", {})
+            d.pop(dig, None)
+            d[dig] = {"action": action, "blocking": blocking, "message": message}
+            while len(d) > MAX_DIGESTS:
+                del d[next(iter(d))]
+            state.write_json(p, s)
+    except OSError as e:
+        state.log("digest not remembered", session=session_key, error=repr(e))
 
 
 def note_result(reviewer, ok, cfg):
-    """Two failures in a row pause the reviewer for cooldown_min; any success clears the count."""
-    with state.locked("failures"):
-        p = state.path("failures.json")
-        counts = state.read_json(p, {})
-        tripped = not ok and counts.get(reviewer, 0) + 1 >= BREAKER_FAILURES
-        n = 0 if ok or tripped else counts.get(reviewer, 0) + 1
-        if n != counts.get(reviewer, 0):
-            counts[reviewer] = n
-            state.write_json(p, counts)
-    if tripped:
-        state.log("reviewer failed twice in a row; paused", reviewer=reviewer, minutes=cfg["limits"]["cooldown_min"])
-        quota.cooldown(reviewer, cfg["limits"]["cooldown_min"])
+    """Two failures in a row pause the reviewer for cooldown_min; any success clears the count. Best effort."""
+    try:
+        with state.locked("failures"):
+            p = state.path("failures.json")
+            counts = state.read_json(p, {})
+            tripped = not ok and counts.get(reviewer, 0) + 1 >= BREAKER_FAILURES
+            n = 0 if ok or tripped else counts.get(reviewer, 0) + 1
+            if n != counts.get(reviewer, 0):
+                counts[reviewer] = n
+                state.write_json(p, counts)
+        if tripped:
+            state.log("reviewer failed twice in a row; paused", reviewer=reviewer,
+                      minutes=cfg["limits"]["cooldown_min"])
+            quota.cooldown(reviewer, cfg["limits"]["cooldown_min"])
+    except OSError as e:
+        state.log("failure count not updated", reviewer=reviewer, error=repr(e))
+
+
+HELD, BUSY, ERROR = "held", "busy", "error"
 
 
 @contextlib.contextmanager
 def session_lock(author, session_id):
-    """Yields True if no other review holds this session, else False. The kernel frees it if the holder dies."""
+    """Yields HELD, BUSY (another review has this session) or ERROR (the lock itself failed).
+    The kernel frees the lock if the holder dies."""
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id or "nosession")
     try:
         f = open(state.path("locks", f"session-{author}-{safe}.lock"), "w")
     except OSError as e:
-        state.log("session lock unavailable, not reviewing", error=repr(e))
-        yield False
+        state.log("session lock unavailable", error=repr(e))
+        yield ERROR
         return
     with f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            yield False
+        except OSError as e:
+            if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+                state.log("session lock failed", error=repr(e))
+            yield BUSY if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN) else ERROR
             return
-        yield True
+        yield HELD
