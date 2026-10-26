@@ -16,6 +16,12 @@ QUOTA_ERR = re.compile(r"rate.?limit|quota|usage limit|too many requests|\b429\b
                        r"limit (reached|exceeded)|out of credits", re.I)
 
 
+def _tilde(path):
+    """Out-of-repo artifacts are absolute paths; show them ~-relative so no prompt carries the home path."""
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path.startswith(home + os.sep) else path
+
+
 def build_prompt(reviewer, author, repo, intent, tasks, max_chars, prior=None, author_reply="", git_activity=()):
     parts = [RUBRICS["preamble"].format(reviewer=reviewer, author=author, repo=repo)]
     if intent:
@@ -30,10 +36,11 @@ def build_prompt(reviewer, author, repo, intent, tasks, max_chars, prior=None, a
     for t in tasks:
         parts.append(f"\n## Review task: {t['kind']}\n{RUBRICS['kind'][t['kind']]}\n{RUBRICS['lens'][t['lens']]}")
         for a in t["artifacts"]:
-            d = a["diff"]
+            shown = _tilde(a["path"])
+            d = a["diff"].replace(a["path"], shown)
             if len(d) > budget:
-                d = d[:budget] + f"\n... [diff truncated; read {a['path']} for the rest]"
-            parts.append(f"\n### {a['path']} ({a['status']}, {a['lines_changed']} lines changed)\n{d}")
+                d = d[:budget] + f"\n... [diff truncated; read {shown} for the rest]"
+            parts.append(f"\n### {shown} ({a['status']}, {a['lines_changed']} lines changed)\n{d}")
     if prior:
         parts.append("\n## Round 2\nYou (or a peer) raised these findings last round. The author has since changed "
                      "the work. Re-check each: drop it if resolved or if the author's rebuttal is convincing; keep it "

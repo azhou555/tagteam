@@ -113,3 +113,27 @@ def session_lock(author, session_id):
             yield BUSY if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN) else ERROR
             return
         yield HELD
+
+
+def disabled():
+    """{reviewer: {reason, ts}} for reviewers that wrote to the real tree, until `clear_disabled`."""
+    return state.read_json(state.path("disabled.json"), {})
+
+
+def disable(reviewer, reason):
+    """Best effort: a failed write is logged, never raised."""
+    try:
+        with state.locked("disabled"):
+            d = disabled()
+            d[reviewer] = {"reason": reason, "ts": time.time()}
+            state.write_json(state.path("disabled.json"), d)
+    except OSError as e:
+        state.log("reviewer not disabled", reviewer=reviewer, error=repr(e))
+
+
+def clear_disabled():
+    try:
+        with state.locked("disabled"):
+            state.write_json(state.path("disabled.json"), {})
+    except OSError as e:
+        state.log("disabled reviewers not cleared", error=repr(e))

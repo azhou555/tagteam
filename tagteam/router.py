@@ -3,7 +3,7 @@
 `ordered` mode takes the first N available from the list; `quota` mode scores the listed agents by headroom
 (reviewer-tier first, primaries only as overflow). Both go through `candidates`, the one place the list applies.
 """
-from . import harnesses, quota
+from . import harnesses, limits, quota
 
 LENSES = {
     "code": ["correctness", "tests", "design"],
@@ -26,9 +26,9 @@ def needed(kind, artifacts, rv):
 
 
 def candidates(author, cfg):
-    """Listed agents that are installed and not the author, in list order."""
-    have = harnesses.detected()
-    return [a for a in dict.fromkeys(cfg["reviewers"].get("use") or []) if a != author and a in have]
+    """Listed agents that are installed, enabled and not the author, in list order."""
+    have, off = harnesses.detected(), limits.disabled()
+    return [a for a in dict.fromkeys(cfg["reviewers"].get("use") or []) if a != author and a in have and a not in off]
 
 
 def eligible(author, cfg, headroom):

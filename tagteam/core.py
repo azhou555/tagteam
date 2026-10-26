@@ -3,7 +3,7 @@ import os
 import time
 import uuid
 
-from . import changes, classify, limits, live, quota, router, runner, state, verdict
+from . import changes, classify, limits, live, quota, router, runner, sandbox, state, verdict
 from .adapters import MARKER
 
 
@@ -142,20 +142,25 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag):
         state.log("not reviewed", run_id=run_id, reason=reason, headroom=hm)
         live.record_run(run)
         return "allow", completion(run, lines_changed), run_dir, []
-    cwd = s.get("repo") or ev.cwd
-    git_activity = changes.ref_activity(s["repo"], s["refs"], changes.refs(s["repo"])) \
-        if s.get("repo") and "refs" in s else []
-    jobs = {r: runner.build_prompt(r, ev.agent, cwd, s.get("prompt", ""), ts, rv["max_diff_chars"],
-                                   prior=s.get("prior") or None, author_reply=ev.last_message,
-                                   git_activity=git_activity)
-            for r, ts in plan.items()}
-    before = changes.snapshot(s["repo"]) if s.get("repo") else None
-    with live.tracking({"run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
-                        "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "reviewers": list(plan), "started": now,
-                        "expires": now + rv["deadline_s"] + 60}) as update:
-        outcomes = runner.run_all(jobs, cfg, cwd, run_dir, rv["deadline_s"], on_done=update)
-    if before and changes.snapshot(s["repo"]) != before:
-        state.log("WORKING TREE CHANGED DURING REVIEW", run_id=run_id, reviewers=list(plan))
+    repo = s.get("repo")
+    git_activity = changes.ref_activity(repo, s["refs"], changes.refs(repo)) if repo and "refs" in s else []
+    outside = sorted({p for p in s.get("touched", []) if os.path.isabs(p)} | {a["path"] for a in artifacts if os.path.isabs(a["path"])})
+    outside = [p for p in outside if not (repo and p.startswith(repo + os.sep))]
+    digests, before = {p: changes.file_digest(p) for p in outside}, changes.snapshot(repo) if repo else None
+    with sandbox.checkout(repo, before, repo or ev.cwd) as work:     # reviewers see the snapshot, never the real path
+        jobs = {r: runner.build_prompt(r, ev.agent, work, s.get("prompt", ""), ts, rv["max_diff_chars"],
+                                       prior=s.get("prior") or None, author_reply=ev.last_message,
+                                       git_activity=git_activity)
+                for r, ts in plan.items()}
+        with live.tracking({"run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
+                            "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "reviewers": list(plan),
+                            "started": now, "expires": now + rv["deadline_s"] + 60}) as update:
+            outcomes = runner.run_all(jobs, cfg, work, run_dir, rv["deadline_s"], on_done=update)
+    if sandbox.wrote(repo, before, digests):         # can't tell which reviewer wrote, so none stay trusted
+        state.log("REVIEWER WROTE TO THE REAL TREE; disabling this round's reviewers", run_id=run_id, reviewers=list(plan))
+        for r in plan:
+            limits.disable(r, f"wrote to the real tree during run {run_id}")
+        run["wrote_real_tree"] = True
     with state.locked("history"):
         for r, (meta, _) in outcomes.items():
             state.append_jsonl(state.path("history.jsonl"),
