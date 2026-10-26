@@ -38,11 +38,10 @@ def hook_entries(path):
     return out
 
 
-def author_part(name, h):
+def author_part(h, entries):
     """(text, healthy) for the author role; healthy is True when the role isn't configured."""
     if not h.author:
         return None, True
-    entries = hook_entries(h.hooks_path())
     if not entries:
         return "author – no hooks", True
     missing = sorted({t for e in entries for t in e if t.startswith("/") and not os.path.exists(t)})
@@ -75,11 +74,18 @@ def probe_one(name, cfg):
         changes.git(repo, "commit", "-qm", "init")
         tree = changes.snapshot(repo)
         reviewer, options = harnesses.get(name).reviewer, cfg["reviewers"].get(name, {})
-        with sandbox.checkout(repo, tree) as work, tempfile.TemporaryDirectory() as run_dir:
+        watch = sandbox.Watch(repo, tree)
+        with sandbox.checkout(repo, tree, cwd=repo) as work, tempfile.TemporaryDirectory() as run_dir:
             argv, stdin, out_file = reviewer.argv(PROBE_PROMPT, options, run_dir, PROBE_TIMEOUT_S)
             stdout, _, _, timed_out = runner._spawn(argv, stdin, work, PROBE_TIMEOUT_S)
-            if sandbox.dirty(work, tree):
+            after = watch.after()
+            if after["git"] or after["outside"] or after["repo"]["tree"] or after["repo"]["refs"]:
                 return "wrote-files"
+            try:
+                if changes.snapshot(work) != tree:
+                    return "wrote-files"
+            except (RuntimeError, OSError):
+                return "unknown (could not re-check the checkout)"
             if timed_out:
                 return "timeout"
             return "ok" if reviewer.parse(stdout, out_file) is not None else "failed"
@@ -92,8 +98,10 @@ def probe_one(name, cfg):
 def run(probe, clear):
     """Print one line per agent; return 0 if every configured role is healthy, else 1."""
     if clear:
+        was = limits.disabled()
         limits.clear_disabled()
-        print("cleared disabled reviewers")
+        print(f"cleared disabled reviewers: {', '.join(was)}" if was and not limits.disabled()
+              else "no disabled reviewers to clear" if not was else "could not clear disabled reviewers (see tagteam.log)")
     ok = True
     try:
         cfg = config.load()
@@ -106,18 +114,19 @@ def run(probe, clear):
         if name not in found:
             print(f"{name:8}not installed")
             continue
-        parts = []
-        for text, healthy in (author_part(name, h), reviewer_part(name, h, use, off)):
+        parts, entries = [], hook_entries(h.hooks_path())
+        for text, healthy in (author_part(h, entries), reviewer_part(name, h, use, off)):
             if text:
                 parts.append(text)
             ok &= healthy
-        configured = bool(hook_entries(h.hooks_path())) or name in use
+        configured = bool(entries) or name in use
         if h.logged_in() is False and configured:
             parts.append("✗ not logged in")
             ok = False
-        trust = h.hook_trust() if h.hook_trust and hook_entries(h.hooks_path()) else True
-        if trust is not True:
-            parts.append(f"{'⚠' if trust is False else '?'} approve hooks in {name} (/hooks)")
+        trust = h.hook_trust() if h.hook_trust and entries else "trusted"
+        if trust != "trusted":
+            parts.append({"unapproved": f"⚠ approve hooks in {name} (/hooks)",
+                          "stale": f"⚠ re-approve hooks in {name} (/hooks)"}.get(trust, f"? approve hooks in {name} (/hooks)"))
         print(f"{name:8}" + " · ".join(parts))
     if probe:
         for name in use:

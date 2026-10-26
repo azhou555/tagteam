@@ -5,6 +5,7 @@ import pathlib
 import re
 import tomllib
 
+from .. import state
 from . import base
 from .claude import install_claude_shaped, parse_claude_shaped, uninstall_claude_shaped
 
@@ -16,19 +17,61 @@ def logged_in():
     return base.signed_in_if(pathlib.Path.home() / ".codex" / "auth.json")
 
 
-def hook_trust():
-    """True if every tagteam hook has a trusted_hash record in config.toml, False if any lacks one, None if unreadable.
-    Presence only: the hash itself (canonical TOML sha256) is not recomputed, so an edited hook still reads as trusted."""
-    try:
-        hooks = json.loads(PATH.read_text()).get("hooks", {})
-        trusted = tomllib.loads(CONFIG.read_text()).get("hooks", {}).get("state", {})
-    except (OSError, ValueError):
-        return None
-    keys = [f"{PATH}:{re.sub(r'(?<!^)(?=[A-Z])', '_', event).lower()}:{i}:{j}"
+def snapshot_path():
+    return state.HOME / "codex-trust-at-install.json"
+
+
+def _our_keys():
+    hooks = json.loads(PATH.read_text()).get("hooks", {})
+    return [f"{PATH}:{re.sub(r'(?<!^)(?=[A-Z])', '_', event).lower()}:{i}:{j}"
             for event, groups in hooks.items() if isinstance(groups, list)
             for i, g in enumerate(groups) if base.ours(g)
             for j in range(len(g.get("hooks", [])))]
-    return all("trusted_hash" in (trusted.get(k) or {}) for k in keys) if keys else None
+
+
+def _records():
+    return tomllib.loads(CONFIG.read_text()).get("hooks", {}).get("state", {})
+
+
+def _hash(records, key):
+    h = (records.get(key) or {}).get("trusted_hash")
+    return h if isinstance(h, str) else None
+
+
+def save_trust_snapshot():
+    """Codex keys approvals by hook position, so rewriting a hook leaves its old approval in place but stale.
+    Remember which approvals existed at install so `hook_trust` can tell them from ones given after."""
+    try:
+        records = _records()
+        snap = {k: h for k in _our_keys() if (h := _hash(records, k))}
+        snapshot_path().parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path().write_text(json.dumps(snap, indent=2) + "\n")
+    except (OSError, ValueError):
+        pass
+
+
+def hook_trust():
+    """"unapproved" (a hook has no approval), "stale" (approval predates the last install, so Codex skips the
+    hook), "trusted", or None when we can't tell. Codex's own hash is never recomputed."""
+    try:
+        keys, records = _our_keys(), _records()
+    except (OSError, ValueError):
+        return None
+    if not keys:
+        return None
+    if any(_hash(records, k) is None for k in keys):
+        return "unapproved"
+    try:
+        snap = json.loads(snapshot_path().read_text())
+    except (OSError, ValueError):
+        return None
+    return "stale" if any(snap.get(k) == _hash(records, k) for k in keys) else "trusted"
+
+
+def install(entry_cmd, stop_timeout, dry_run):
+    install_claude_shaped("codex", PATH, entry_cmd, stop_timeout, dry_run)
+    if not dry_run:
+        save_trust_snapshot()
 
 
 def argv(prompt, options, workdir, deadline):
@@ -43,8 +86,7 @@ def argv(prompt, options, workdir, deadline):
 AUTHOR = base.Author(
     parse=lambda phase, payload: parse_claude_shaped("codex", payload),
     encode=lambda phase, verdict: base.encode(phase, verdict, notice=True),
-    install=lambda entry_cmd, stop_timeout, dry_run: install_claude_shaped("codex", PATH, entry_cmd, stop_timeout,
-                                                                           dry_run),
+    install=install,
     uninstall=lambda: uninstall_claude_shaped(PATH),
     can_block_at_stop=True, can_notice=True, has_plan_gate=False)
 REVIEWER = base.Reviewer(argv=argv, parse=lambda stdout, out_file: base.parse_wrapped(stdout, out_file),
