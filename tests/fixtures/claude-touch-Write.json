@@ -1,0 +1,26 @@
+{
+ "session_id": "dcfc2866-36cb-490d-9634-809fd1ea4b6b",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-claude-502--Users-user-Coding-40337e7b-e8f3-471f-8e7f-058105ab8706-scratchpad-spike-ws-claude/dcfc2866-36cb-490d-9634-809fd1ea4b6b.jsonl",
+ "cwd": "/tmp/spike/ws-claude",
+ "prompt_id": "0e240683-ba65-4bb1-aee1-1d5f01a11d14",
+ "permission_mode": "acceptEdits",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "Write",
+ "tool_input": {
+  "file_path": "/tmp/spike/ws-claude/hello.txt",
+  "content": "hi\n"
+ },
+ "tool_response": {
+  "type": "create",
+  "filePath": "/tmp/spike/ws-claude/hello.txt",
+  "content": "hi\n",
+  "structuredPatch": [],
+  "originalFile": null,
+  "userModified": false
+ },
+ "tool_use_id": "toolu_01Ah23BzQWJzAZVib53X388S",
+ "duration_ms": 4
+}

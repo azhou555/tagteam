@@ -1,0 +1,7 @@
+{
+ "hook_event_name": "UserPromptSubmit",
+ "session_id": "54df1a96-9619-4020-9805-43482464c960",
+ "timestamp": "2026-10-25T04:57:24.249Z",
+ "cwd": "/tmp/spike/ws-copilot",
+ "prompt": "xreview-spike: before finishing, append a new line BLOCKED-OK to hello.txt."
+}

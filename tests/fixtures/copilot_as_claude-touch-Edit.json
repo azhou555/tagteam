@@ -1,0 +1,12 @@
+{
+ "hook_event_name": "PostToolUse",
+ "session_id": "54df1a96-9619-4020-9805-43482464c960",
+ "timestamp": "2026-10-25T04:57:20.617Z",
+ "cwd": "/tmp/spike/ws-copilot",
+ "tool_name": "Edit",
+ "tool_input": "*** Begin Patch\n*** Add File: hello.txt\n+hi\n*** End Patch\n",
+ "tool_result": {
+  "result_type": "success",
+  "text_result_for_llm": "Added 1 file(s): /tmp/spike/ws-copilot/hello.txt"
+ }
+}

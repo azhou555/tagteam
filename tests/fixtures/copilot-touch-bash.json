@@ -1,0 +1,14 @@
+{
+ "sessionId": "54df1a96-9619-4020-9805-43482464c960",
+ "timestamp": 1792904241583,
+ "cwd": "/tmp/spike/ws-copilot",
+ "toolName": "bash",
+ "toolArgs": {
+  "command": "echo shell > b.txt",
+  "description": "Create b.txt with shell"
+ },
+ "toolResult": {
+  "resultType": "success",
+  "textResultForLlm": "\n<shellId: 0 completed with exit code 0>"
+ }
+}

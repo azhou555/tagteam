@@ -1,0 +1,11 @@
+{
+ "sessionId": "54df1a96-9619-4020-9805-43482464c960",
+ "timestamp": 1792904245634,
+ "cwd": "/tmp/spike/ws-copilot",
+ "toolName": "apply_patch",
+ "toolArgs": "*** Begin Patch\n*** Update File: hello.txt\n@@\n hi\n+BLOCKED-OK\n*** End Patch\n",
+ "toolResult": {
+  "resultType": "success",
+  "textResultForLlm": "Modified 1 file(s): /tmp/spike/ws-copilot/hello.txt"
+ }
+}

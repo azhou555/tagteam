@@ -1,0 +1,7 @@
+{
+ "hook_event_name": "UserPromptSubmit",
+ "session_id": "54df1a96-9619-4020-9805-43482464c960",
+ "timestamp": "2026-10-25T04:57:18.212Z",
+ "cwd": "/tmp/spike/ws-copilot",
+ "prompt": "Create a file hello.txt containing the line hi using your file-writing/editing tool. Then run the shell command: echo shell > b.txt . Then reply with just: done"
+}

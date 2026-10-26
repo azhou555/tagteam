@@ -1,0 +1,12 @@
+{
+ "artifactDirectoryPath": "/Users/user/.gemini/antigravity-cli/brain/fa02882c-f1ae-4e37-8830-f3dbbcaab6fa",
+ "conversationId": "fa02882c-f1ae-4e37-8830-f3dbbcaab6fa",
+ "initialNumSteps": 9,
+ "invocationNum": 4,
+ "lastUserInput": "Create a file hello.txt containing the line hi using your file-writing/editing tool. Then run the shell command: echo shell > b.txt . Then reply with just: done",
+ "modelName": "gemini-3.8-flash-high",
+ "transcriptPath": "/Users/user/.gemini/antigravity-cli/brain/fa02882c-f1ae-4e37-8830-f3dbbcaab6fa/.system_generated/logs/transcript_full.jsonl",
+ "workspacePaths": [
+  "/tmp/spike/ws-agy"
+ ]
+}

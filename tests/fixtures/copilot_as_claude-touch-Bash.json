@@ -1,0 +1,15 @@
+{
+ "hook_event_name": "PostToolUse",
+ "session_id": "54df1a96-9619-4020-9805-43482464c960",
+ "timestamp": "2026-10-25T04:57:21.583Z",
+ "cwd": "/tmp/spike/ws-copilot",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "echo shell > b.txt",
+  "description": "Create b.txt with shell"
+ },
+ "tool_result": {
+  "result_type": "success",
+  "text_result_for_llm": "\n<shellId: 0 completed with exit code 0>"
+ }
+}

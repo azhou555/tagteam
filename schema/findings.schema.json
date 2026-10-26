@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "findings"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["approve", "changes_requested"]},
+    "summary": {"type": "string"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "file", "line", "claim", "evidence", "suggested_fix", "confidence"],
+        "properties": {
+          "severity": {"type": "string", "enum": ["blocker", "major", "minor", "nit"]},
+          "file": {"type": "string"},
+          "line": {"type": ["integer", "null"]},
+          "claim": {"type": "string"},
+          "evidence": {"type": "string"},
+          "suggested_fix": {"type": "string"},
+          "confidence": {"type": "number"}
+        }
+      }
+    }
+  }
+}

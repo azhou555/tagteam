@@ -1,0 +1,9 @@
+#!/bin/sh
+# Claude Code status line wrapper: caches the stdin JSON (it carries rate_limits) for tagteam's
+# quota reader, then runs the user's original status line command unchanged.
+in=$(cat)
+q="${TAGTEAM_HOME:-$HOME/.tagteam}/state/quota"
+mkdir -p "$q" && printf '%s' "$in" > "$q/claude.json.$$" && mv "$q/claude.json.$$" "$q/claude.json"
+orig="${TAGTEAM_HOME:-$HOME/.tagteam}/statusline.orig"
+[ -s "$orig" ] && printf '%s' "$in" | sh -c "$(cat "$orig")"
+exit 0
