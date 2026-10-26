@@ -3,7 +3,7 @@ import os
 import time
 import uuid
 
-from . import changes, classify, quota, router, runner, state, verdict
+from . import changes, classify, live, quota, router, runner, state, verdict
 from .adapters import MARKER
 
 
@@ -20,6 +20,7 @@ def turn_start(ev, cfg):
         state.write_json(_session_file(ev), {
             "turn_id": ev.turn_id or uuid.uuid4().hex[:12], "started": time.time(), "cwd": ev.cwd,
             "repo": repo, "baseline": changes.snapshot(repo) if repo else None,
+            "refs": changes.refs(repo) if repo else {},
             "prompt": ev.prompt, "round": 0, "touched": [], "reviewed_digests": {}, "prior": [],
         })
     return None
@@ -61,8 +62,20 @@ def load_map(now):
     return load
 
 
+def completion(run, lines_changed):
+    """One line for the user when a review lets the turn through."""
+    if not run["reviewers"]:
+        return f"{MARKER} {live.summary(run)} (quota or cooldown); this turn was not reviewed"
+    done = [r for r in run["reviewers"] if r not in run["failed"]]
+    msg = f"{MARKER} {live.summary(run)}"
+    if done:
+        msg += f" · {', '.join(done)} reviewed {lines_changed} changed lines in {run['duration']:.0f}s"
+    return msg + (f" · unavailable: {', '.join(run['failed'])}" if run["failed"] else "")
+
+
 def review(ev, cfg, s, artifacts, round_no, run_tag):
-    """Route, run, decide. Returns (action, message, run_dir, blocking)."""
+    """Route, run, decide. Returns (action, message, run_dir, blocking); message is the block reason or,
+    on allow, a one-line completion notice."""
     now = time.time()
     rv = cfg["review"]
     groups = {}
@@ -79,15 +92,26 @@ def review(ev, cfg, s, artifacts, round_no, run_tag):
                                for t in ts] for r, ts in plan.items()},
                "artifacts": [{k: a[k] for k in ("path", "kind", "status", "lines_changed", "risk")} for a in artifacts]}
     state.write_json(run_dir / "request.json", request)
+    run = {"ts": now, "run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
+           "round": round_no, "reviewers": list(plan), "action": "allow", "blocking": 0, "advisory": 0,
+           "failed": [], "duration": 0.0}
+    lines_changed = sum(a["lines_changed"] for a in artifacts)
     if not plan:
         state.log("no eligible reviewers", run_id=run_id, headroom=hm)
-        return "allow", None, run_dir, []
+        live.record_run(run)
+        return "allow", completion(run, lines_changed), run_dir, []
     cwd = s.get("repo") or ev.cwd
+    git_activity = changes.ref_activity(s["repo"], s["refs"], changes.refs(s["repo"])) \
+        if s.get("repo") and "refs" in s else []
     jobs = {r: runner.build_prompt(r, ev.agent, cwd, s.get("prompt", ""), ts, rv["max_diff_chars"],
-                                   prior=s.get("prior") or None, author_reply=ev.last_message)
+                                   prior=s.get("prior") or None, author_reply=ev.last_message,
+                                   git_activity=git_activity)
             for r, ts in plan.items()}
     before = changes.snapshot(s["repo"]) if s.get("repo") else None
-    outcomes = runner.run_all(jobs, cfg, cwd, run_dir, rv["deadline_s"])
+    with live.tracking({"run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
+                        "round": round_no, "max_rounds": rv["max_rounds"], "reviewers": list(plan), "started": now,
+                        "expires": now + rv["deadline_s"] + 60}) as update:
+        outcomes = runner.run_all(jobs, cfg, cwd, run_dir, rv["deadline_s"], on_done=update)
     if before and changes.snapshot(s["repo"]) != before:
         state.log("WORKING TREE CHANGED DURING REVIEW", run_id=run_id, reviewers=list(plan))
     with state.locked("history"):
@@ -101,7 +125,10 @@ def review(ev, cfg, s, artifacts, round_no, run_tag):
     msg = verdict.message(plan, blocking, advisory, round_no, rv["max_rounds"], failed)
     state.write_json(run_dir / "verdict.json", {"action": action, "blocking": blocking, "advisory": advisory,
                                                 "failed": failed, "message": msg})
-    return action, msg, run_dir, blocking
+    run.update(action=action, blocking=len(blocking), advisory=len(advisory), failed=failed,
+               duration=round(time.time() - now, 1))
+    live.record_run(run)
+    return action, msg if action == "block" else completion(run, lines_changed), run_dir, blocking
 
 
 def turn_end(ev, cfg):
@@ -131,7 +158,7 @@ def turn_end(ev, cfg):
         s["touched"] = []
         state.write_json(sf, s)
     state.log("review", run=str(run_dir), action=action, author=ev.agent, round=round_no)
-    return {"action": "block", "message": msg} if action == "block" else None
+    return {"action": action, "message": msg}
 
 
 def plan_gate(ev, cfg):
@@ -150,7 +177,7 @@ def plan_gate(ev, cfg):
         if cur:
             cur["plan_rounds"] = gate_rounds
             state.write_json(_session_file(ev), cur)
-    return {"action": "block", "message": msg} if action == "block" else None
+    return {"action": action, "message": msg}
 
 
 HANDLERS = {"turn-start": turn_start, "touch": touch, "turn-end": turn_end, "plan-gate": plan_gate}

@@ -83,3 +83,44 @@ def outside_changes(paths, digests, ignore):
                     "lines_changed": text.count("\n") + 1 if text else 0,
                     "diff": f"(full content of {p})\n{text}"})
     return out
+
+
+def refs(repo):
+    """{refname: sha} for every ref, plus HEAD when detached."""
+    out = {}
+    for line in git(repo, "for-each-ref", "--format=%(refname) %(objectname)").splitlines():
+        name, sha = line.rsplit(" ", 1)
+        out[name] = sha
+    if git(repo, "symbolic-ref", "-q", "HEAD", check=False) == "":
+        head = git(repo, "rev-parse", "-q", "--verify", "HEAD", check=False).strip()
+        if head:
+            out["HEAD"] = head
+    return out
+
+
+def _log(repo, *rev_args, limit=10):
+    return git(repo, "log", "--oneline", "--no-decorate", f"-{limit}", *rev_args, check=False).strip().splitlines()
+
+
+def ref_activity(repo, old, new):
+    """Readable lines describing ref moves between two `refs()` maps: commits, rewrites, pushes, deletions."""
+    lines = []
+    for name in sorted(set(old) | set(new)):
+        a, b = old.get(name), new.get(name)
+        if a == b:
+            continue
+        if a is None:
+            lines.append(f"created {name} at {b[:7]}")
+        elif b is None:
+            lines.append(f"deleted {name} (was {a[:7]})")
+        elif subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", a, b],
+                            capture_output=True).returncode == 0:
+            commits = _log(repo, f"{a}..{b}")
+            n = git(repo, "rev-list", "--count", f"{a}..{b}").strip()
+            lines.append(f"{name}: {a[:7]} -> {b[:7]}, {n} new commit(s)"
+                         + "".join(f"\n    {c}" for c in commits))
+        else:
+            commits = _log(repo, b, "--not", a)
+            lines.append(f"{name}: REWRITTEN {a[:7]} -> {b[:7]} (not a fast-forward; old history replaced)"
+                         + "".join(f"\n    {c}" for c in commits))
+    return lines

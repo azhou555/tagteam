@@ -10,6 +10,7 @@ Design and verification notes: [DESIGN.md](DESIGN.md).
 
 ```sh
 ./bin/tagteam install          # merge-only; backups saved next to each config as *.tagteam-bak-<time>
+                               # re-run after updating tagteam: it refreshes the status line command
 ./bin/tagteam install --dry-run
 ```
 
@@ -20,8 +21,22 @@ Codex will not run new hooks until you do.
 
 Nothing to do. Work normally in any of the four agents. A review runs when a turn ends with at least
 5 changed lines (any change in later rounds). Findings arrive as a message starting with `[tagteam]`.
+In Claude Code and Codex, a review that passes also prints one line, such as
+`[tagteam] ✓ clean · copilot reviewed 13 changed lines in 7s`.
+
+Reviewers also see the turn's git activity (new commits, rewritten history, pushes). Git activity alone
+never starts a review.
+
+In Claude Code, the status line gets a tagteam line under your own status line. It updates every 2s:
+
+```
+tagteam ⟳ reviewing changes 1/2 · copilot ✓ 11s · agy … 1m12s    while a review runs
+tagteam ✓ clean (2 minor) · 4 reviews today                       last result in this session
+tagteam ✗ 2 blocking · 4 reviews today · ⚠ 1 hook error (24h)     hook errors mean reviews were skipped
+```
 
 ```sh
+./bin/tagteam watch            # live view for a spare tab: running reviews, today's counts, last runs
 ./bin/tagteam status           # headroom per agent, review counts and share, recent runs
 TAGTEAM=off claude             # skip reviews for one session
 touch <repo>/.tagteam-off      # skip reviews in one repo

@@ -22,10 +22,15 @@ AGY_NOTE = ("\nIMPORTANT: shell/terminal commands are disabled in this session a
             "tools if you must read more.")
 
 
-def build_prompt(reviewer, author, repo, intent, tasks, max_chars, prior=None, author_reply=""):
+def build_prompt(reviewer, author, repo, intent, tasks, max_chars, prior=None, author_reply="", git_activity=()):
     parts = [RUBRICS["preamble"].format(reviewer=reviewer, author=author, repo=repo)]
     if intent:
         parts.append(f"The user's request this turn:\n<request>\n{intent[:4000]}\n</request>")
+    if git_activity:
+        parts.append("## Git activity this turn\nThe diffs below show only working-tree changes. The author also moved "
+                     "these git refs (already done: commits, history rewrites, and pushes, which show up as "
+                     "refs/remotes/* moves). Don't report as missing work that this already shows.\n"
+                     + "\n".join(f"- {line}" for line in git_activity)[:4000])
     n_arts = sum(len(t["artifacts"]) for t in tasks) or 1
     budget = max_chars // n_arts
     for t in tasks:
@@ -160,8 +165,16 @@ def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
     return rec, result
 
 
-def run_all(jobs, cfg, cwd, run_dir, deadline):
-    """jobs: {reviewer: prompt}. Runs in parallel; returns {reviewer: (meta, result)}."""
+def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
+    """jobs: {reviewer: prompt}. Runs in parallel; returns {reviewer: (meta, result)}.
+
+    on_done(reviewer, meta) is called from this thread as each reviewer finishes.
+    """
+    out = {}
     with cf.ThreadPoolExecutor(max_workers=max(1, len(jobs))) as ex:
         futs = {ex.submit(run_one, a, cfg, p, cwd, deadline, run_dir): a for a, p in jobs.items()}
-        return {futs[f]: f.result() for f in cf.as_completed(futs)}
+        for f in cf.as_completed(futs):
+            out[futs[f]] = f.result()
+            if on_done:
+                on_done(futs[f], out[futs[f]][0])
+    return out

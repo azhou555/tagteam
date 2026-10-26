@@ -15,6 +15,8 @@ CODEX = H / ".codex" / "hooks.json"
 COPILOT = H / ".copilot" / "hooks" / "tagteam.json"
 AGY = H / ".gemini" / "config" / "hooks.json"
 STATUSLINE_ORIG = state.HOME / "statusline.orig"
+STATUSLINE_ORIG_REFRESH = state.HOME / "statusline.orig-refresh"   # user's refreshInterval before ours, or empty
+REFRESH_S = 2                                                       # ticks the status line during a blocking review
 TOUCH_MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash"
 
 
@@ -96,20 +98,28 @@ def install(agents, dry_run=False):
             "Stop": [{"type": "command", "command": cmd("agy", "turn-end"), "timeout": stop_timeout}],
         }
         _save(AGY, data, dry_run)
+    if not dry_run:
+        from . import live
+        n = live.backfill()
+        if n:
+            print(f"seeded {n} past reviews into {state.path('runs.jsonl')}")
     if "codex" in agents and not dry_run:
         print("\nCodex: open `codex`, run /hooks, and approve the 3 tagteam hooks (Codex will not run "
               "new hooks until you trust them).")
 
 
 def _wrap_statusline(data, dry_run):
+    """Idempotent: re-running over an existing wrapper still upgrades its command and refreshInterval."""
     sl = data.get("statusLine") or {}
-    wrapper = f"sh '{state.ROOT / 'bin' / 'tagteam-statusline'}'"
-    if sl.get("command") == wrapper:
-        return
+    wrapper = f"sh '{state.ROOT / 'bin' / 'tagteam-statusline'}' '{sys.executable}'"
     if not dry_run:
         STATUSLINE_ORIG.parent.mkdir(parents=True, exist_ok=True)
-        STATUSLINE_ORIG.write_text(sl.get("command", ""))
-    data["statusLine"] = {**sl, "type": "command", "command": wrapper}
+        if "tagteam-statusline" not in sl.get("command", ""):
+            STATUSLINE_ORIG.write_text(sl.get("command", ""))
+        if not STATUSLINE_ORIG_REFRESH.exists():     # first install with this field: what's there now is the user's
+            STATUSLINE_ORIG_REFRESH.write_text(str(sl.get("refreshInterval", "")))
+    refresh = min(sl["refreshInterval"], REFRESH_S) if "refreshInterval" in sl else REFRESH_S
+    data["statusLine"] = {**sl, "type": "command", "command": wrapper, "refreshInterval": refresh}
 
 
 def uninstall():
@@ -119,10 +129,16 @@ def uninstall():
             _strip(data.get("hooks", {}))
             if p == CLAUDE and "tagteam-statusline" in (data.get("statusLine") or {}).get("command", ""):
                 orig = STATUSLINE_ORIG.read_text() if STATUSLINE_ORIG.exists() else ""
+                refresh = STATUSLINE_ORIG_REFRESH.read_text() if STATUSLINE_ORIG_REFRESH.exists() else ""
                 if orig:
                     data["statusLine"]["command"] = orig
+                    if refresh:
+                        data["statusLine"]["refreshInterval"] = int(refresh)
+                    else:
+                        data["statusLine"].pop("refreshInterval", None)
                 else:
                     data.pop("statusLine")
+                STATUSLINE_ORIG_REFRESH.unlink(missing_ok=True)
             _save(p, data, False)
     if COPILOT.exists():
         COPILOT.unlink()

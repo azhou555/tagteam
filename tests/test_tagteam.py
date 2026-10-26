@@ -5,6 +5,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -12,7 +13,7 @@ TMP_HOME = tempfile.mkdtemp(prefix="tagteam-test-")
 os.environ["TAGTEAM_HOME"] = TMP_HOME
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from tagteam import adapters, changes, classify, core, router, runner, state, verdict  # noqa: E402
+from tagteam import adapters, changes, classify, core, install, live, router, runner, state, verdict  # noqa: E402
 
 FIX = pathlib.Path(__file__).parent / "fixtures"
 CFG = state.load_config()
@@ -239,6 +240,7 @@ class EndToEnd(unittest.TestCase):
     def setUp(self):
         self.repo = make_repo()
         self.calls = []
+        self.seen_active = []
         self.p = mock.patch.object(core, "headroom_map", return_value=FULL)
         self.p.start()
 
@@ -246,10 +248,14 @@ class EndToEnd(unittest.TestCase):
         self.p.stop()
 
     def fake_run_all(self, results):
-        def run_all(jobs, cfg, cwd, run_dir, deadline):
+        def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
             self.calls.append(jobs)
-            return {r: ({"reviewer": r, "ok": True, "duration": 1}, results.get(r, {"verdict": "approve", "summary": "",
-                                                                                  "findings": []})) for r in jobs}
+            self.seen_active.append(live.active())
+            out = {r: ({"reviewer": r, "ok": True, "duration": 1}, results.get(r, {"verdict": "approve", "summary": "",
+                                                                                 "findings": []})) for r in jobs}
+            for r, (meta, _) in out.items():
+                on_done(r, meta)
+            return out
         return run_all
 
     def claude(self, event, **kw):
@@ -270,7 +276,7 @@ class EndToEnd(unittest.TestCase):
         pathlib.Path(self.repo, "feature.py").write_text("def f(x):\n    return x[0] if x else None\n" * 4)
         with mock.patch.object(runner, "run_all", self.fake_run_all({})):
             out = self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=True, last_assistant_message="fixed"))
-        self.assertEqual(out, {})
+        self.assertTrue(out["systemMessage"].startswith("[tagteam] ✓ clean"), out)
         prompt = next(iter(self.calls[1].values()))
         self.assertIn("Round 2", prompt)
         self.assertIn("fixed", prompt)
@@ -318,6 +324,231 @@ class EndToEnd(unittest.TestCase):
         pathlib.Path(self.repo, "f.py").write_text("a = 1\n" * 20)
         with mock.patch.object(runner, "run_all", side_effect=RuntimeError("boom")):
             self.assertEqual(self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False)), {})
+        self.assertEqual(live.active(), [])                    # crash still clears the running record
+
+    def test_review_is_live_while_running_then_recorded(self):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="x"))
+        pathlib.Path(self.repo, "f.py").write_text("a = 1\n" * 20)
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            out = self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        [running] = self.seen_active[0]
+        self.assertEqual((running["author"], running["session_id"], running["round"]), ("claude", "sess1", 1))
+        self.assertEqual(live.active(), [])
+        last = state.read_jsonl(state.path("runs.jsonl"))[-1]
+        self.assertEqual((last["author"], last["session_id"], last["action"]), ("claude", "sess1", "allow"))
+        self.assertIn("reviewed 20 changed lines", out["systemMessage"])
+        self.assertTrue(live.segment("claude", "sess1").startswith("tagteam ✓ clean · "))
+
+    def test_git_activity_reaches_prompt_but_never_triggers_review(self):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="commit it"))
+        sh(self.repo, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "c2")
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            self.assertEqual(self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False)), {})
+        self.assertEqual(self.calls, [])                       # ref move alone: no review
+        pathlib.Path(self.repo, "f.py").write_text("a = 1\n" * 20)
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        prompt = next(iter(self.calls[0].values()))
+        self.assertIn("## Git activity this turn", prompt)
+        self.assertIn("1 new commit(s)", prompt)
+        self.assertIn("c2", prompt)
+
+    def test_copilot_allow_stays_silent(self):
+        p = {"sessionId": "c2", "cwd": self.repo, "prompt": "write code"}
+        self.run_hook("copilot", "turn-start", p)
+        pathlib.Path(self.repo, "c.py").write_text("z = 1\n" * 20)
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            self.assertEqual(self.run_hook("copilot", "turn-end", {"sessionId": "c2", "cwd": self.repo}), {})
+
+
+class GitActivity(unittest.TestCase):
+    def commit(self, repo, msg):
+        sh(repo, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", msg)
+
+    def test_commit_rewrite_push_delete(self):
+        repo = make_repo()
+        remote = tempfile.mkdtemp()
+        sh(remote, "git", "init", "-q", "--bare")
+        sh(repo, "git", "remote", "add", "origin", remote)
+        sh(repo, "git", "branch", "doomed")
+        sh(repo, "git", "push", "-q", "origin", "HEAD")
+        old = changes.refs(repo)
+        self.commit(repo, "second")
+        sh(repo, "git", "push", "-q", "origin", "HEAD")
+        self.commit(repo, "third")
+        sh(repo, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--amend", "--allow-empty",
+           "-m", "third amended")
+        sh(repo, "git", "branch", "-q", "-D", "doomed")
+        out = "\n".join(changes.ref_activity(repo, old, changes.refs(repo)))
+        branch = subprocess.run(["git", "branch", "--show-current"], cwd=repo, capture_output=True,
+                                text=True).stdout.strip()
+        self.assertIn(f"refs/heads/{branch}: ", out)
+        self.assertIn("2 new commit(s)", out)                   # second + third amended, relative to old
+        self.assertIn("third amended", out)
+        self.assertIn(f"refs/remotes/origin/{branch}: ", out)   # the push
+        self.assertIn("deleted refs/heads/doomed", out)
+        mid = changes.refs(repo)
+        sh(repo, "git", "reset", "-q", "--hard", "HEAD~1")
+        self.commit(repo, "replacement")
+        self.assertIn("REWRITTEN", "\n".join(changes.ref_activity(repo, mid, changes.refs(repo))))
+
+
+class Live(unittest.TestCase):
+    def setUp(self):
+        for p in [state.path("runs.jsonl"), state.path("status.json"), *live._active_dir().glob("*")]:
+            p.unlink(missing_ok=True)
+
+    def rec(self, run_id="r1", **kw):
+        now = time.time()
+        return {"run_id": run_id, "author": "claude", "session_id": "s", "tag": "turn", "round": 1,
+                "max_rounds": 2, "reviewers": ["copilot", "agy"], "started": now, "expires": now + 300, **kw}
+
+    def done_run(self, **kw):
+        return {"ts": time.time(), "run_id": "x", "author": "claude", "session_id": "s", "tag": "turn", "round": 1,
+                "reviewers": ["copilot"], "action": "allow", "blocking": 0, "advisory": 0, "failed": [],
+                "duration": 3.0, **kw}
+
+    def test_tracking_lifecycle_and_progress(self):
+        with live.tracking(self.rec()) as update:
+            update("copilot", {"ok": True, "duration": 11})
+            [r] = live.active()
+            self.assertEqual(r["reviewers"]["copilot"], {"state": "done", "secs": 11})
+            seg = live.segment("claude", "s")
+            self.assertIn("tagteam ⟳ reviewing changes 1/2", seg)
+            self.assertIn("copilot ✓ 11s", seg)
+            self.assertIn("agy …", seg)
+            self.assertEqual(live.segment("claude", "other").count("+1 running elsewhere"), 1)
+        self.assertEqual(live.active(), [])
+        with self.assertRaises(RuntimeError), live.tracking(self.rec("r2")):
+            raise RuntimeError("boom")
+        self.assertEqual(list(live._active_dir().glob("*")), [])
+
+    def test_killed_owner_and_expired_record_are_stale(self):
+        code = ("import os, signal, sys; sys.path.insert(0, sys.argv[1]); from tagteam import live; "
+                "cm = live.tracking(eval(sys.argv[2])); cm.__enter__(); os.kill(os.getpid(), signal.SIGKILL)")
+        subprocess.run([sys.executable, "-c", code, str(state.ROOT), repr(self.rec("dead"))])
+        self.assertTrue((live._active_dir() / "dead.json").exists())     # SIGKILL skipped cleanup
+        self.assertEqual(live.active(), [])
+        self.assertFalse((live._active_dir() / "dead.json").exists())
+        with live.tracking(self.rec("old", expires=time.time() - 1)):
+            self.assertEqual(live.active(), [])                          # backstop even while lock is held
+
+    def test_concurrent_finishes_are_all_counted(self):
+        code = ("import sys, time; sys.path.insert(0, sys.argv[1]); from tagteam import live; "
+                "live.record_run(dict(ts=time.time(), run_id=sys.argv[2], author='codex', session_id=sys.argv[2], "
+                "tag='turn', round=1, reviewers=['agy'], action='allow', blocking=0, advisory=0, failed=[], "
+                "duration=1.0))")
+        procs = [subprocess.Popen([sys.executable, "-c", code, str(state.ROOT), f"p{i}"]) for i in range(12)]
+        for pr in procs:
+            pr.wait()
+        self.assertEqual(len(state.read_jsonl(state.path("runs.jsonl"))), 12)
+        s = state.read_json(state.path("status.json"))
+        self.assertEqual((s["today"], len(s["sessions"])), (12, 12))
+
+    def test_idle_segments(self):
+        self.assertEqual(live.segment("claude", "s"), "tagteam · 0 reviews today")
+        live.record_run(self.done_run(advisory=2))
+        self.assertEqual(live.segment("claude", "s"), "tagteam ✓ clean (2 minor) · 1 review today")
+        live.record_run(self.done_run(action="block", blocking=2))
+        live.note_error()
+        self.assertEqual(live.segment("claude", "s"), "tagteam ✗ 2 blocking · 2 reviews today · ⚠ 1 hook error (24h)")
+        live.record_run(self.done_run(failed=["copilot"]))
+        self.assertIn("⚠ all reviewers failed", live.segment("claude", "s"))
+        live.record_run(self.done_run(reviewers=[]))
+        self.assertIn("⚠ no reviewer available", live.segment("claude", "s"))
+        self.assertEqual(live.segment("claude", "never-reviewed"), "tagteam · 4 reviews today · ⚠ 1 hook error (24h)")
+
+    def test_yesterday_does_not_count_today(self):
+        live.record_run(self.done_run(ts=time.time() - 2 * 86400), now=time.time() - 2 * 86400)
+        self.assertIn("0 reviews today", live.segment("claude", "s"))
+        live.record_run(self.done_run(ts=time.time() - 86400))      # started yesterday, finished now
+        self.assertIn("1 review today", live.segment("claude", "s"))
+
+    def test_backfill_of_older_days_reads_as_zero_today(self):
+        with mock.patch.object(state, "STATE", pathlib.Path(tempfile.mkdtemp())):
+            for name in ("20200101T120000-aaaa", "20200102T120000-bbbb"):
+                state.write_json(state.path("runs", name, "request.json"),
+                                 {"author": "claude", "session_id": "s", "assignments": {"copilot": []}})
+                state.write_json(state.path("runs", name, "verdict.json"), {"action": "block", "blocking": [{}]})
+            self.assertEqual(live.backfill(), 2)
+            self.assertEqual(state.read_json(state.path("status.json"))["day"], "2020-01-02")   # stored day is old
+            self.assertEqual(live.segment("claude", "s"), "tagteam ✗ 1 blocking · 0 reviews today")
+            self.assertEqual(live.backfill(), 0)                                               # once only
+
+    def test_watch_render(self):
+        live.record_run(self.done_run(author="copilot", reviewers=["agy"], action="block", blocking=1))
+        live.record_run(self.done_run())
+        with live.tracking(self.rec()):
+            out = live.render_watch()
+        self.assertIn("Running (1):", out)
+        self.assertIn("Reviews today: 2", out)
+        self.assertIn("copilot 1", out)
+        self.assertIn("✗ 1 blocking", out)
+
+    def test_statusline_entry_reads_stdin(self):
+        live.record_run(self.done_run(session_id="abc"))
+        r = subprocess.run([sys.executable, "-m", "tagteam.live"], input=json.dumps({"session_id": "abc"}),
+                           capture_output=True, text=True, cwd=state.ROOT)
+        self.assertEqual(r.stdout.strip(), "tagteam ✓ clean · 1 review today")
+        r = subprocess.run([sys.executable, "-m", "tagteam.live"], input="not json", capture_output=True,
+                           text=True, cwd=state.ROOT)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+
+
+class Encode(unittest.TestCase):
+    def test_allow_notice_only_for_claude_shaped(self):
+        v = {"action": "allow", "message": "[tagteam] ✓ clean"}
+        for agent in ("claude", "codex"):
+            self.assertEqual(json.loads(adapters.encode(agent, "turn-end", v)), {"systemMessage": "[tagteam] ✓ clean"})
+        self.assertEqual(json.loads(adapters.encode("claude", "plan-gate", v)), {"systemMessage": "[tagteam] ✓ clean"})
+        for agent in ("copilot", "agy"):
+            self.assertEqual(adapters.encode(agent, "turn-end", v), "{}")
+        self.assertEqual(adapters.encode("claude", "turn-end", None), "{}")
+        self.assertEqual(json.loads(adapters.encode("claude", "turn-end", {"action": "block", "message": "m"})),
+                         {"decision": "block", "reason": "m"})
+
+
+class Install(unittest.TestCase):
+    def setUp(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.settings = d / "settings.json"
+        patches = {"CLAUDE": self.settings, "CODEX": d / "codex.json", "COPILOT": d / "copilot.json",
+                   "AGY": d / "agy.json", "STATUSLINE_ORIG": d / "sl.orig", "STATUSLINE_ORIG_REFRESH": d / "sl.refresh"}
+        self.ps = [mock.patch.object(install, k, v) for k, v in patches.items()]
+        for x in self.ps:
+            x.start()
+
+    def tearDown(self):
+        for x in self.ps:
+            x.stop()
+
+    def roundtrip(self, statusline):
+        self.settings.write_text(json.dumps({"statusLine": statusline}))
+        with mock.patch("builtins.print"):
+            install.install(["claude"])
+            first = json.loads(self.settings.read_text())["statusLine"]
+            install.install(["claude"])                        # re-install over our own wrapper
+            again = json.loads(self.settings.read_text())["statusLine"]
+            install.uninstall()
+        return first, again, json.loads(self.settings.read_text())["statusLine"]
+
+    def test_refresh_added_and_removed(self):
+        first, again, after = self.roundtrip({"type": "command", "command": "ponytail"})
+        self.assertIn("tagteam-statusline", first["command"])
+        self.assertEqual((first["refreshInterval"], again), (2, first))
+        self.assertEqual(after, {"type": "command", "command": "ponytail"})
+
+    def test_users_refresh_restored(self):
+        first, _, after = self.roundtrip({"type": "command", "command": "ponytail", "refreshInterval": 10})
+        self.assertEqual(first["refreshInterval"], 2)
+        self.assertEqual(after, {"type": "command", "command": "ponytail", "refreshInterval": 10})
+
+    def test_upgrade_from_old_wrapper_keeps_original_command(self):
+        install.STATUSLINE_ORIG.write_text("ponytail")
+        old = {"type": "command", "command": f"sh '{state.ROOT / 'bin' / 'tagteam-statusline'}'"}
+        first, _, after = self.roundtrip(old)
+        self.assertEqual(first["refreshInterval"], 2)
+        self.assertEqual(after, {"type": "command", "command": "ponytail"})
 
 
 if __name__ == "__main__":

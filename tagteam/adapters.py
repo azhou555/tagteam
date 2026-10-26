@@ -121,10 +121,15 @@ def parse(agent, phase, payload):
 
 
 def encode(agent, phase, verdict):
-    """verdict: None (allow / no-op) or {"action": "block", "message": str}."""
-    if not verdict or verdict.get("action") != "block":
+    """verdict: None (no-op) or {"action": "block" | "allow", "message": str}.
+
+    An allow message is a notice for the user; only Claude-shaped agents have a field to show it.
+    """
+    if not verdict:
         return "{}"
     msg = verdict["message"]
+    if verdict["action"] != "block":
+        return json.dumps({"systemMessage": msg}) if msg and agent in ("claude", "codex") else "{}"
     if phase == "plan-gate":
         return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                                   "permissionDecision": "deny",
