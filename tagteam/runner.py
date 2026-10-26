@@ -78,7 +78,11 @@ def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
         prompt += "\n\nYour previous attempt ran a shell command, was denied, and produced nothing. Do not run any."
     rec = {"reviewer": agent, "ok": result is not None, "timed_out": timed_out, "rc": rc, "attempts": attempt,
            "duration": round(time.time() - t0, 1)}
-    usage = reviewer.usage(stdout, workdir)
+    try:
+        usage = reviewer.usage(stdout, workdir)
+    except Exception as e:                           # spend is best-effort; never fail a review over it
+        state.log("usage parse failed", reviewer=agent, error=repr(e))
+        usage = {}
     if usage:
         rec["usage"] = usage
     if "premium_requests" in usage:

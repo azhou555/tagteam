@@ -105,7 +105,7 @@ def status(days):
     for a, b in sorted(by.items(), key=lambda kv: -kv[1]["n"]):
         share = b["n"] / len(hist)
         print(f"  {a:8} {b['n']:4} ({share:.0%})  failed {b['fail']}  avg {b['secs'] / b['n']:.0f}s")
-    print(f"\n{live.week_line(now)}")
+    print("\n" + "\n".join(live.week_lines(now)))
     running = live.active(now)
     if running:
         print("\nRunning now:")

@@ -1,4 +1,5 @@
 {
+ "_note": "synthetic: documented shape, not captured",
  "stdout": "{\"type\": \"result\", \"subtype\": \"success\", \"is_error\": false, \"duration_ms\": 4123, \"duration_api_ms\": 3987, \"num_turns\": 1, \"result\": \"\", \"structured_output\": {\"verdict\": \"approve\", \"summary\": \"ok\", \"findings\": []}, \"session_id\": \"00000000-0000-0000-0000-000000000000\", \"total_cost_usd\": 0.0421, \"usage\": {\"input_tokens\": 12, \"cache_creation_input_tokens\": 8210, \"cache_read_input_tokens\": 0, \"output_tokens\": 187, \"service_tier\": \"standard\"}}",
  "files": {},
  "expected": {

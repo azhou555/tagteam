@@ -44,7 +44,10 @@ def argv(prompt, options, workdir, deadline):
 
 def usage(stdout, workdir):
     data = state.read_json(os.path.join(workdir, "usage.json"))
-    return {"premium_requests": data.get("totalPremiumRequestCost", 1)} if data else {}
+    if not isinstance(data, dict) or not data:
+        return {}
+    n = data.get("totalPremiumRequestCost", 1)
+    return {"premium_requests": n} if isinstance(n, (int, float)) and not isinstance(n, bool) else {}
 
 
 AUTHOR = base.Author(
