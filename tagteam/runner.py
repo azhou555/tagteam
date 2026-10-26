@@ -9,10 +9,10 @@ import tempfile
 import time
 import tomllib
 
-from . import quota, state
+from . import quota, resources, state
 
-RUBRICS = tomllib.loads((state.ROOT / "prompts" / "rubrics.toml").read_text())
-SCHEMA_PATH = state.ROOT / "schema" / "findings.schema.json"
+RUBRICS = tomllib.loads(resources.text("rubrics.toml"))
+SCHEMA_PATH = resources.path("findings.schema.json")
 QUOTA_ERR = re.compile(r"rate.?limit|quota|usage limit|too many requests|\b429\b|insufficient (credits|balance)|"
                        r"limit (reached|exceeded)|out of credits", re.I)
 SEVERITIES = ("blocker", "major", "minor", "nit")
