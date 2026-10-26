@@ -79,8 +79,10 @@ def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
     rec = {"reviewer": agent, "ok": result is not None, "timed_out": timed_out, "rc": rc, "attempts": attempt,
            "duration": round(time.time() - t0, 1)}
     usage = reviewer.usage(stdout, workdir)
+    if usage:
+        rec["usage"] = usage
     if "premium_requests" in usage:
-        rec["cost"] = usage["premium_requests"]
+        rec["cost"] = usage["premium_requests"]       # quota.py's 30d premium-request tally reads this
     if result is not None:
         limits.note_result(agent, True, cfg)
     else:

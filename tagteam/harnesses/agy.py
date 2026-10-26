@@ -63,4 +63,4 @@ AUTHOR = base.Author(
     parse=parse, encode=lambda phase, verdict: base.encode(phase, verdict, notice=False, block_decision="continue"),
     install=install, uninstall=uninstall, can_block_at_stop=True, can_notice=False, has_plan_gate=False)
 REVIEWER = base.Reviewer(argv=argv, parse=lambda stdout, out_file: base.parse_wrapped(stdout, out_file, wrapped=True),
-                         usage=base.no_usage)
+                         usage=lambda stdout, workdir: base.envelope_usage(stdout))

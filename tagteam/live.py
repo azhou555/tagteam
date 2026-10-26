@@ -254,6 +254,32 @@ def _today_and_week(now):
     return [r for r in week if _day(r["ts"] + r["duration"]) == _day(now)], week   # by finish day, like status.json
 
 
+def week_spend(now=None):
+    """(reviews, cost_usd, unreported) over the last 7 days. A review reported cost if any reviewer gave cost_usd."""
+    week = state.read_jsonl(state.path("runs.jsonl"), (now or time.time()) - 7 * 86400)
+    costs = [[u["cost_usd"] for u in r.get("usage", {}).values() if "cost_usd" in u] for r in week]
+    return len(week), sum(sum(c) for c in costs), sum(not c for c in costs)
+
+
+def _week_premium(now):
+    week = state.read_jsonl(state.path("runs.jsonl"), now - 7 * 86400)
+    return sum(u.get("premium_requests", 0) for r in week for u in r.get("usage", {}).values())
+
+
+def spend_line(reviews, cost, unreported, premium):
+    line = f"This week: {_plural(reviews, 'review')} · "
+    if unreported == reviews:
+        line += "cost not reported"
+    else:
+        line += f"~${cost:.2f} reported" + (f" · {unreported} didn't report cost" if unreported else "")
+    return line + (f" · {_plural(premium, 'premium request')}" if premium else "")
+
+
+def week_line(now=None):
+    now = now or time.time()
+    return spend_line(*week_spend(now), _week_premium(now))
+
+
 def _counts(runs, key):
     counts = {}
     for r in runs:
@@ -280,6 +306,7 @@ def render_watch(now=None, recent=5, color=False):
     for key, label in (("author", "by author"), ("reviewers", "by reviewer")):
         if today:
             lines.append(f"  {label:12} {_counts(today, key)}")
+    lines.append(f"\n{week_line(now)}")
     lines.append(f"\nLast {recent}:")
     for r in week[-recent:][::-1]:
         kind = outcome(r)[0]
@@ -343,7 +370,8 @@ def render_swiftbar(now=None, recent=8):
     if today:
         lines.append(_sb(f"by author:  {_counts(today, 'author')}", font="Menlo", size=12))
         lines.append(_sb(f"by reviewer:  {_counts(today, 'reviewers')}", font="Menlo", size=12))
-    lines += ["---", _sb("Recent reviews (click to open the run)", size=11, color="gray")]
+    lines += [_sb(week_line(now), size=11, color="gray"),
+              "---", _sb("Recent reviews (click to open the run)", size=11, color="gray")]
     for r in week[-recent:][::-1]:
         kind_r = outcome(r)[0]
         run_dir = state.path("runs", r["run_id"], "x").parent

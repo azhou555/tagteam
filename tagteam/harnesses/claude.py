@@ -132,4 +132,4 @@ AUTHOR = base.Author(
     encode=lambda phase, verdict: base.encode(phase, verdict, notice=True),
     install=install, uninstall=uninstall, can_block_at_stop=True, can_notice=True, has_plan_gate=True)
 REVIEWER = base.Reviewer(argv=argv, parse=lambda stdout, out_file: base.parse_wrapped(stdout, out_file, wrapped=True),
-                         usage=base.no_usage)
+                         usage=lambda stdout, workdir: base.envelope_usage(stdout, "total_cost_usd"))

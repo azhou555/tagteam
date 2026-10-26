@@ -36,6 +36,17 @@ def no_usage(stdout, workdir):
     return {}
 
 
+def envelope_usage(stdout, cost_key=None):
+    """Best-effort usage from a CLI's JSON envelope: {input_tokens, output_tokens, cost_usd}; {} on any surprise."""
+    env = extract_json(stdout)
+    if not isinstance(env, dict):
+        return {}
+    u = env.get("usage") if isinstance(env.get("usage"), dict) else {}
+    found = {"input_tokens": u.get("input_tokens"), "output_tokens": u.get("output_tokens"),
+             "cost_usd": env.get(cost_key) if cost_key else None}
+    return {k: v for k, v in found.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+
+
 def schema_path():
     return resources.path("findings.schema.json")
 

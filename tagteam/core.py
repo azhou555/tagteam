@@ -197,6 +197,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag):
         limits.remember(key, dig, action, blocking, msg)
     state.write_json(run_dir / "verdict.json", {"action": action, "blocking": blocking, "advisory": advisory,
                                                 "failed": failed, "message": msg})
+    run["usage"] = {r: meta["usage"] for r, (meta, _) in outcomes.items() if meta.get("usage")}
     run.update(action=action, blocking=len(blocking), advisory=len(advisory), failed=failed,
                duration=round(time.time() - now, 1))
     live.record_run(run)

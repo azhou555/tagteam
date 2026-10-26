@@ -1,0 +1,6 @@
+{
+ "stdout": "{\"verdict\": \"approve\", \"summary\": \"ok\", \"findings\": []}",
+ "stderr": "hook: Stop\nhook: Stop Completed\ntokens used\n30,547\n",
+ "files": {},
+ "expected": {}
+}
