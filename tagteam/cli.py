@@ -168,7 +168,10 @@ def main(argv=None):
         bad = [n for v in names.values() for n in v or [] if n not in harnesses.ALL]
         if bad:
             p.error(f"unknown agent: {', '.join(bad)} (choose from {', '.join(harnesses.ALL)})")
-        install.install(a.agents.split(","), dry_run=a.dry_run)
-        install.set_consent(names["reviewers"], names["authors"], a.yes, a.dry_run)
+        try:
+            install.install(a.agents.split(","), dry_run=a.dry_run)
+            install.set_consent(names["reviewers"], names["authors"], a.yes, a.dry_run)
+        except config.ConfigError as e:
+            sys.exit(f"config error: {e}")
     elif a.cmd == "uninstall":
         install.uninstall()

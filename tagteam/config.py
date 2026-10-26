@@ -12,6 +12,7 @@ from . import resources, state
 
 REPO_ALLOWED = {"triggers", "authors", "limits", "review", "classify"}
 LEGACY_ROUTING = {"small": "per_change", "large": "per_change", "high_risk": "per_change", "docs": "per_change"}
+STRING_LISTS = (("reviewers", "use"), ("authors", "review"), ("triggers", "kinds"))
 LEGACY_QUOTA = ("primary_use", "tier_penalty", "unknown_headroom")
 
 
@@ -95,6 +96,15 @@ def _mismatch(defaults, new, prefix=""):
     return None
 
 
+def _bad_list(cfg):
+    """Dotted key of a string-list setting that isn't a list of strings, or None. `reviewers.use` has no default."""
+    for t, k in STRING_LISTS:
+        v = cfg.get(t, {}).get(k) if isinstance(cfg.get(t), dict) else None
+        if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+            return f"{t}.{k}"
+    return None
+
+
 def _conservative(cfg, over):
     """A repo file may only tighten: lower limits and diff size, add ignore patterns. Drops no-op keys."""
     num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
@@ -117,7 +127,7 @@ def _read(p, label, defaults):
     try:
         raw = tomllib.loads(p.read_text())
         new, legacy = _shim(raw)
-        bad = _mismatch(defaults, new)
+        bad = _mismatch(defaults, new) or _bad_list(new)
         if bad:
             raise ValueError(f"{bad} has the wrong type")
     except (OSError, ValueError, AttributeError, TypeError) as e:

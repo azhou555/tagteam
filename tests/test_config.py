@@ -80,6 +80,16 @@ class Load(ConfigCase):
         self.assertEqual(src["limits.cooldown_min"], "default")
         self.assertEqual(src["review.per_change.small"], "default")
 
+    def test_string_list_shapes_are_validated(self):
+        for bad in ('[reviewers]\nuse = "codex"\n', '[reviewers]\nuse = [1]\n', '[reviewers.use]\ncodex = 1\n',
+                    '[authors]\nreview = "claude"\n', '[authors]\nreview = ["claude", 2]\n',
+                    '[triggers]\nkinds = "code"\n', '[triggers]\nkinds = [["code"]]\n'):
+            self.user(bad)
+            with self.assertRaises(config.ConfigError, msg=bad):
+                config.load()
+        self.user('[reviewers]\nuse = ["codex"]\n[authors]\nreview = []\n[triggers]\nkinds = ["code"]\n')
+        self.assertEqual(config.load()["reviewers"]["use"], ["codex"])
+
     def test_bad_config_raises(self):
         self.user("[[[")
         with self.assertRaises(config.ConfigError):

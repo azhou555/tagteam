@@ -28,7 +28,7 @@ def needed(kind, artifacts, rv):
 def candidates(author, cfg):
     """Listed agents that are installed and not the author, in list order."""
     have = harnesses.detected()
-    return [a for a in cfg["reviewers"].get("use") or [] if a != author and a in have]
+    return [a for a in dict.fromkeys(cfg["reviewers"].get("use") or []) if a != author and a in have]
 
 
 def eligible(author, cfg, headroom):

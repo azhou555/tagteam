@@ -34,6 +34,12 @@ class Routing(unittest.TestCase):
             plan, _ = router.route("claude", groups, cfg, FULL, {})
         self.assertEqual(list(plan), ["codex", "agy"])
 
+    def test_duplicate_use_entries_collapse_keeping_order(self):
+        self.assertEqual(router.candidates("claude", cfg_with(["codex", "copilot", "codex"])), ["codex", "copilot"])
+        plan, _ = router.route("claude", {"code": [art("a.py", 200)]}, cfg_with(["codex", "codex", "agy"], large=2),
+                               FULL, {})
+        self.assertEqual(list(plan), ["codex", "agy"])
+
     def test_ordered_small_change_takes_first_only_and_skips_author(self):
         cfg = cfg_with(["claude", "codex", "agy"])
         plan, _ = router.route("claude", {"code": [art("a.py", 10)]}, cfg, FULL, {})

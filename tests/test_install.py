@@ -24,7 +24,8 @@ class Install(unittest.TestCase):
         patches = [(claude_h, "PATH", self.settings), (codex_h, "PATH", d / "codex.json"),
                    (copilot_h, "PATH", d / "copilot.json"), (agy_h, "PATH", d / "agy.json"),
                    (claude_h, "STATUSLINE_ORIG", d / "sl.orig"), (claude_h, "STATUSLINE_ORIG_REFRESH", d / "sl.refresh"),
-                   (install, "SWIFTBAR_APP", d / "NoSwiftBar.app"), (install, "LAUNCHER", d / "tagteam.app")]
+                   (install, "SWIFTBAR_APP", d / "NoSwiftBar.app"), (install, "LAUNCHER", d / "tagteam.app"),
+                   (install, "SWIFTBAR_DOMAIN", "invalid.tagteam-tests"), (install, "SWIFTBAR_DIR", d / "SwiftBar")]  # never the real plugin
         self.ps = [mock.patch.object(m, k, v) for m, k, v in patches]
         self.ps += [mock.patch.object(install, "check_agent", return_value=0),
                     mock.patch.object(install, "entry_argv", return_value=["/opt/bin/tagteam"])]
@@ -310,6 +311,22 @@ class Consent(unittest.TestCase):
         with mock.patch.object(install, "install"), mock.patch.object(install, "set_consent"), \
                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             cli.main(["install", "--reviewers", "kiro"])
+
+
+    def test_cli_config_error_is_a_message_not_a_traceback(self):
+        write_user_config('[reviewers]\nuse = ["a"\n')
+        err = io.StringIO()
+        with mock.patch.object(install, "install"), contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            cli.main(["install", "--reviewers", "codex", "--yes"])
+        self.assertNotIn(cm.exception.code, (0, None))
+        self.assertIn("config error", str(cm.exception.code) + err.getvalue())
+        self.assertIn("config.toml", str(cm.exception.code) + err.getvalue())
+
+    def test_unrewritable_use_is_a_config_error(self):
+        write_user_config('[reviewers]\nuse = "codex"\n')
+        with self.assertRaises(config.ConfigError):
+            self.consent(reviewers=["codex"])
 
 
 class Entry(unittest.TestCase):
