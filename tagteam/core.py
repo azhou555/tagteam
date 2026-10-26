@@ -64,8 +64,6 @@ def load_map(now):
 
 def completion(run, lines_changed):
     """One line for the user when a review lets the turn through."""
-    if not run["reviewers"]:
-        return f"{MARKER} {live.summary(run)} (quota or cooldown); this turn was not reviewed"
     done = [r for r in run["reviewers"] if r not in run["failed"]]
     msg = f"{MARKER} {live.summary(run)}"
     if done:

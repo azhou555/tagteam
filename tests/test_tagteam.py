@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import json
 import os
@@ -276,7 +277,7 @@ class EndToEnd(unittest.TestCase):
         pathlib.Path(self.repo, "feature.py").write_text("def f(x):\n    return x[0] if x else None\n" * 4)
         with mock.patch.object(runner, "run_all", self.fake_run_all({})):
             out = self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=True, last_assistant_message="fixed"))
-        self.assertTrue(out["systemMessage"].startswith("[tagteam] ✓ clean"), out)
+        self.assertTrue(out["systemMessage"].startswith("[tagteam] ✓ Review passed: no issues found"), out)
         prompt = next(iter(self.calls[1].values()))
         self.assertIn("Round 2", prompt)
         self.assertIn("fixed", prompt)
@@ -337,7 +338,7 @@ class EndToEnd(unittest.TestCase):
         last = state.read_jsonl(state.path("runs.jsonl"))[-1]
         self.assertEqual((last["author"], last["session_id"], last["action"]), ("claude", "sess1", "allow"))
         self.assertIn("reviewed 20 changed lines", out["systemMessage"])
-        self.assertTrue(live.segment("claude", "sess1").startswith("tagteam ✓ clean · "))
+        self.assertTrue(live.segment("claude", "sess1").startswith("tagteam ✓ Review passed: no issues found · just now · "))
 
     def test_git_activity_reaches_prompt_but_never_triggers_review(self):
         self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="commit it"))
@@ -414,7 +415,7 @@ class Live(unittest.TestCase):
             [r] = live.active()
             self.assertEqual(r["reviewers"]["copilot"], {"state": "done", "secs": 11})
             seg = live.segment("claude", "s")
-            self.assertIn("tagteam ⟳ reviewing changes 1/2", seg)
+            self.assertIn("tagteam ⟳ Reviewing changes, round 1/2", seg)
             self.assertIn("copilot ✓ 11s", seg)
             self.assertIn("agy …", seg)
             self.assertEqual(live.segment("claude", "other").count("+1 running elsewhere"), 1)
@@ -446,17 +447,47 @@ class Live(unittest.TestCase):
         self.assertEqual((s["today"], len(s["sessions"])), (12, 12))
 
     def test_idle_segments(self):
-        self.assertEqual(live.segment("claude", "s"), "tagteam · 0 reviews today")
+        self.assertEqual(live.segment("claude", "s"), "tagteam no review yet this session · 0 reviews today")
         live.record_run(self.done_run(advisory=2))
-        self.assertEqual(live.segment("claude", "s"), "tagteam ✓ clean (2 minor) · 1 review today")
+        self.assertEqual(live.segment("claude", "s"),
+                         "tagteam ✓ Review passed: no blocking issues, 2 minor notes · just now · 1 review today")
         live.record_run(self.done_run(action="block", blocking=2))
         live.note_error()
-        self.assertEqual(live.segment("claude", "s"), "tagteam ✗ 2 blocking · 2 reviews today · ⚠ 1 hook error (24h)")
+        self.assertEqual(live.segment("claude", "s"), "tagteam ✗ Changes requested: 2 issues sent back to fix · "
+                                                      "just now · 2 reviews today · ⚠ 1 hook error (24h)")
         live.record_run(self.done_run(failed=["copilot"]))
-        self.assertIn("⚠ all reviewers failed", live.segment("claude", "s"))
+        self.assertIn("⚠ Review failed: every reviewer errored or timed out", live.segment("claude", "s"))
         live.record_run(self.done_run(reviewers=[]))
-        self.assertIn("⚠ no reviewer available", live.segment("claude", "s"))
-        self.assertEqual(live.segment("claude", "never-reviewed"), "tagteam · 4 reviews today · ⚠ 1 hook error (24h)")
+        self.assertIn("⚠ Not reviewed: no reviewer had quota available", live.segment("claude", "s"))
+        self.assertEqual(live.segment("claude", "never-reviewed"),
+                         "tagteam no review yet this session · 4 reviews today · ⚠ 1 hook error (24h)")
+
+    def test_colored_segment_uses_sage_brand_and_pastel_text(self):
+        live.record_run(self.done_run(action="block", blocking=1))
+        seg = live.segment("claude", "s", color=True)
+        self.assertTrue(seg.startswith("\x1b[38;5;108mtagteam\x1b[0m "), seg)
+        self.assertIn("\x1b[38;5;217m✗ Changes requested: 1 issue sent back to fix\x1b[0m", seg)
+        self.assertNotIn("48;5", seg)                                        # no background blocks
+        with live.tracking(self.rec()):
+            self.assertIn("\x1b[38;5;223m⟳ Reviewing changes\x1b[0m", live.segment("claude", "s", color=True))
+
+    def test_swiftbar_states(self):
+        self.assertTrue(live.render_swiftbar().startswith(
+            ':person.2.fill: :checkmark.seal: 0 | tooltip="tagteam: no reviews yet" sfcolor1=' + live.BRAND["hex"]))
+        live.record_run(self.done_run(action="block", blocking=1))
+        out = live.render_swiftbar()
+        rose = live.KINDS["blocked"]["hex"]
+        self.assertTrue(out.startswith(":person.2.fill: :xmark.octagon.fill: 1 | "), out)
+        self.assertIn(f"sfcolor2={rose}", out.splitlines()[0])
+        self.assertIn(f"Changes requested: 1 issue sent back to fix | color={rose} bash=/usr/bin/open", out)
+        live.note_error()
+        head = live.render_swiftbar().splitlines()[0]
+        self.assertIn(":exclamationmark.triangle.fill:", head)
+        self.assertIn(f"sfcolor3={rose}", head)
+        with live.tracking(self.rec()):
+            head = live.render_swiftbar().splitlines()[0]
+        self.assertTrue(head.startswith(":person.2.fill: :arrow.triangle.2.circlepath: 0s"), head)
+        self.assertIn(f"sfcolor2={live.KINDS['running']['hex']}", head)
 
     def test_yesterday_does_not_count_today(self):
         live.record_run(self.done_run(ts=time.time() - 2 * 86400), now=time.time() - 2 * 86400)
@@ -472,7 +503,8 @@ class Live(unittest.TestCase):
                 state.write_json(state.path("runs", name, "verdict.json"), {"action": "block", "blocking": [{}]})
             self.assertEqual(live.backfill(), 2)
             self.assertEqual(state.read_json(state.path("status.json"))["day"], "2020-01-02")   # stored day is old
-            self.assertEqual(live.segment("claude", "s"), "tagteam ✗ 1 blocking · 0 reviews today")
+            self.assertRegex(live.segment("claude", "s"),
+                             r"^tagteam ✗ Changes requested: 1 issue sent back to fix · \d+d ago · 0 reviews today$")
             self.assertEqual(live.backfill(), 0)                                               # once only
 
     def test_watch_render(self):
@@ -483,13 +515,16 @@ class Live(unittest.TestCase):
         self.assertIn("Running (1):", out)
         self.assertIn("Reviews today: 2", out)
         self.assertIn("copilot 1", out)
-        self.assertIn("✗ 1 blocking", out)
+        self.assertIn("✗ Changes requested: 1 issue sent back to fix", out)
 
     def test_statusline_entry_reads_stdin(self):
         live.record_run(self.done_run(session_id="abc"))
         r = subprocess.run([sys.executable, "-m", "tagteam.live"], input=json.dumps({"session_id": "abc"}),
-                           capture_output=True, text=True, cwd=state.ROOT)
-        self.assertEqual(r.stdout.strip(), "tagteam ✓ clean · 1 review today")
+                           capture_output=True, text=True, cwd=state.ROOT, env={**os.environ, "NO_COLOR": "1"})
+        self.assertEqual(r.stdout.strip(), "tagteam ✓ Review passed: no issues found · just now · 1 review today")
+        r = subprocess.run([sys.executable, "-m", "tagteam.live", "swiftbar"], capture_output=True, text=True,
+                           cwd=state.ROOT)
+        self.assertTrue(r.stdout.startswith(":person.2.fill: :checkmark.seal.fill: 1 | "), r.stdout)
         r = subprocess.run([sys.executable, "-m", "tagteam.live"], input="not json", capture_output=True,
                            text=True, cwd=state.ROOT)
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
@@ -513,7 +548,8 @@ class Install(unittest.TestCase):
         d = pathlib.Path(tempfile.mkdtemp())
         self.settings = d / "settings.json"
         patches = {"CLAUDE": self.settings, "CODEX": d / "codex.json", "COPILOT": d / "copilot.json",
-                   "AGY": d / "agy.json", "STATUSLINE_ORIG": d / "sl.orig", "STATUSLINE_ORIG_REFRESH": d / "sl.refresh"}
+                   "AGY": d / "agy.json", "STATUSLINE_ORIG": d / "sl.orig", "STATUSLINE_ORIG_REFRESH": d / "sl.refresh",
+                   "SWIFTBAR_APP": d / "NoSwiftBar.app", "LAUNCHER": d / "tagteam.app"}
         self.ps = [mock.patch.object(install, k, v) for k, v in patches.items()]
         for x in self.ps:
             x.start()
@@ -542,6 +578,124 @@ class Install(unittest.TestCase):
         first, _, after = self.roundtrip({"type": "command", "command": "ponytail", "refreshInterval": 10})
         self.assertEqual(first["refreshInterval"], 2)
         self.assertEqual(after, {"type": "command", "command": "ponytail", "refreshInterval": 10})
+
+    def test_swiftbar_plugin_installed_runs_and_uninstalls(self):
+        app, plugins = pathlib.Path(tempfile.mkdtemp()), pathlib.Path(tempfile.mkdtemp())
+        plugin = plugins / install.SWIFTBAR_PLUGIN
+        with mock.patch.object(install, "SWIFTBAR_APP", app), \
+                mock.patch.object(install, "_swiftbar_dir", return_value=plugins), mock.patch("builtins.print"), \
+                mock.patch.object(install, "install_launcher"):
+            with mock.patch.object(install.subprocess, "run") as run:
+                install.install_swiftbar()
+            self.assertEqual(run.call_args_list[0].args[0][:3], ["open", "-g", "-a"])   # folder kept: no restart
+            self.assertTrue(os.access(plugin, os.X_OK))
+            out = subprocess.run([str(plugin)], capture_output=True, text=True).stdout
+            self.assertRegex(out.splitlines()[0], r"^:person\.2\.fill: :[a-z.]+: ")
+            self.assertIn("Open live view (tagteam watch)", out)
+            install.uninstall()
+            self.assertFalse(plugin.exists())
+            plugin.write_text("#!/bin/sh\necho mine\n")              # a user's plugin with the same name
+            with mock.patch.object(install.subprocess, "run"):
+                install.install_swiftbar()
+            install.uninstall()
+        self.assertEqual(plugin.read_text(), "#!/bin/sh\necho mine\n")
+        plugin.write_bytes(b"\xff\xfe binary plugin")
+        self.assertFalse(install._ours_plugin(plugin))
+        with mock.patch.object(install.shutil, "which", return_value=None):
+            self.assertIsNone(install._swiftbar_dir())                   # no `defaults`: SwiftBar is a no-op
+
+    def test_swiftbar_folder_set_when_unset_or_hidden_legacy(self):
+        app, home = pathlib.Path(tempfile.mkdtemp()), pathlib.Path(tempfile.mkdtemp())
+        legacy = home / ".tagteam" / "swiftbar"
+        legacy.mkdir(parents=True)
+        for configured in (None, legacy):
+            with mock.patch.object(install, "SWIFTBAR_APP", app), \
+                    mock.patch.object(install, "SWIFTBAR_DIR", home / "SwiftBar"), \
+                    mock.patch.object(install, "SWIFTBAR_OLD_DIR", legacy), \
+                    mock.patch.object(install, "_swiftbar_dir", return_value=configured), \
+                    mock.patch.object(install.time, "sleep"), mock.patch("builtins.print"), \
+                    mock.patch.object(install, "install_launcher"), \
+                    mock.patch.object(install.subprocess, "run") as run:
+                (legacy / install.SWIFTBAR_PLUGIN).write_text(install.swiftbar_plugin())
+                install.install_swiftbar()
+            cmds = [c.args[0] for c in run.call_args_list]
+            self.assertIn(["defaults", "write", install.SWIFTBAR_DOMAIN, "PluginDirectory", str(home / "SwiftBar")], cmds)
+            self.assertIn(["pkill", "-x", "SwiftBar"], cmds)
+            self.assertTrue((home / "SwiftBar" / install.SWIFTBAR_PLUGIN).exists())
+        self.assertFalse((legacy / install.SWIFTBAR_PLUGIN).exists())
+
+    def swiftbar_env(self, configured, home):
+        return [mock.patch.object(install, "SWIFTBAR_APP", pathlib.Path(tempfile.mkdtemp())),
+                mock.patch.object(install, "SWIFTBAR_DIR", home / "SwiftBar"),
+                mock.patch.object(install, "SWIFTBAR_OLD_DIR", home / ".tagteam" / "swiftbar"),
+                mock.patch.object(install, "_swiftbar_dir", return_value=configured),
+                mock.patch.object(install.time, "sleep"), mock.patch("builtins.print"),
+                mock.patch.object(install, "install_launcher")]
+
+    def test_swiftbar_migration_keeps_old_setup_when_destination_is_taken(self):
+        home = pathlib.Path(tempfile.mkdtemp())
+        legacy = home / ".tagteam" / "swiftbar"
+        legacy.mkdir(parents=True)
+        (legacy / install.SWIFTBAR_PLUGIN).write_text(install.swiftbar_plugin())
+        (home / "SwiftBar").mkdir()
+        (home / "SwiftBar" / install.SWIFTBAR_PLUGIN).write_text("#!/bin/sh\necho theirs\n")
+        with contextlib.ExitStack() as st:
+            for p in self.swiftbar_env(legacy, home):
+                st.enter_context(p)
+            run = st.enter_context(mock.patch.object(install.subprocess, "run"))
+            install.install_swiftbar()
+        self.assertEqual(run.call_args_list, [])                          # SwiftBar not repointed or restarted
+        self.assertTrue(install._ours_plugin(legacy / install.SWIFTBAR_PLUGIN))
+        self.assertEqual((home / "SwiftBar" / install.SWIFTBAR_PLUGIN).read_text(), "#!/bin/sh\necho theirs\n")
+
+    def test_swiftbar_write_failure_keeps_old_setup(self):
+        home = pathlib.Path(tempfile.mkdtemp())
+        legacy = home / ".tagteam" / "swiftbar"
+        legacy.mkdir(parents=True)
+        (legacy / install.SWIFTBAR_PLUGIN).write_text(install.swiftbar_plugin())
+        with contextlib.ExitStack() as st:
+            for p in self.swiftbar_env(legacy, home):
+                st.enter_context(p)
+            run = st.enter_context(mock.patch.object(install.subprocess, "run"))
+            st.enter_context(mock.patch.object(pathlib.Path, "write_text", side_effect=OSError("disk full")))
+            with self.assertRaises(OSError):
+                install.install_swiftbar()
+        self.assertEqual(run.call_args_list, [])
+        self.assertTrue(install._ours_plugin(legacy / install.SWIFTBAR_PLUGIN))
+
+    def test_swiftbar_users_hidden_folder_is_left_alone(self):
+        home = pathlib.Path(tempfile.mkdtemp())
+        theirs = home / ".config" / "swiftbar"
+        with contextlib.ExitStack() as st:
+            for p in self.swiftbar_env(theirs, home):
+                st.enter_context(p)
+            run = st.enter_context(mock.patch.object(install.subprocess, "run"))
+            install.install_swiftbar()
+        self.assertEqual(run.call_args_list, [])
+        self.assertFalse(theirs.exists())
+        self.assertFalse((home / "SwiftBar").exists())
+
+    def test_launcher_built_owned_and_removed(self):
+        apps = pathlib.Path(tempfile.mkdtemp())
+        launcher = apps / "tagteam.app"
+        real_run = subprocess.run
+
+        def run(argv, **kw):                     # build the bundle for real; skip mdimport side effects
+            return real_run(argv, **kw) if argv[0] == "osacompile" else mock.Mock(returncode=0)
+        with mock.patch.object(install, "LAUNCHER", launcher), mock.patch("builtins.print"), \
+                mock.patch.object(install, "_swiftbar_dir", return_value=None), \
+                mock.patch.object(install.subprocess, "run", side_effect=run):
+            install.install_launcher()
+            self.assertTrue((launcher / "Contents" / "MacOS").is_dir())
+            self.assertTrue((launcher / install.LAUNCHER_MARK).exists())
+            install.install_launcher()                                    # idempotent rebuild
+            install.uninstall()
+            self.assertFalse(launcher.exists())
+            (launcher / "Contents").mkdir(parents=True)                   # someone else's tagteam.app
+            install.install_launcher()
+            install.uninstall()
+            self.assertTrue((launcher / "Contents").exists())
+            self.assertFalse((launcher / install.LAUNCHER_MARK).exists())
 
     def test_upgrade_from_old_wrapper_keeps_original_command(self):
         install.STATUSLINE_ORIG.write_text("ponytail")

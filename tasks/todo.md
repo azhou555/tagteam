@@ -116,3 +116,22 @@ Verify:
   `statusline.orig.bak-20261026`).
 - Not verified live: Codex completion message (Codex hooks still need `/hooks` approval). `tagteam watch` during a
   live run is covered only by the unit test.
+
+## Phase 7: Clearer status display + menu bar (2026-10-26)
+- [x] One outcome model (running / passed / blocked / unreviewed / failed) with a plain-English detail. It
+      drives the status line, `watch`, `status`, the completion message, and SwiftBar. "clean" is gone.
+- [x] Status line: colored badges (amber/green/red/yellow), "N m ago", dimmed counts; `NO_COLOR` respected.
+- [x] `watch`: same colors when stdout is a TTY.
+- [x] SwiftBar plugin `tagteam.2s.sh`: SF Symbol + count (or elapsed time while running), with the error
+      triangle in red. Dropdown: running, today's counts, recent runs (click opens the run dir), error log,
+      open `watch`, refresh. `install` writes it into SwiftBar's plugin folder (sets `~/.tagteam/swiftbar` if
+      none) and launches SwiftBar; `uninstall` removes it.
+- [x] 47 tests pass (badge escapes, SwiftBar states, plugin install → execute → uninstall).
+- [x] Restyle (user feedback): sage `tagteam`, pastel text color per status, no background blocks; menu bar
+      gets a sage `person.2.fill` icon beside the status icon (light/dark color pairs).
+- [x] Menu item didn't appear: SwiftBar ignores hidden folders and the plugin lived in `~/.tagteam/swiftbar`.
+      Default is now `~/SwiftBar`; install moves the plugin out of the old folder and restarts SwiftBar.
+- [x] Spotlight launcher `~/Applications/tagteam.app` (osacompile, ownership marker): always restarts SwiftBar,
+      because a running SwiftBar can be stuck with no items and `open` on it only says "already open".
+- [x] Visual check: user confirmed the menu bar item (2026-10-26). Before that, verified by item geometry from
+      CGWindowList (no screenshot permission): a 79px Control Center item appears per display when SwiftBar loads.

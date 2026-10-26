@@ -22,18 +22,31 @@ Codex will not run new hooks until you do.
 Nothing to do. Work normally in any of the four agents. A review runs when a turn ends with at least
 5 changed lines (any change in later rounds). Findings arrive as a message starting with `[tagteam]`.
 In Claude Code and Codex, a review that passes also prints one line, such as
-`[tagteam] ✓ clean · copilot reviewed 13 changed lines in 7s`.
+`[tagteam] ✓ Review passed: no issues found · copilot reviewed 13 changed lines in 7s`.
 
 Reviewers also see the turn's git activity (new commits, rewritten history, pushes). Git activity alone
 never starts a review.
 
-In Claude Code, the status line gets a tagteam line under your own status line. It updates every 2s:
+**Claude status line.** Under your own status line, tagteam adds a line: `tagteam` in sage green, then the
+latest status as pastel-colored text. It updates every 2s:
 
-```
-tagteam ⟳ reviewing changes 1/2 · copilot ✓ 11s · agy … 1m12s    while a review runs
-tagteam ✓ clean (2 minor) · 4 reviews today                       last result in this session
-tagteam ✗ 2 blocking · 4 reviews today · ⚠ 1 hook error (24h)     hook errors mean reviews were skipped
-```
+| Status | Meaning |
+|---|---|
+| peach `⟳ Reviewing changes` | Reviewers are checking this turn now; shows each reviewer's progress |
+| mint `✓ Review passed` | The last review in this session found nothing that must be fixed |
+| rose `✗ Changes requested` | The last review sent issues back; the agent must fix them or explain why not |
+| yellow `⚠ Not reviewed` / `⚠ Review failed` | No reviewer had quota, or every reviewer errored |
+
+The line also shows how long ago that was, today's review count, and `⚠ N hook errors (24h)` when hooks
+failed. Hook errors mean reviews were skipped. Set `NO_COLOR=1` for plain text.
+
+**Menu bar (macOS).** With [SwiftBar](https://github.com/swiftbar/SwiftBar) installed
+(`brew install --cask swiftbar`), `install` adds a menu bar item that covers all four agents: a sage
+two-person icon, then a status icon and today's review count (or the elapsed time while a review runs). The
+dropdown lists running reviews, today's counts, and recent reviews: click one to open its run folder. If SwiftBar
+has no plugin folder yet, `install` uses `~/SwiftBar` (SwiftBar ignores hidden folders). To start it at login,
+turn on SwiftBar's own "Launch at Login" setting. `install` also adds `~/Applications/tagteam.app`, so you can
+type "tagteam" in Spotlight to bring the menu bar item back after quitting SwiftBar.
 
 ```sh
 ./bin/tagteam watch            # live view for a spare tab: running reviews, today's counts, last runs
