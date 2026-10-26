@@ -47,6 +47,15 @@ def envelope_usage(stdout, cost_key=None):
     return {k: v for k, v in found.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
 
 
+def signed_in_if(path, needle=None):
+    """True if the CLI's local credential file exists (and mentions `needle`); None when we can't tell offline."""
+    try:
+        text = path.read_text() if needle else ""
+        return True if path.exists() and (not needle or needle in text) else None
+    except OSError:
+        return None
+
+
 def schema_path():
     return resources.path("findings.schema.json")
 

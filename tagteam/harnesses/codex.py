@@ -1,11 +1,34 @@
 """Codex: Claude-format hooks in ~/.codex/hooks.json; `codex exec` as reviewer."""
+import json
 import os
 import pathlib
+import re
+import tomllib
 
 from . import base
 from .claude import install_claude_shaped, parse_claude_shaped, uninstall_claude_shaped
 
 PATH = pathlib.Path.home() / ".codex" / "hooks.json"
+CONFIG = pathlib.Path.home() / ".codex" / "config.toml"
+
+
+def logged_in():
+    return base.signed_in_if(pathlib.Path.home() / ".codex" / "auth.json")
+
+
+def hook_trust():
+    """True if every tagteam hook has a trusted_hash record in config.toml, False if any lacks one, None if unreadable.
+    Presence only: the hash itself (canonical TOML sha256) is not recomputed, so an edited hook still reads as trusted."""
+    try:
+        hooks = json.loads(PATH.read_text()).get("hooks", {})
+        trusted = tomllib.loads(CONFIG.read_text()).get("hooks", {}).get("state", {})
+    except (OSError, ValueError):
+        return None
+    keys = [f"{PATH}:{re.sub(r'(?<!^)(?=[A-Z])', '_', event).lower()}:{i}:{j}"
+            for event, groups in hooks.items() if isinstance(groups, list)
+            for i, g in enumerate(groups) if base.ours(g)
+            for j in range(len(g.get("hooks", [])))]
+    return all("trusted_hash" in (trusted.get(k) or {}) for k in keys) if keys else None
 
 
 def argv(prompt, options, workdir, deadline):

@@ -52,6 +52,10 @@ def uninstall():
             base.save(PATH, data, False)
 
 
+def logged_in():
+    return base.signed_in_if(pathlib.Path.home() / ".gemini" / "oauth_creds.json")
+
+
 def argv(prompt, options, workdir, deadline):
     model, effort = options.get("model"), options.get("effort")
     out = ["agy", "-p", prompt + NOTE, "--mode", "plan", "--output-format", "json", "--json-schema",

@@ -35,6 +35,10 @@ def uninstall():
         print(f"removed {PATH}")
 
 
+def logged_in():
+    return base.signed_in_if(pathlib.Path.home() / ".copilot" / "config.json", '"lastLoggedInUser"')
+
+
 def argv(prompt, options, workdir, deadline):
     model = options.get("model")
     out = ["copilot", "-p", prompt, "-s", "--no-ask-user", "--allow-all-tools", "--deny-tool", "write",

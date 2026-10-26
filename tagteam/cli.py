@@ -1,4 +1,4 @@
-"""tagteam CLI: `hook <agent> <phase> [--check]`, `statusline`, `swiftbar`, `config`, `status`, `watch`, `install`, `uninstall`."""
+"""tagteam CLI: `hook <agent> <phase> [--check]`, `statusline`, `swiftbar`, `config`, `status`, `watch`, `install`, `uninstall`, `doctor`."""
 import argparse
 import json
 import os
@@ -7,7 +7,7 @@ import sys
 import time
 import traceback
 
-from . import adapters, config, core, harnesses, install, live, quota, state
+from . import adapters, config, core, doctor, harnesses, install, live, quota, state
 
 
 def hook(agent, phase):
@@ -146,6 +146,9 @@ def main(argv=None):
     i.add_argument("--reviewers", help="agents that may review your changes, in order; saves reviewers.use")
     i.add_argument("--authors", help="agents whose turns get reviewed; saves authors.review")
     i.add_argument("--yes", action="store_true", help="don't prompt; without --reviewers no reviewer list is saved")
+    d = sub.add_parser("doctor", help="check each agent's hooks, login and reviewer status; read-only")
+    d.add_argument("--probe", action="store_true", help="also run one tiny real review per listed reviewer (costs money)")
+    d.add_argument("--clear", action="store_true", help="re-enable reviewers the sandbox disabled, then check")
     w = sub.add_parser("watch")
     w.add_argument("--once", action="store_true")
     sub.add_parser("uninstall")
@@ -162,6 +165,8 @@ def main(argv=None):
         sys.exit(show_config())
     elif a.cmd == "status":
         status(a.days)
+    elif a.cmd == "doctor":
+        sys.exit(doctor.run(a.probe, a.clear))
     elif a.cmd == "watch":
         live.watch(once=a.once)
     elif a.cmd == "install":

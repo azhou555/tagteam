@@ -13,13 +13,17 @@ class Harness:
     detect: Callable
     author: Author | None
     reviewer: Reviewer | None
+    hooks_path: Callable                    # () -> where this agent's tagteam hooks live
+    logged_in: Callable                     # () -> True / False / None (can't tell cheaply and offline)
+    hook_trust: Callable | None = None      # () -> True / False / None; only agents that gate new hooks
 
 
 def _on_path(cli):
     return lambda: shutil.which(cli) is not None
 
 
-ALL = {name: Harness(name, _on_path(name), mod.AUTHOR, mod.REVIEWER)
+ALL = {name: Harness(name, _on_path(name), mod.AUTHOR, mod.REVIEWER, lambda m=mod: m.PATH, mod.logged_in,
+                     getattr(mod, "hook_trust", None))
        for name, mod in (("claude", claude), ("codex", codex), ("copilot", copilot), ("agy", agy))}
 
 

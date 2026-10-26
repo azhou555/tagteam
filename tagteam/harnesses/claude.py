@@ -120,6 +120,10 @@ def uninstall():
     uninstall_claude_shaped(PATH, before_save=unwrap_statusline)
 
 
+def logged_in():
+    return base.signed_in_if(pathlib.Path.home() / ".claude" / ".credentials.json")     # macOS may use the keychain
+
+
 def argv(prompt, options, workdir, deadline):
     model = options.get("model")
     out = ["claude", "-p", "--output-format", "json", "--json-schema", base.schema_path().read_text(),
