@@ -1,7 +1,7 @@
 """Claude Code: Claude-format hooks in ~/.claude/settings.json; `claude -p` as reviewer."""
 import os
 import pathlib
-import sys
+import re
 
 from .. import state
 from ..adapters import HookEvent, extract_paths
@@ -78,13 +78,17 @@ def uninstall_claude_shaped(path, before_save=None):
         base.save(path, data, False)
 
 
-def wrap_statusline(data, dry_run):
+def ours_statusline(command):
+    return "tagteam-statusline" in command or bool(re.search(r"tagteam'? statusline\s*$", command))
+
+
+def wrap_statusline(data, entry_cmd, dry_run):
     """Idempotent: re-running over an existing wrapper still upgrades its command and refreshInterval."""
     sl = data.get("statusLine") or {}
-    wrapper = f"sh '{state.ROOT / 'bin' / 'tagteam-statusline'}' '{sys.executable}'"
+    wrapper = f"{entry_cmd} statusline"
     if not dry_run:
         STATUSLINE_ORIG.parent.mkdir(parents=True, exist_ok=True)
-        if "tagteam-statusline" not in sl.get("command", ""):
+        if not ours_statusline(sl.get("command", "")):
             STATUSLINE_ORIG.write_text(sl.get("command", ""))
         if not STATUSLINE_ORIG_REFRESH.exists():     # first install with this field: what's there now is the user's
             STATUSLINE_ORIG_REFRESH.write_text(str(sl.get("refreshInterval", "")))
@@ -93,7 +97,7 @@ def wrap_statusline(data, dry_run):
 
 
 def unwrap_statusline(data):
-    if "tagteam-statusline" in (data.get("statusLine") or {}).get("command", ""):
+    if ours_statusline((data.get("statusLine") or {}).get("command", "")):
         orig = STATUSLINE_ORIG.read_text() if STATUSLINE_ORIG.exists() else ""
         refresh = STATUSLINE_ORIG_REFRESH.read_text() if STATUSLINE_ORIG_REFRESH.exists() else ""
         if orig:
@@ -109,7 +113,7 @@ def unwrap_statusline(data):
 
 def install(entry_cmd, stop_timeout, dry_run):
     install_claude_shaped("claude", PATH, entry_cmd, stop_timeout, dry_run,
-                          before_save=lambda data: wrap_statusline(data, dry_run))
+                          before_save=lambda data: wrap_statusline(data, entry_cmd, dry_run))
 
 
 def uninstall():

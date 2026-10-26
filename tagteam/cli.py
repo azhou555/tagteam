@@ -1,7 +1,8 @@
-"""tagteam CLI: `hook <agent> <phase>`, `status`, `watch`, `install`, `uninstall`."""
+"""tagteam CLI: `hook <agent> <phase> [--check]`, `statusline`, `swiftbar`, `status`, `watch`, `install`, `uninstall`."""
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -35,6 +36,41 @@ def hook(agent, phase):
         except Exception:
             pass
         print("{}")
+
+
+def check(agent, phase):
+    """Fails closed, unlike `hook`: parse stdin with the real harness parser and run nothing else."""
+    try:
+        ev = adapters.parse(agent, phase, json.loads(sys.stdin.read()))
+        if ev is None or ev.phase == "ignore":
+            raise ValueError(f"payload is not a {agent} {phase} event")
+    except Exception as e:
+        print(f"{agent} {phase}: {e!r}", file=sys.stderr)
+        return 1
+    print(f"ok {agent} {phase}")
+    return 0
+
+
+def statusline():
+    """Claude Code status line: save its JSON for the quota reader, show the user's original line, then ours."""
+    raw = sys.stdin.read()
+    try:
+        q = state.path("quota", "claude.json")
+        q.parent.mkdir(parents=True, exist_ok=True)
+        tmp = q.with_name(f"claude.json.{os.getpid()}")
+        tmp.write_text(raw)
+        tmp.replace(q)
+        orig = state.HOME / "statusline.orig"
+        if orig.exists() and orig.read_text().strip():
+            r = subprocess.run(["sh", "-c", orig.read_text()], input=raw, capture_output=True, text=True)
+            if r.returncode == 0 and r.stdout.rstrip("\n"):
+                print(r.stdout.rstrip("\n"))
+    except Exception:
+        pass
+    try:
+        print(live.statusline_segment(raw))
+    except Exception:
+        pass
 
 
 def status(days):
@@ -75,6 +111,9 @@ def main(argv=None):
     h = sub.add_parser("hook")
     h.add_argument("agent", choices=["claude", "codex", "copilot", "agy"])
     h.add_argument("phase")
+    h.add_argument("--check", action="store_true", help="parse stdin only; exit 1 if it is not a valid payload")
+    sub.add_parser("statusline")
+    sub.add_parser("swiftbar")
     s = sub.add_parser("status")
     s.add_argument("--days", type=int, default=7)
     i = sub.add_parser("install")
@@ -85,7 +124,13 @@ def main(argv=None):
     sub.add_parser("uninstall")
     a = p.parse_args(argv)
     if a.cmd == "hook":
+        if a.check:
+            sys.exit(check(a.agent, a.phase))
         hook(a.agent, a.phase)
+    elif a.cmd == "statusline":
+        statusline()
+    elif a.cmd == "swiftbar":
+        live.main(["swiftbar"])
     elif a.cmd == "status":
         status(a.days)
     elif a.cmd == "watch":

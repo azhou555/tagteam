@@ -351,10 +351,17 @@ def render_swiftbar(now=None, recent=8):
         lines.append(_sb(f"⚠ {_plural(len(s['errors']), 'hook error')} in 24h: reviews were skipped. Open log",
                          color=KINDS["blocked"]["hex"], bash="/usr/bin/open", param1="-t",
                          param2=f'"{state.path("tagteam.log")}"', terminal="false"))
-    lines.append(_sb("Open live view (tagteam watch)", bash=f'"{sys.executable}"',
-                     param1=f'"{state.ROOT / "bin" / "tagteam"}"', param2="watch", terminal="true"))
+    from . import install
+    exe, *args = install.entry_argv()
+    params = {f"param{i}": f'"{a}"' for i, a in enumerate([*args, "watch"], 1)}
+    lines.append(_sb("Open live view (tagteam watch)", bash=f'"{exe}"', **params, terminal="true"))
     lines.append(_sb("Refresh", refresh="true"))
     return "\n".join(lines)
+
+
+def statusline_segment(raw):
+    data = json.loads(raw or "{}")
+    return segment("claude", data.get("session_id", ""), color=not os.environ.get("NO_COLOR"))
 
 
 def main(argv):
@@ -363,8 +370,7 @@ def main(argv):
         if argv[:1] == ["swiftbar"]:
             print(render_swiftbar())
             return
-        data = json.loads(sys.stdin.read() or "{}")
-        print(segment("claude", data.get("session_id", ""), color=not os.environ.get("NO_COLOR")))
+        print(statusline_segment(sys.stdin.read()))
     except Exception:
         if argv[:1] == ["swiftbar"]:
             print("tagteam ⚠\n---\nfailed to render; see ~/.tagteam/state/tagteam.log")

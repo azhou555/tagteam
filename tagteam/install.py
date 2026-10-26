@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 
-from . import harnesses, state
+from . import harnesses, resources, state
 
 H = pathlib.Path.home()
 SWIFTBAR_APP = pathlib.Path("/Applications/SwiftBar.app")
@@ -20,12 +20,48 @@ LAUNCHER_MARK = "Contents/Resources/tagteam-launcher"               # ownership 
 SWIFTBAR_MARK = "# Written by `tagteam install`; removed by `tagteam uninstall`."
 
 
+def entry_argv():
+    """argv that runs this tagteam: the installed executable, else this script, else `python -m tagteam`."""
+    found = shutil.which("tagteam")
+    if found:
+        return [found]
+    me = os.path.realpath(sys.argv[0])
+    if os.path.isfile(me) and os.access(me, os.X_OK):
+        return [me]
+    return [sys.executable, "-m", "tagteam"]                        # never point hooks at an unexecutable path
+
+
+def entry():
+    """The same, as a shell command prefix; the program path is quoted."""
+    argv = entry_argv()
+    return " ".join([f"'{argv[0]}'", *argv[1:]])
+
+
+def check_agent(name):
+    """Run the real hook parser on the bundled Stop payload in a child; 0 means this install can parse it."""
+    payload = resources.path(f"fixtures/{name}-stop.json").read_text()
+    try:
+        r = subprocess.run([*entry_argv(), "hook", name, "turn-end", "--check"], input=payload,
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"  {e}", file=sys.stderr)
+        return 1
+    if r.returncode:
+        print(f"  {r.stderr.strip()}", file=sys.stderr)
+    return r.returncode
+
+
 def install(agents, dry_run=False):
     cfg = state.load_config()
     stop_timeout = cfg["review"]["deadline_s"] + 60
-    entry_cmd = f"'{sys.executable}' '{state.ROOT / 'bin' / 'tagteam'}'"
+    entry_cmd = entry()
     for name, h in harnesses.ALL.items():
         if name in agents and h.author:
+            rc = check_agent(name)
+            if rc:
+                print(f"{name}: kept existing hooks (check failed with exit {rc}; "
+                      f"`{entry_cmd} hook {name} turn-end --check` shows why)")
+                continue
             h.author.install(entry_cmd, stop_timeout, dry_run)
     install_swiftbar(dry_run)
     if not dry_run:
@@ -53,7 +89,7 @@ def swiftbar_plugin():
             "# <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>\n"
             "# <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>\n"
             f"{SWIFTBAR_MARK}\n"
-            f"{env}PYTHONPATH='{state.ROOT}' exec '{sys.executable}' -m tagteam.live swiftbar\n")
+            f"{env}exec {entry()} swiftbar\n")
 
 
 def _ours_plugin(p):
