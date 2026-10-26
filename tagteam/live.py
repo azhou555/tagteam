@@ -92,10 +92,12 @@ def record_run(run, now=None):
     with state.locked("runs"):
         state.append_jsonl(state.path("runs.jsonl"), run)
         s = _load_status(now)
-        s["today"] += 1
+        s["today"] += bool(run.get("reviewers"))      # a notice or a revert is not a review
         s["sessions"] = {k: v for k, v in s["sessions"].items() if v["ts"] >= now - SESSION_TTL}
         s["sessions"][f"{run['author']}:{run['session_id']}"] = {
             k: run[k] for k in ("ts", "action", "blocking", "advisory", "reviewers", "failed", "round")}
+        s["sessions"][f"{run['author']}:{run['session_id']}"].update(
+            {k: run[k] for k in ("prior", "confirm", "reason", "max_rounds") if k in run})
         state.write_json(state.path("status.json"), s)
 
 
@@ -142,6 +144,10 @@ KINDS = {
                "hex": "#3A9E6F,#B5EAD7"},
     "blocked": {"icon": "✗", "label": "Changes requested", "ansi": 217, "sf": "xmark.octagon.fill",
                 "hex": "#C8554F,#FFB3B3"},
+    "resolved": {"icon": "✓", "label": "Issues resolved", "ansi": 158, "sf": "checkmark.seal.fill",
+                 "hex": "#3A9E6F,#B5EAD7"},
+    "unresolved": {"icon": "⚠", "label": "Unresolved", "ansi": 216, "sf": "exclamationmark.triangle.fill",
+                   "hex": "#C46A3A,#FFC9A8"},
     "unreviewed": {"icon": "⚠", "label": "Not reviewed", "ansi": 229, "sf": "exclamationmark.circle.fill",
                    "hex": "#B08A1E,#FFF1A8"},
     "failed": {"icon": "⚠", "label": "Review failed", "ansi": 229, "sf": "exclamationmark.circle.fill",
@@ -153,19 +159,30 @@ REASONS = {"no reviewers configured": "no reviewers configured; run tagteam inst
 
 
 def outcome(run):
-    """(kind, detail) for a finished run, in plain words."""
-    if run.get("reason"):
-        return "unreviewed", REASONS.get(run["reason"], run["reason"])
+    """(kind, detail) for a finished run, in plain words. `prior` is how many issues were open going in."""
+    prior, m = run.get("prior") or 0, run.get("max_rounds")
+    reason = run.get("reason")
+    if reason == "reverted":
+        return "resolved", "changes reverted"
+    owed = f" · {_plural(prior, 'earlier issue')} not re-checked" if prior else ""
+    if reason:
+        return "unreviewed", REASONS.get(reason, reason) + owed
+    n = run["blocking"]
+    if run.get("confirm") and n:                     # may be a re-issued block with no reviewer spawned
+        return "unresolved", f"{_plural(n, 'issue')} still open after {_plural(m, 'fix round')}"
     if not run["reviewers"]:
-        return "unreviewed", "no reviewer had quota available"
+        return "unreviewed", "no reviewer had quota available" + owed
     if set(run["failed"]) >= set(run["reviewers"]):
-        return "failed", "every reviewer errored or timed out"
+        return "failed", "every reviewer errored or timed out" + owed
+    where = f" (round {run['round']}/{m})" if m else ""
     if run["action"] == "block":
-        n = run["blocking"]
-        return "blocked", f"{n} issue{'s' if n != 1 else ''} sent back to fix"
+        return "blocked", (f"{_plural(n, 'issue')} to fix{where}" if not prior else
+                           f"{_plural(n, 'issue')} still open after fixes{where}")
+    notes = f", {_plural(run['advisory'], 'minor note')}" if run["advisory"] else ""
+    if prior:
+        return "resolved", f"all {prior} fixed and re-checked{notes}"
     if run["advisory"]:
-        n = run["advisory"]
-        return "passed", f"no blocking issues, {n} minor note{'s' if n != 1 else ''}"
+        return "passed", f"no blocking issues{notes}"
     return "passed", "no issues found"
 
 
@@ -251,7 +268,7 @@ def segment(agent, session_id, now=None, color=False):
 
 def _today_and_week(now):
     week = state.read_jsonl(state.path("runs.jsonl"), now - 7 * 86400)
-    return [r for r in week if _day(r["ts"] + r["duration"]) == _day(now)], week   # by finish day, like status.json
+    return [r for r in week if r.get("reviewers") and _day(r["ts"] + r["duration"]) == _day(now)], week   # by finish day
 
 
 def _num(d, key):

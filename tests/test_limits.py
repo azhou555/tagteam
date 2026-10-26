@@ -227,8 +227,12 @@ class Guards(HookRig, unittest.TestCase):
         sf = self.core._session_file(mock.Mock(agent="claude", session_id="sess1"))
         self.assertEqual(state.read_json(sf)["round"], 2)
         self.rewind()
-        self.assertEqual(self.stop(self.blocker(), change=False), {})      # round 3 > max_rounds_per_turn
+        third = self.stop(self.blocker(), change=False)                    # round 3 is the confirm round: no spawn, no block
+        self.assertEqual(third, {"systemMessage": "[tagteam] ⚠ Unresolved: 1 issue still open after 2 fix rounds"})
         self.assertEqual(len(self.calls), 1)
+        last = state.read_jsonl(state.path("runs.jsonl"))[-1]
+        self.assertEqual((last["confirm"], last["reviewers"], last["blocking"]), (True, [], 1))
+        self.assertEqual(self.stop(self.blocker(), change=False), {})      # round 4: the turn is over
 
     def test_failed_run_records_no_digest(self):
         self.start()

@@ -37,8 +37,9 @@ def reserve(run_id, session_key, now, cfg):
         return False
 
 
-def digest(artifacts):
-    h = hashlib.sha256()
+def digest(artifacts, extra=""):
+    """Hash of the diffs reviewed; `extra` (an author's rebuttal) makes a re-review of the same diff its own entry."""
+    h = hashlib.sha256(extra.encode())
     for part in sorted(a["path"] + "\0" + a["diff"] for a in artifacts):
         h.update(part.encode() + b"\1")
     return h.hexdigest()

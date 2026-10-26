@@ -240,7 +240,7 @@ class EndToEnd(HookRig, unittest.TestCase):
         pathlib.Path(self.repo, "feature.py").write_text("def f(x):\n    return x[0] if x else None\n" * 4)
         with mock.patch.object(runner, "run_all", self.fake_run_all({})):
             out = self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=True, last_assistant_message="fixed"))
-        self.assertTrue(out["systemMessage"].startswith("[tagteam] ✓ Review passed: no issues found"), out)
+        self.assertTrue(out["systemMessage"].startswith("[tagteam] ✓ Issues resolved: all 1 fixed and re-checked"), out)
         prompt = next(iter(self.calls[1].values()))
         self.assertIn("Round 2", prompt)
         self.assertIn("fixed", prompt)
@@ -369,7 +369,7 @@ class Live(unittest.TestCase):
 
     def done_run(self, **kw):
         return {"ts": time.time(), "run_id": "x", "author": "claude", "session_id": "s", "tag": "turn", "round": 1,
-                "reviewers": ["copilot"], "action": "allow", "blocking": 0, "advisory": 0, "failed": [],
+                "max_rounds": 2, "reviewers": ["copilot"], "action": "allow", "blocking": 0, "advisory": 0, "failed": [],
                 "duration": 3.0, **kw}
 
     def test_tracking_lifecycle_and_progress(self):
@@ -416,20 +416,20 @@ class Live(unittest.TestCase):
                          "tagteam ✓ Review passed: no blocking issues, 2 minor notes · just now · 1 review today")
         live.record_run(self.done_run(action="block", blocking=2))
         live.note_error()
-        self.assertEqual(live.segment("claude", "s"), "tagteam ✗ Changes requested: 2 issues sent back to fix · "
+        self.assertEqual(live.segment("claude", "s"), "tagteam ✗ Changes requested: 2 issues to fix (round 1/2) · "
                                                       "just now · 2 reviews today · ⚠ 1 hook error (24h)")
         live.record_run(self.done_run(failed=["copilot"]))
         self.assertIn("⚠ Review failed: every reviewer errored or timed out", live.segment("claude", "s"))
         live.record_run(self.done_run(reviewers=[]))
         self.assertIn("⚠ Not reviewed: no reviewer had quota available", live.segment("claude", "s"))
         self.assertEqual(live.segment("claude", "never-reviewed"),
-                         "tagteam no review yet this session · 4 reviews today · ⚠ 1 hook error (24h)")
+                         "tagteam no review yet this session · 3 reviews today · ⚠ 1 hook error (24h)")
 
     def test_colored_segment_uses_sage_brand_and_pastel_text(self):
         live.record_run(self.done_run(action="block", blocking=1))
         seg = live.segment("claude", "s", color=True)
         self.assertTrue(seg.startswith("\x1b[38;5;108mtagteam\x1b[0m "), seg)
-        self.assertIn("\x1b[38;5;217m✗ Changes requested: 1 issue sent back to fix\x1b[0m", seg)
+        self.assertIn("\x1b[38;5;217m✗ Changes requested: 1 issue to fix (round 1/2)\x1b[0m", seg)
         self.assertNotIn("48;5", seg)                                        # no background blocks
         with live.tracking(self.rec()):
             self.assertIn("\x1b[38;5;223m⟳ Reviewing changes\x1b[0m", live.segment("claude", "s", color=True))
@@ -442,7 +442,7 @@ class Live(unittest.TestCase):
         rose = live.KINDS["blocked"]["hex"]
         self.assertTrue(out.startswith(":person.2.fill: :xmark.octagon.fill: 1 | "), out)
         self.assertIn(f"sfcolor2={rose}", out.splitlines()[0])
-        self.assertIn(f"Changes requested: 1 issue sent back to fix | color={rose} bash=/usr/bin/open", out)
+        self.assertIn(f"Changes requested: 1 issue to fix (round 1/2) | color={rose} bash=/usr/bin/open", out)
         live.note_error()
         head = live.render_swiftbar().splitlines()[0]
         self.assertIn(":exclamationmark.triangle.fill:", head)
@@ -467,7 +467,7 @@ class Live(unittest.TestCase):
             self.assertEqual(live.backfill(), 2)
             self.assertEqual(state.read_json(state.path("status.json"))["day"], "2020-01-02")   # stored day is old
             self.assertRegex(live.segment("claude", "s"),
-                             r"^tagteam ✗ Changes requested: 1 issue sent back to fix · \d+d ago · 0 reviews today$")
+                             r"^tagteam ✗ Changes requested: 1 issue to fix · \d+d ago · 0 reviews today$")
             self.assertEqual(live.backfill(), 0)                                               # once only
 
     def test_watch_render(self):
@@ -478,7 +478,7 @@ class Live(unittest.TestCase):
         self.assertIn("Running (1):", out)
         self.assertIn("Reviews today: 2", out)
         self.assertIn("copilot 1", out)
-        self.assertIn("✗ Changes requested: 1 issue sent back to fix", out)
+        self.assertIn("✗ Changes requested: 1 issue to fix (round 1/2)", out)
 
     def test_statusline_entry_reads_stdin(self):
         live.record_run(self.done_run(session_id="abc"))
