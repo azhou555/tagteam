@@ -74,7 +74,7 @@ def completion(run, lines_changed):
 STATE_ERROR = "state error, see tagteam.log"
 
 
-def review(ev, cfg, s, artifacts, round_no, run_tag, lock=limits.HELD):
+def review(ev, cfg, s, artifacts, round_no, run_tag, lock):
     """Guard, route, run, decide. The caller holds the session lock (`lock` says how that went). Returns
     (action, message, run_dir, blocking); message is the block reason or, on allow, a one-line completion
     notice. run_dir None means no run was spawned: a block is a re-issued one, an allow with a message is a

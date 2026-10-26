@@ -4,7 +4,9 @@ import os
 import pathlib
 import subprocess
 import sys
+import shutil
 import tempfile
+import unittest
 from unittest import mock
 
 TMP_HOME = tempfile.mkdtemp(prefix="tagteam-test-")
@@ -12,6 +14,19 @@ os.environ["TAGTEAM_HOME"] = TMP_HOME
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from tagteam import config, state  # noqa: E402,F401
+
+_run = unittest.TestCase.run
+
+
+def _clean_run(self, result=None):
+    """Every test starts with an empty state dir and no user config, so reservations, failure counts and
+    cooldowns never leak between tests or modules."""
+    shutil.rmtree(pathlib.Path(TMP_HOME) / "state", ignore_errors=True)
+    (pathlib.Path(TMP_HOME) / "config.toml").unlink(missing_ok=True)
+    return _run(self, result)
+
+
+unittest.TestCase.run = _clean_run
 
 FIX = pathlib.Path(__file__).parent / "fixtures"
 CFG = config.load()

@@ -143,6 +143,20 @@ class RepoTightens(ConfigCase):
         cfg, src = config.load_with_sources(str(self.repo))
         self.assertEqual((cfg["limits"]["cooldown_min"], src["limits.cooldown_min"]), (60, "repo"))
 
+    def test_non_finite_numbers_are_config_errors(self):
+        keys = {"limits": ("cooldown_min", "max_reviews_per_hour", "max_rounds_per_turn"),
+                "review": ("max_diff_chars",)}
+        for where in ("user", "repo"):
+            for table, ks in keys.items():
+                for k in ks:
+                    for bad in ("nan", "inf", "-inf"):
+                        with self.subTest(where=where, key=k, value=bad):
+                            (self.user if where == "user" else self.repo_file)(f"[{table}]\n{k} = {bad}\n")
+                            with self.assertRaises(config.ConfigError):
+                                config.load(str(self.repo))
+                            (self.home / "config.toml").unlink(missing_ok=True)
+                            (self.repo / ".tagteam.toml").unlink(missing_ok=True)
+
     def test_legacy_repo_routing_keys_log_no_false_drop(self):
         self.repo_file('[routing]\nsmall = 2\n')
         cfg = config.load(str(self.repo))

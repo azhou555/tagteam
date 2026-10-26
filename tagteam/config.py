@@ -4,6 +4,7 @@ Old-shape files keep loading through a shim that maps their keys and logs one de
 """
 import copy
 import json
+import math
 import pathlib
 import re
 import tomllib
@@ -125,6 +126,17 @@ def _conservative(cfg, over):
     return over
 
 
+def _non_finite(node, path=""):
+    """Dotted key of the first nan or inf in a parsed TOML tree, or None. They'd slip past every limit comparison."""
+    if isinstance(node, float) and not math.isfinite(node):
+        return path
+    for k, v in (node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()):
+        bad = _non_finite(v, f"{path}.{k}" if path else str(k))
+        if bad:
+            return bad
+    return None
+
+
 def _read(p, label, defaults):
     try:
         raw = tomllib.loads(p.read_text())
@@ -132,6 +144,9 @@ def _read(p, label, defaults):
         bad = _mismatch(defaults, new) or _bad_list(new)
         if bad:
             raise ValueError(f"{bad} has the wrong type")
+        bad = _non_finite(new)
+        if bad:
+            raise ValueError(f"{bad} must be a finite number")
     except (OSError, ValueError, AttributeError, TypeError) as e:
         raise ConfigError(f"{p}: {e}") from e
     if legacy:

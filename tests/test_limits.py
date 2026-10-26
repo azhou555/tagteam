@@ -13,8 +13,19 @@ from tests.helpers import CFG, HookRig, finding, make_repo, state, use_toml, wri
 from tagteam import limits, quota, runner
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-RES = state.path("reservations.jsonl")
 NOTICE = "[tagteam] ⚠ Not reviewed: review limit reached ({n} per hour)"
+
+
+def wait_for(paths, timeout=20):
+    end = time.time() + timeout
+    while not all(pathlib.Path(p).exists() for p in paths):
+        if time.time() > end:
+            raise TimeoutError(f"never appeared: {paths}")
+        time.sleep(0.005)
+
+
+def res():
+    return state.path("reservations.jsonl")
 
 
 def cfg_max(n):
@@ -23,12 +34,12 @@ def cfg_max(n):
 
 def seed(n, age=0.0):
     now = time.time()
-    RES.write_text("".join(json.dumps({"run_id": f"r{i}", "session": "x", "ts": now - age}) + "\n" for i in range(n)))
+    res().write_text("".join(json.dumps({"run_id": f"r{i}", "session": "x", "ts": now - age}) + "\n" for i in range(n)))
 
 
 class Reservations(unittest.TestCase):
     def setUp(self):
-        RES.unlink(missing_ok=True)
+        res().unlink(missing_ok=True)
 
     def test_default_ceiling_is_30(self):
         self.assertEqual(CFG["limits"]["max_reviews_per_hour"], 30)
@@ -36,23 +47,24 @@ class Reservations(unittest.TestCase):
     def test_parallel_reservations_never_exceed_ceiling(self):
         seed(4)
         env = {**os.environ, "TAGTEAM_HOME": str(state.HOME)}
-        gate = pathlib.Path(tempfile.mkdtemp(), "go")
-        code = ("import sys,time,pathlib,json\nsys.path.insert(0, sys.argv[2])\n"
+        work = pathlib.Path(tempfile.mkdtemp())
+        code = ("import sys,time,pathlib\nsys.path.insert(0, sys.argv[2])\n"
                 "from tagteam import config, limits\ncfg = config.load()\ncfg['limits']['max_reviews_per_hour'] = 5\n"
-                "while not pathlib.Path(sys.argv[3]).exists(): time.sleep(0.005)\n"
+                "w = pathlib.Path(sys.argv[3])\n(w / ('ready' + sys.argv[1])).write_text('')\n"
+                "while not (w / 'go').exists(): time.sleep(0.002)\n"
                 "print(limits.reserve(sys.argv[1], 's', time.time(), cfg))\n")
-        procs = [subprocess.Popen([sys.executable, "-c", code, f"p{i}", str(ROOT), str(gate)], env=env,
+        procs = [subprocess.Popen([sys.executable, "-c", code, str(i), str(ROOT), str(work)], env=env,
                                   stdout=subprocess.PIPE, text=True) for i in range(8)]
-        time.sleep(0.5)
-        gate.write_text("")
+        wait_for([work / f"ready{i}" for i in range(8)])
+        (work / "go").write_text("")
         outs = [p.communicate(timeout=20)[0].strip() for p in procs]
         self.assertEqual(sorted(outs), ["False"] * 7 + ["True"])
-        self.assertEqual(len(RES.read_text().splitlines()), 5)
+        self.assertEqual(len(res().read_text().splitlines()), 5)
 
     def test_reservations_expire_after_an_hour(self):
         seed(5, age=3601)
         self.assertTrue(limits.reserve("new", "s", time.time(), cfg_max(5)))
-        self.assertEqual(len(RES.read_text().splitlines()), 1)
+        self.assertEqual(len(res().read_text().splitlines()), 1)
 
     def test_crashed_run_still_counts(self):
         seed(5)                                       # reservations with no run record, as after a killed hook
@@ -104,7 +116,6 @@ class Breaker(unittest.TestCase):
                     self.assertFalse(quota.cooling("agy"))
         self.assertTrue(quota.cooling("agy"))
 
-
     def test_breaker_state_error_does_not_break_the_run(self):
         h = mock.Mock(reviewer=mock.Mock(**{"argv.return_value": (["x"], None, None), "parse.return_value": None,
                                             "usage.return_value": {}}))
@@ -125,7 +136,7 @@ class Guards(HookRig, unittest.TestCase):
     def setUp(self):
         from tagteam import core
         self.rig()
-        RES.unlink(missing_ok=True)
+        res().unlink(missing_ok=True)
         state.path("runs.jsonl").unlink(missing_ok=True)
         write_user_config(use_toml(["copilot"]))
         self.core = core
@@ -182,13 +193,13 @@ class Guards(HookRig, unittest.TestCase):
         self.start()
         self.stop()
         self.assertEqual(len(self.calls), 1)
-        self.assertEqual(len(RES.read_text().splitlines()), 1)
+        self.assertEqual(len(res().read_text().splitlines()), 1)
 
     def test_route_reason_spends_no_reservation(self):
         write_user_config(use_toml([]))
         self.start()
         self.stop()
-        self.assertFalse(RES.exists() and RES.read_text())
+        self.assertFalse(res().exists() and res().read_text())
 
     def test_approved_digest_skips_review(self):
         self.start()
@@ -198,7 +209,7 @@ class Guards(HookRig, unittest.TestCase):
         self.assertEqual(self.stop(change=False), {})
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(len(state.read_jsonl(state.path("runs.jsonl"))), runs)
-        self.assertEqual(len(RES.read_text().splitlines()), 1)
+        self.assertEqual(len(res().read_text().splitlines()), 1)
 
     def test_blocked_digest_reissues_block_and_counts_round(self):
         self.start()
@@ -210,7 +221,7 @@ class Guards(HookRig, unittest.TestCase):
         second = self.stop(self.blocker(), change=False)
         self.assertEqual(second, first)
         self.assertEqual(len(self.calls), 1)
-        self.assertEqual(len(RES.read_text().splitlines()), 1)
+        self.assertEqual(len(res().read_text().splitlines()), 1)
         self.assertEqual(state.read_jsonl(state.path("runs.jsonl")), runs)
         self.assertEqual(state.path("status.json").read_bytes(), status)
         sf = self.core._session_file(mock.Mock(agent="claude", session_id="sess1"))
@@ -282,18 +293,19 @@ class Guards(HookRig, unittest.TestCase):
         recorded = state.read_jsonl(state.path("runs.jsonl"))
         self.assertEqual((len(recorded) - runs, recorded[-1]["action"]), (1, "block"))
 
-    def test_session_lock_taken_once_per_stop(self):
-        """turn_end holds the lock from before it reads the round; review does not re-take it."""
+    def test_session_lock_held_before_turn_end_reads_state(self):
+        """A rival trigger must see BUSY from the moment turn_end starts collecting, not only inside review."""
         self.start()
         seen = []
-        real = limits.session_lock
+        real = self.core.collect
 
-        def spy(*a):
-            seen.append("lock")
-            return real(*a)
-        with mock.patch.object(limits, "session_lock", spy):
+        def collect(s, cfg):
+            with limits.session_lock("claude", "sess1") as st:
+                seen.append(st)
+            return real(s, cfg)
+        with mock.patch.object(self.core, "collect", collect):
             self.stop()
-        self.assertEqual(seen, ["lock"])                 # once per Stop: review does not re-take it
+        self.assertEqual(seen, [limits.BUSY])
 
     def test_same_plan_twice_is_reviewed_once(self):
         self.start()
@@ -319,13 +331,18 @@ import io, json, os, pathlib, sys, time
 from unittest import mock
 sys.path.insert(0, sys.argv[1])
 from tagteam import cli, core, harnesses, runner
-mode, sid, repo, pids, gate = sys.argv[2:7]
+mode, name, sid, repo, work = sys.argv[2:7]
+work = pathlib.Path(work)
 base = {"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": repo, "prompt_id": "p",
         "transcript_path": "/x/y.jsonl"}
+def wait(path):
+    end = time.time() + 30
+    while not path.exists() and time.time() < end:
+        time.sleep(0.002)
 def fake(jobs, cfg, cwd, run_dir, deadline, on_done=None):
-    with open(pids, "a") as f:
+    with open(work / "pids", "a") as f:
         f.write(f"{os.getpid()}\\n")
-    time.sleep(1)
+    wait(work / "release")
     out = {r: ({"reviewer": r, "ok": True, "duration": 1}, {"verdict": "approve", "summary": "", "findings": []})
            for r in jobs}
     for r, (m, _) in out.items():
@@ -334,11 +351,12 @@ def fake(jobs, cfg, cwd, run_dir, deadline, on_done=None):
 with mock.patch.object(harnesses, "detected", return_value=["claude", "copilot"]), \\
         mock.patch.object(core, "headroom_map", return_value={}), mock.patch.object(runner, "run_all", fake):
     if mode == "start":
-        sys.stdin = io.StringIO(json.dumps({**base, "prompt": "add"}))
+        payload = {**base, "prompt": "add"}
     else:
-        while not pathlib.Path(gate).exists():
-            time.sleep(0.005)
-        sys.stdin = io.StringIO(json.dumps({**base, "hook_event_name": "Stop", "stop_hook_active": False}))
+        (work / ("ready-" + name)).write_text("")
+        wait(work / "go")
+        payload = {**base, "hook_event_name": "Stop", "stop_hook_active": False}
+    sys.stdin = io.StringIO(json.dumps(payload))
     cli.hook("claude", "x")
 '''
 
@@ -347,20 +365,25 @@ with mock.patch.object(harnesses, "detected", return_value=["claude", "copilot"]
         pathlib.Path(home, "config.toml").write_text(use_toml(["copilot"]))
         repo = make_repo()
         work = pathlib.Path(tempfile.mkdtemp())
-        script, pids, gate = work / "s.py", work / "pids", work / "go"
+        script = work / "s.py"
         script.write_text(self.SCRIPT)
         env = {**os.environ, "TAGTEAM_HOME": home}
         env.pop("TAGTEAM_DEPTH", None)
-        run = lambda mode, sid: subprocess.Popen([sys.executable, str(script), str(ROOT), mode, sid, repo,  # noqa: E731
-                                                  str(pids), str(gate)], env=env, stdout=subprocess.PIPE, text=True)
+        run = lambda mode, name, sid: subprocess.Popen([sys.executable, str(script), str(ROOT), mode, name, sid,  # noqa: E731
+                                                        repo, str(work)], env=env, stdout=subprocess.PIPE, text=True)
         for sid in ("s", "t"):
-            run("start", sid).communicate(timeout=20)
+            run("start", "start", sid).communicate(timeout=20)
         pathlib.Path(repo, "feature.py").write_text("a = 1\n" * 20)
-        procs = {name: run("stop", sid) for name, sid in (("s1", "s"), ("s2", "s"), ("t", "t"))}
-        time.sleep(0.7)
-        gate.write_text("")
+        procs = {name: run("stop", name, sid) for name, sid in (("s1", "s"), ("s2", "s"), ("t", "t"))}
+        wait_for([work / f"ready-{n}" for n in procs])
+        (work / "go").write_text("")
+        end = time.time() + 20
+        while not any(procs[k].poll() is not None for k in ("s1", "s2")):     # the loser exits while the winner waits
+            self.assertLess(time.time(), end)
+            time.sleep(0.005)
+        (work / "release").write_text("")
         outs = {n: json.loads(p.communicate(timeout=20)[0].strip().splitlines()[-1]) for n, p in procs.items()}
-        self.assertEqual(len(pids.read_text().split()), 2)                 # one review for s, one for t
+        self.assertEqual(len((work / "pids").read_text().split()), 2)         # one review for s, one for t
         self.assertEqual(sum(outs[k] == {} for k in ("s1", "s2")), 1)
         self.assertNotEqual(outs["t"], {})
 
