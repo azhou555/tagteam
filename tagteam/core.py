@@ -148,7 +148,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag):
     outside = [p for p in outside if not (repo and p.startswith(repo + os.sep))]
     before = changes.snapshot(repo) if repo else None
     watch = sandbox.Watch(repo, before, outside)
-    with sandbox.checkouts(repo, before, list(plan), repo or ev.cwd) as works:   # one disposable tree each
+    with sandbox.checkouts(repo, before, list(plan), repo or ev.cwd, max(7200, 2 * rv["deadline_s"])) as works:   # one disposable tree each
         jobs = {r: runner.build_prompt(r, ev.agent, works[r], s.get("prompt", ""), ts, rv["max_diff_chars"],
                                        prior=s.get("prior") or None, author_reply=ev.last_message,
                                        git_activity=git_activity)
@@ -162,11 +162,11 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag):
         guilty = {r: "wrote in its sandbox" for r in plan if works[r] != (repo or ev.cwd) and sandbox.dirty(works[r], before)}
     seen = watch.after()
     in_place = any(works[r] == (repo or ev.cwd) for r in plan)
-    if seen["git"] or seen["outside"]:               # a security signal, and shared files no one can be blamed for
-        guilty = {r: "git config/hooks or touched files changed" for r in plan}
-    elif in_place and seen["repo"]["tree"]:          # no sandbox to prove who wrote, so the postcondition decides
-        guilty = {r: "real tree changed with no sandbox" for r in plan}
-    changed = seen["repo"]["tree"] + seen["repo"]["refs"]
+    if seen["git"]:                                  # a security signal; users rarely edit these mid-review
+        guilty = {r: "git config/hooks changed" for r in plan}
+    elif in_place and (seen["repo"]["tree"] or seen["outside"]):   # no sandbox to prove who wrote: postcondition decides
+        guilty = {r: "real tree or touched files changed with no sandbox" for r in plan}
+    changed = seen["repo"]["tree"] + seen["repo"]["refs"] + seen["outside"]
     if guilty:
         state.log("REVIEWER WROTE OUTSIDE READ-ONLY; disabled", run_id=run_id, reviewers=list(guilty),
                   why=guilty, git=seen["git"], outside=seen["outside"], tree=seen["repo"]["tree"][:50],
@@ -174,15 +174,15 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag):
         for r, why in guilty.items():
             limits.disable(r, f"{why} (run {run_id})")
         run["disabled"] = list(guilty)
-    elif changed:
-        state.log("repo changed during review; not blaming a reviewer", run_id=run_id,
-                  tree=seen["repo"]["tree"][:50], refs=seen["repo"]["refs"])
-    if changed and not guilty:
+    if changed:
+        state.log("repo changed during review", run_id=run_id, blamed=list(guilty), tree=seen["repo"]["tree"][:50],
+                  refs=seen["repo"]["refs"], outside=seen["outside"])
+    if changed:
         run["real_repo_changed"] = changed
     warn = ""
     if guilty:
         warn += f" · ⚠ disabled {', '.join(guilty)}: wrote outside read-only (tagteam doctor --clear)"
-    if changed and not guilty:
+    if changed:
         warn += " · ⚠ your repo changed during review (see tagteam.log)"
     with state.locked("history"):
         for r, (meta, _) in outcomes.items():

@@ -4,6 +4,7 @@ import shutil
 import pathlib
 import subprocess
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -137,15 +138,32 @@ class EndToEnd(HookRig, unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertIn("no listed reviewer is available", state.read_jsonl(state.path("runs.jsonl"))[-1]["reason"])
 
+    def stop_two(self, bad_script):
+        """copilot runs bad_script, codex is clean; both reviewers are in the round."""
+        write_user_config(use_toml(["copilot", "codex"]) + "[review.per_change]\nsmall = 2\n")
+        real = harnesses.get
+        revs = {"copilot": fake_harness(bad_script)("copilot").reviewer, "codex": fake_harness("true")("copilot").reviewer}
+        get = lambda n: dataclasses.replace(real(n), reviewer=revs.get(n, real(n).reviewer))
+        pathlib.Path(self.repo, "feature.py").write_text("a = 1\n" * 20)
+        with mock.patch.object(harnesses, "get", get):
+            return self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+
     def test_git_config_change_disables_every_reviewer(self):
-        self.stop("git config core.hooksPath /evil")
-        self.assertEqual(list(limits.disabled()), ["copilot"])
+        self.stop_two("git config core.hooksPath /evil")
+        self.assertEqual(sorted(limits.disabled()), ["codex", "copilot"])
         self.assertEqual(subprocess.run(["git", "-C", self.repo, "config", "core.hooksPath"], capture_output=True,
                                         text=True).stdout.strip(), "/evil")
 
-    def test_hook_install_in_shared_git_dir_is_detected(self):
-        self.stop("echo x > $(git rev-parse --git-common-dir)/hooks/pre-commit")
+    def test_hook_install_in_shared_git_dir_disables_every_reviewer(self):
+        self.stop_two("echo x > $(git rev-parse --git-common-dir)/hooks/pre-commit")
+        self.assertEqual(sorted(limits.disabled()), ["codex", "copilot"])
+
+    def test_guilty_reviewer_and_repo_change_show_both_notices(self):
+        out = self.stop(f"echo x > pwned.txt; echo y > {self.repo}/user.txt")
         self.assertEqual(list(limits.disabled()), ["copilot"])
+        self.assertIn("user.txt", state.read_jsonl(state.path("runs.jsonl"))[-1]["real_repo_changed"])
+        self.assertIn("⚠ disabled copilot", out["systemMessage"])
+        self.assertIn("⚠ your repo changed during review", out["systemMessage"])
 
     def test_user_edit_during_review_disables_nobody_but_warns(self):
         out = self.stop(f"echo x > {self.repo}/user.txt; git -C {self.repo} update-ref refs/heads/other HEAD")
@@ -208,6 +226,19 @@ class Hardening(unittest.TestCase):
             self.assertIn(seen["cwd"][r] + "/a.py", prompt)
         write_user_config("")
 
+    def test_idle_worktree_is_cleared_but_a_fresh_one_is_kept(self):
+        repo = make_repo()
+        old, fresh = (os.path.join(tempfile.mkdtemp(), f"tagteam-review-{n}") for n in ("old", "fresh"))
+        for d in (old, fresh):
+            sh(repo, "git", "worktree", "add", "--detach", d)
+        os.utime(old, (time.time() - 3 * 3600,) * 2)
+        with sandbox.checkout(repo, changes.snapshot(repo)):
+            pass
+        names = " ".join(worktrees(repo))
+        self.assertNotIn("tagteam-review-old", names)
+        self.assertIn("tagteam-review-fresh", names)
+        self.assertTrue(os.path.isdir(fresh))
+
     def test_stale_worktree_from_a_killed_review_is_cleared(self):
         repo = make_repo()
         stale = os.path.join(tempfile.mkdtemp(), "tagteam-review-dead")
@@ -238,6 +269,25 @@ class Hardening(unittest.TestCase):
             prompt = runner.build_prompt("codex", "claude", "/sb", "", task, 10000)
         self.assertNotIn(home, prompt)
         self.assertIn("### ~/.claude/plans/p.md", prompt)
+
+
+class OutsideEdit(unittest.TestCase):
+    def test_user_edit_of_touched_outside_file_in_sandboxed_review_disables_nobody(self):
+        repo = make_repo()
+        plan = os.path.join(os.path.realpath(tempfile.mkdtemp()), "plan.md")
+        pathlib.Path(plan).write_text("v1\n")
+        write_user_config(use_toml(["copilot"]))
+        ev = types.SimpleNamespace(agent="claude", session_id="s1", cwd=repo, last_message="")
+        s = {"prompt": "", "repo": repo, "touched": [plan], "prior": [], "refs": changes.refs(repo)}
+        artifact = {"path": plan, "status": "modified", "lines_changed": 30, "diff": "x"}
+        with mock.patch.object(harnesses, "detected", return_value=["copilot"]), \
+                mock.patch.object(core, "headroom_map", return_value={}), \
+                mock.patch.object(harnesses, "get", fake_harness(f"echo v2 > {plan}")):
+            action, msg, _, _ = core.review(ev, config.load(), s, [artifact], 1, "turn", limits.HELD)
+        self.assertEqual(limits.disabled(), {})
+        self.assertIn("⚠ your repo changed during review (see tagteam.log)", msg)
+        self.assertEqual(state.read_jsonl(state.path("runs.jsonl"))[-1]["real_repo_changed"], [plan])
+        write_user_config("")
 
 
 class NonGit(unittest.TestCase):

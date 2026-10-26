@@ -8,7 +8,6 @@ import time
 from . import changes, state
 
 PREFIX = "tagteam-review-"
-STALE_S = 7200
 _GIT_ENV = {"GIT_AUTHOR_NAME": "tagteam", "GIT_COMMITTER_NAME": "tagteam",
             "GIT_AUTHOR_EMAIL": "tagteam@localhost", "GIT_COMMITTER_EMAIL": "tagteam@localhost",
             "GIT_AUTHOR_DATE": "@0 +0000", "GIT_COMMITTER_DATE": "@0 +0000"}
@@ -22,8 +21,9 @@ def _remove(repo, path):
     shutil.rmtree(path, ignore_errors=True)
 
 
-def _clear_stale(repo):
-    """Drop this tool's own leftovers (a killed review): missing or long-idle tagteam-review-* worktrees only."""
+def _clear_stale(repo, stale_s):
+    """Drop this tool's own tagteam-review-* leftovers (a killed review): missing, or idle past `stale_s`,
+    which must exceed any live review's deadline."""
     cur = None
     for line in changes.git(repo, "worktree", "list", "--porcelain").splitlines() + [""]:
         if line.startswith("worktree "):
@@ -34,7 +34,7 @@ def _clear_stale(repo):
             p = cur["path"]
             if os.path.basename(p).startswith(PREFIX):
                 try:
-                    old = time.time() - os.path.getmtime(p) > STALE_S
+                    old = time.time() - os.path.getmtime(p) > stale_s
                 except OSError:
                     old = True
                 if cur["prunable"] or old:
@@ -57,7 +57,7 @@ def _worktree(repo, commit):
 
 
 @contextlib.contextmanager
-def checkouts(repo, tree, names, cwd=None):
+def checkouts(repo, tree, names, cwd=None, stale_s=7200):
     """Yield {name: path}: one throwaway worktree of `tree` per name, all removed on exit whatever happens.
     Without a repo, or if worktrees can't be made, every name gets `cwd` (flags plus `Watch` only)."""
     cwd = cwd or os.getcwd()
@@ -65,7 +65,7 @@ def checkouts(repo, tree, names, cwd=None):
     try:
         if repo and tree:
             try:
-                _clear_stale(repo)
+                _clear_stale(repo, stale_s)
                 commit = changes.git(repo, "commit-tree", tree, "-m", "tagteam-review", env=_GIT_ENV).strip()
                 for _ in names:
                     made.append(_worktree(repo, commit))
