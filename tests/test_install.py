@@ -2,6 +2,7 @@ import contextlib
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -45,7 +46,7 @@ class Install(unittest.TestCase):
 
     def test_refresh_added_and_removed(self):
         first, again, after = self.roundtrip({"type": "command", "command": "ponytail"})
-        self.assertEqual(first["command"], "'/opt/bin/tagteam' statusline")
+        self.assertEqual(first["command"], "/opt/bin/tagteam statusline")
         self.assertEqual((first["refreshInterval"], again), (2, first))
         self.assertEqual(after, {"type": "command", "command": "ponytail"})
 
@@ -181,14 +182,14 @@ class Install(unittest.TestCase):
         self.assertEqual(after, {"type": "command", "command": "ponytail"})
 
     def test_plugin_and_hooks_call_the_entry(self):
-        self.assertIn("exec '/opt/bin/tagteam' swiftbar\n", install.swiftbar_plugin())
+        self.assertIn("exec /opt/bin/tagteam swiftbar\n", install.swiftbar_plugin())
         with mock.patch("builtins.print"):
             install.install(["claude"])
         cmds = [h["command"] for g in json.loads(self.settings.read_text())["hooks"].values() for e in g
                 for h in e["hooks"]]
         self.assertEqual(len(cmds), 4)
         for c in cmds:
-            self.assertRegex(c, r"^: tagteam-hook-form=1; '/opt/bin/tagteam' hook claude [a-z-]+$")
+            self.assertRegex(c, r"^: tagteam-hook-form=1; /opt/bin/tagteam hook claude [a-z-]+$")
 
     def test_install_rewrites_old_checkout_hooks_by_tag(self):
         old = ": tagteam-hook-form=1; '/usr/bin/python3' '/old/repo/bin/tagteam' hook claude turn-end"
@@ -203,7 +204,7 @@ class Install(unittest.TestCase):
         self.assertEqual(len(ours), 4)
         self.assertEqual(len([e for e in hooks["Stop"] if claude_h.base.ours(e)]), 1)
         self.assertNotIn("/old/repo", json.dumps(ours))
-        self.assertIn("'/opt/bin/tagteam' hook claude turn-end", json.dumps(hooks["Stop"][1]))
+        self.assertIn("/opt/bin/tagteam hook claude turn-end", json.dumps(hooks["Stop"][1]))
 
     def test_failed_check_keeps_old_entries(self):
         codex = pathlib.Path(codex_h.PATH)
@@ -215,7 +216,7 @@ class Install(unittest.TestCase):
             install.install(["claude", "codex"])
         self.assertEqual(codex.read_bytes(), before)
         self.assertIn("tagteam-hook-form=1", self.settings.read_text())
-        self.assertIn("'/opt/bin/tagteam' hook claude", self.settings.read_text())
+        self.assertIn("/opt/bin/tagteam hook claude", self.settings.read_text())
         self.assertTrue(any("codex: kept existing hooks (check failed" in str(c.args[0]) for c in pr.call_args_list))
 
 
@@ -234,13 +235,29 @@ class Entry(unittest.TestCase):
         script.write_text("#!/bin/sh\n")
         script.chmod(0o755)
         with mock.patch.object(install.shutil, "which", return_value="/usr/local/bin/tagteam"):
-            self.assertEqual(install.entry(), "'/usr/local/bin/tagteam'")
+            self.assertEqual(install.entry(), "/usr/local/bin/tagteam")
         with mock.patch.object(install.shutil, "which", return_value=None):
             with mock.patch.object(sys, "argv", [str(script)]):
-                self.assertEqual(install.entry(), f"'{os.path.realpath(script)}'")
+                self.assertEqual(install.entry(), shlex.quote(os.path.realpath(script)))
             for argv0 in (str(ROOT / "tagteam" / "__main__.py"), "-m", "/no/such/file"):
                 with mock.patch.object(sys, "argv", [argv0]):
-                    self.assertEqual(install.entry(), f"'{sys.executable}' -m tagteam")
+                    self.assertEqual(install.entry(), f"{shlex.quote(sys.executable)} -m tagteam")
+
+    def test_which_result_is_made_absolute(self):
+        with mock.patch.object(install.shutil, "which", return_value="rel/tagteam"):
+            self.assertEqual(install.entry_argv(), [os.path.abspath("rel/tagteam")])
+
+    def test_odd_path_stays_one_word_and_still_recognised(self):
+        odd = "/tmp/it's here/tagteam"
+        with mock.patch.object(install, "entry_argv", return_value=[odd]):
+            cmd = install.entry()
+            hook = claude_h.base.hook_cmd(cmd, "claude", "turn-end")
+            self.assertEqual(shlex.split(cmd), [odd])
+            self.assertEqual(shlex.split(hook)[-4:], [odd, "hook", "claude", "turn-end"])
+            self.assertTrue(claude_h.base.ours({"command": hook}))
+            self.assertTrue(claude_h.ours_statusline(f"{cmd} statusline"))
+        with mock.patch.object(install, "entry_argv", return_value=["/opt/my py/python", "-m", "tagteam"]):
+            self.assertTrue(claude_h.ours_statusline(f"{install.entry()} statusline"))
 
 
 class Cli(unittest.TestCase):
@@ -281,6 +298,17 @@ class Cli(unittest.TestCase):
         self.assertTrue(lines[1].startswith("tagteam"), r.stdout)
         self.assertEqual(pathlib.Path(home, "state", "quota", "claude.json").read_text(), payload)
         self.assertEqual(self.run_tagteam("statusline", stdin="not json", home=home).returncode, 0)
+
+    def test_statusline_survives_quota_write_failure_and_bad_bytes(self):
+        home = tempfile.mkdtemp()
+        pathlib.Path(home, "statusline.orig").write_text("echo orig-line")
+        pathlib.Path(home, "state").mkdir()
+        pathlib.Path(home, "state", "quota").write_text("a file, so the quota dir cannot be made")
+        r = subprocess.run([sys.executable, "-m", "tagteam", "statusline"], input=b"\xff\xfe{", capture_output=True,
+                           cwd=ROOT, env={**os.environ, "TAGTEAM_HOME": home, "NO_COLOR": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.split(b"\n")[0], b"orig-line")
+        self.assertEqual(r.stderr, b"")
 
     def test_swiftbar_subcommand_prints_menu(self):
         r = self.run_tagteam("swiftbar")

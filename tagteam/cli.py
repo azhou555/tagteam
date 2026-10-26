@@ -53,13 +53,18 @@ def check(agent, phase):
 
 def statusline():
     """Claude Code status line: save its JSON for the quota reader, show the user's original line, then ours."""
-    raw = sys.stdin.read()
+    try:
+        raw = sys.stdin.buffer.read().decode(errors="replace")
+    except Exception:
+        raw = ""
     try:
         q = state.path("quota", "claude.json")
-        q.parent.mkdir(parents=True, exist_ok=True)
         tmp = q.with_name(f"claude.json.{os.getpid()}")
         tmp.write_text(raw)
         tmp.replace(q)
+    except Exception:
+        pass
+    try:
         orig = state.HOME / "statusline.orig"
         if orig.exists() and orig.read_text().strip():
             r = subprocess.run(["sh", "-c", orig.read_text()], input=raw, capture_output=True, text=True)

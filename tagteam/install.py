@@ -2,6 +2,7 @@
 exactly ours; Orca's and other entries are left alone); this module adds the menu bar item and launcher."""
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -24,7 +25,7 @@ def entry_argv():
     """argv that runs this tagteam: the installed executable, else this script, else `python -m tagteam`."""
     found = shutil.which("tagteam")
     if found:
-        return [found]
+        return [os.path.abspath(found)]
     me = os.path.realpath(sys.argv[0])
     if os.path.isfile(me) and os.access(me, os.X_OK):
         return [me]
@@ -32,9 +33,8 @@ def entry_argv():
 
 
 def entry():
-    """The same, as a shell command prefix; the program path is quoted."""
-    argv = entry_argv()
-    return " ".join([f"'{argv[0]}'", *argv[1:]])
+    """The same, as a shell command prefix."""
+    return shlex.join(entry_argv())
 
 
 def check_agent(name):
