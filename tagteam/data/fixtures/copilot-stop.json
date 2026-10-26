@@ -1,0 +1,8 @@
+{
+ "sessionId": "54df1a96-9619-4020-9805-43482464c960",
+ "timestamp": 1792904244021,
+ "cwd": "/tmp/spike/ws-copilot",
+ "transcriptPath": "/Users/user/.copilot/session-state/54df1a96-9619-4020-9805-43482464c960/events.jsonl",
+ "stopReason": "end_turn",
+ "stop_hook_active": false
+}

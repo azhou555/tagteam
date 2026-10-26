@@ -11,7 +11,8 @@ import unittest
 from unittest import mock
 
 from tests.helpers import CFG, art, finding, fx, make_repo, sh  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
-from tagteam import adapters, changes, classify, core, install, live, router, runner, state, verdict  # noqa: E402
+from tagteam import adapters, changes, classify, core, harnesses, install, live, router, runner, state, verdict  # noqa: E402
+from tagteam.harnesses import agy as agy_h, base as harness_base, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
 
 
 class Adapters(unittest.TestCase):
@@ -180,11 +181,11 @@ class Runner(unittest.TestCase):
         agy = json.dumps({"status": "SUCCESS", "response": json.dumps(payload), "structured_output": payload})
         copilot = "Here you go:\n```json\n" + json.dumps(payload) + "\n```"
         for agent, out in (("claude", claude), ("agy", agy), ("copilot", copilot)):
-            self.assertEqual(runner.parse_output(agent, out, None)["findings"][0]["claim"], "off by one in loop", agent)
-        self.assertIsNone(runner.parse_output("copilot", "no json here", None))
+            self.assertEqual(harnesses.get(agent).reviewer.parse(out, None)["findings"][0]["claim"], "off by one in loop", agent)
+        self.assertIsNone(harnesses.get("copilot").reviewer.parse("no json here", None))
 
     def test_normalize_repairs_bad_fields(self):
-        r = runner.normalize({"findings": [{"claim": "x", "severity": "huge", "confidence": "?"}]})
+        r = harness_base.normalize({"findings": [{"claim": "x", "severity": "huge", "confidence": "?"}]})
         self.assertEqual((r["verdict"], r["findings"][0]["severity"], r["findings"][0]["confidence"]),
                          ("changes_requested", "minor", 0.5))
 
@@ -515,10 +516,11 @@ class Install(unittest.TestCase):
     def setUp(self):
         d = pathlib.Path(tempfile.mkdtemp())
         self.settings = d / "settings.json"
-        patches = {"CLAUDE": self.settings, "CODEX": d / "codex.json", "COPILOT": d / "copilot.json",
-                   "AGY": d / "agy.json", "STATUSLINE_ORIG": d / "sl.orig", "STATUSLINE_ORIG_REFRESH": d / "sl.refresh",
-                   "SWIFTBAR_APP": d / "NoSwiftBar.app", "LAUNCHER": d / "tagteam.app"}
-        self.ps = [mock.patch.object(install, k, v) for k, v in patches.items()]
+        patches = [(claude_h, "PATH", self.settings), (codex_h, "PATH", d / "codex.json"),
+                   (copilot_h, "PATH", d / "copilot.json"), (agy_h, "PATH", d / "agy.json"),
+                   (claude_h, "STATUSLINE_ORIG", d / "sl.orig"), (claude_h, "STATUSLINE_ORIG_REFRESH", d / "sl.refresh"),
+                   (install, "SWIFTBAR_APP", d / "NoSwiftBar.app"), (install, "LAUNCHER", d / "tagteam.app")]
+        self.ps = [mock.patch.object(m, k, v) for m, k, v in patches]
         for x in self.ps:
             x.start()
 
@@ -666,7 +668,7 @@ class Install(unittest.TestCase):
             self.assertFalse((launcher / install.LAUNCHER_MARK).exists())
 
     def test_upgrade_from_old_wrapper_keeps_original_command(self):
-        install.STATUSLINE_ORIG.write_text("ponytail")
+        claude_h.STATUSLINE_ORIG.write_text("ponytail")
         old = {"type": "command", "command": f"sh '{state.ROOT / 'bin' / 'tagteam-statusline'}'"}
         first, _, after = self.roundtrip(old)
         self.assertEqual(first["refreshInterval"], 2)
