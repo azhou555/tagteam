@@ -98,13 +98,13 @@ def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
 
 
 def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
-    """jobs: {reviewer: prompt}. Runs in parallel; returns {reviewer: (meta, result)}.
+    """jobs: {reviewer: prompt}; cwd is a path or {reviewer: path}. Runs in parallel; returns {reviewer: (meta, result)}.
 
     on_done(reviewer, meta) is called from this thread as each reviewer finishes.
     """
     out = {}
     with cf.ThreadPoolExecutor(max_workers=max(1, len(jobs))) as ex:
-        futs = {ex.submit(run_one, a, cfg, p, cwd, deadline, run_dir): a for a, p in jobs.items()}
+        futs = {ex.submit(run_one, a, cfg, p, cwd[a] if isinstance(cwd, dict) else cwd, deadline, run_dir): a for a, p in jobs.items()}
         for f in cf.as_completed(futs):
             out[futs[f]] = f.result()
             if on_done:

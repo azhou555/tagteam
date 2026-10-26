@@ -146,21 +146,44 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag):
     git_activity = changes.ref_activity(repo, s["refs"], changes.refs(repo)) if repo and "refs" in s else []
     outside = sorted({p for p in s.get("touched", []) if os.path.isabs(p)} | {a["path"] for a in artifacts if os.path.isabs(a["path"])})
     outside = [p for p in outside if not (repo and p.startswith(repo + os.sep))]
-    digests, before = {p: changes.file_digest(p) for p in outside}, changes.snapshot(repo) if repo else None
-    with sandbox.checkout(repo, before, repo or ev.cwd) as work:     # reviewers see the snapshot, never the real path
-        jobs = {r: runner.build_prompt(r, ev.agent, work, s.get("prompt", ""), ts, rv["max_diff_chars"],
+    before = changes.snapshot(repo) if repo else None
+    watch = sandbox.Watch(repo, before, outside)
+    with sandbox.checkouts(repo, before, list(plan), repo or ev.cwd) as works:   # one disposable tree each
+        jobs = {r: runner.build_prompt(r, ev.agent, works[r], s.get("prompt", ""), ts, rv["max_diff_chars"],
                                        prior=s.get("prior") or None, author_reply=ev.last_message,
                                        git_activity=git_activity)
                 for r, ts in plan.items()}
+        if repo:                                     # intent, replies and findings may quote the real path
+            jobs = {r: p.replace(repo, works[r]) for r, p in jobs.items()}
         with live.tracking({"run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
                             "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "reviewers": list(plan),
                             "started": now, "expires": now + rv["deadline_s"] + 60}) as update:
-            outcomes = runner.run_all(jobs, cfg, work, run_dir, rv["deadline_s"], on_done=update)
-    if sandbox.wrote(repo, before, digests):         # can't tell which reviewer wrote, so none stay trusted
-        state.log("REVIEWER WROTE TO THE REAL TREE; disabling this round's reviewers", run_id=run_id, reviewers=list(plan))
-        for r in plan:
-            limits.disable(r, f"wrote to the real tree during run {run_id}")
-        run["wrote_real_tree"] = True
+            outcomes = runner.run_all(jobs, cfg, works, run_dir, rv["deadline_s"], on_done=update)
+        guilty = {r: "wrote in its sandbox" for r in plan if works[r] != (repo or ev.cwd) and sandbox.dirty(works[r], before)}
+    seen = watch.after()
+    in_place = any(works[r] == (repo or ev.cwd) for r in plan)
+    if seen["git"] or seen["outside"]:               # a security signal, and shared files no one can be blamed for
+        guilty = {r: "git config/hooks or touched files changed" for r in plan}
+    elif in_place and seen["repo"]["tree"]:          # no sandbox to prove who wrote, so the postcondition decides
+        guilty = {r: "real tree changed with no sandbox" for r in plan}
+    changed = seen["repo"]["tree"] + seen["repo"]["refs"]
+    if guilty:
+        state.log("REVIEWER WROTE OUTSIDE READ-ONLY; disabled", run_id=run_id, reviewers=list(guilty),
+                  why=guilty, git=seen["git"], outside=seen["outside"], tree=seen["repo"]["tree"][:50],
+                  refs=seen["repo"]["refs"])
+        for r, why in guilty.items():
+            limits.disable(r, f"{why} (run {run_id})")
+        run["disabled"] = list(guilty)
+    elif changed:
+        state.log("repo changed during review; not blaming a reviewer", run_id=run_id,
+                  tree=seen["repo"]["tree"][:50], refs=seen["repo"]["refs"])
+    if changed and not guilty:
+        run["real_repo_changed"] = changed
+    warn = ""
+    if guilty:
+        warn += f" · ⚠ disabled {', '.join(guilty)}: wrote outside read-only (tagteam doctor --clear)"
+    if changed and not guilty:
+        warn += " · ⚠ your repo changed during review (see tagteam.log)"
     with state.locked("history"):
         for r, (meta, _) in outcomes.items():
             state.append_jsonl(state.path("history.jsonl"),
@@ -177,7 +200,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag):
     run.update(action=action, blocking=len(blocking), advisory=len(advisory), failed=failed,
                duration=round(time.time() - now, 1))
     live.record_run(run)
-    return action, msg if action == "block" else completion(run, lines_changed), run_dir, blocking
+    return action, (msg if action == "block" else completion(run, lines_changed)) + warn, run_dir, blocking
 
 
 def wanted(ev, cfg, artifacts):
