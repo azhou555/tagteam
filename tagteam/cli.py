@@ -1,4 +1,4 @@
-"""tagteam CLI: `hook <agent> <phase> [--check]`, `statusline`, `swiftbar`, `status`, `watch`, `install`, `uninstall`."""
+"""tagteam CLI: `hook <agent> <phase> [--check]`, `statusline`, `swiftbar`, `config`, `status`, `watch`, `install`, `uninstall`."""
 import argparse
 import json
 import os
@@ -7,7 +7,7 @@ import sys
 import time
 import traceback
 
-from . import adapters, core, install, live, quota, state
+from . import adapters, config, core, install, live, quota, state
 
 
 def hook(agent, phase):
@@ -26,7 +26,13 @@ def hook(agent, phase):
         if repo and os.path.exists(os.path.join(repo, ".tagteam-off")):
             print("{}")
             return
-        cfg = state.load_config(repo)
+        try:
+            cfg = config.load(repo)
+        except config.ConfigError as e:
+            state.log("config error, not reviewing", agent=agent, phase=phase, error=str(e))
+            notice = {"action": "allow", "message": f"{adapters.MARKER} ⚠ Not reviewed: config error, see tagteam.log"}
+            print(adapters.encode(agent, ev.phase, notice if ev.phase in ("turn-end", "plan-gate") else None))
+            return
         verdict = core.HANDLERS[ev.phase](ev, cfg)
         print(adapters.encode(agent, ev.phase, verdict))
     except Exception as e:
@@ -79,12 +85,12 @@ def statusline():
 
 
 def status(days):
-    cfg = state.load_config()
+    cfg = config.load()
     now = time.time()
     print("Headroom (fraction of usage limit left):")
-    for a in cfg["agents"]:
+    for a, ac in cfg["routing"]["quota"]["agents"].items():
         h = quota.headroom(a, cfg, now)
-        tier = cfg["agents"][a]["tier"]
+        tier = ac["tier"]
         print(f"  {a:8} {tier:8} {'unknown' if h is None else f'{h:.0%}'}")
     runs = state.read_jsonl(state.path("runs.jsonl"), now - days * 86400)
     print(f"\nReviews in the last {days}d: {len(runs)}  (blocked {sum(r['action'] == 'block' for r in runs)})")
@@ -110,6 +116,17 @@ def status(days):
             print(f"  {r['run_id']}  {r['author']:7} -> {','.join(r['reviewers']) or '-':20} {live.summary(r)}")
 
 
+def show_config():
+    try:
+        cfg, sources = config.load_with_sources(core.changes.repo_root(os.getcwd()))
+    except config.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 1
+    for k, v in config.flat(cfg).items():
+        print(f"{k} = {json.dumps(v)}  # {sources[k]}")
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="tagteam")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -119,6 +136,7 @@ def main(argv=None):
     h.add_argument("--check", action="store_true", help="parse stdin only; exit 1 if it is not a valid payload")
     sub.add_parser("statusline")
     sub.add_parser("swiftbar")
+    sub.add_parser("config", help="print the effective config and where each value came from")
     s = sub.add_parser("status")
     s.add_argument("--days", type=int, default=7)
     i = sub.add_parser("install")
@@ -136,6 +154,8 @@ def main(argv=None):
         statusline()
     elif a.cmd == "swiftbar":
         live.main(["swiftbar"])
+    elif a.cmd == "config":
+        sys.exit(show_config())
     elif a.cmd == "status":
         status(a.days)
     elif a.cmd == "watch":

@@ -60,7 +60,7 @@ def _spawn(argv, stdin, cwd, timeout):
 def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
     workdir = tempfile.mkdtemp(prefix=f"{agent}-", dir=run_dir)
     t0 = time.time()
-    reviewer, options = harnesses.get(agent).reviewer, cfg["agents"][agent]
+    reviewer, options = harnesses.get(agent).reviewer, cfg["reviewers"].get(agent, {})
     for attempt in (1, 2):
         argv, stdin, out_file = reviewer.argv(prompt, options, workdir, int(deadline - (time.time() - t0)))
         stdout, stderr, rc, timed_out = _spawn(argv, stdin, cwd, deadline - (time.time() - t0))
@@ -79,9 +79,9 @@ def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
         rec["error"] = tail[-500:]
         if QUOTA_ERR.search(tail):
             rec["quota_error"] = True
-            quota.cooldown(agent, cfg["routing"]["cooldown_min"] * 4)
+            quota.cooldown(agent, cfg["limits"]["cooldown_min"] * 4)
         else:
-            quota.cooldown(agent, cfg["routing"]["cooldown_min"])
+            quota.cooldown(agent, cfg["limits"]["cooldown_min"])
     state.write_json(os.path.join(workdir, "result.json"), {"meta": rec, "result": result,
                                                              "stdout_tail": (stdout or "")[-4000:],
                                                              "stderr_tail": (stderr or "")[-4000:]})

@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from . import harnesses, resources, state
+from . import config, harnesses, resources, state
 
 H = pathlib.Path.home()
 SWIFTBAR_APP = pathlib.Path("/Applications/SwiftBar.app")
@@ -52,7 +52,7 @@ def check_agent(name):
 
 
 def install(agents, dry_run=False):
-    cfg = state.load_config()
+    cfg = config.load()
     stop_timeout = cfg["review"]["deadline_s"] + 60
     entry_cmd = entry()
     for name, h in harnesses.ALL.items():

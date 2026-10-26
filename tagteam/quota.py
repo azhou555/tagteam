@@ -105,7 +105,7 @@ def self_metered(agent, now, cfg):
 
 def headroom(agent, cfg, now=None):
     now = now or time.time()
-    acfg = cfg["agents"][agent]
+    acfg = cfg["routing"]["quota"]["agents"][agent]
     cool = state.read_json(state.path("cooldowns.json"), {}).get(agent, 0)
     if cool > now:
         return 0.0

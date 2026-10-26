@@ -52,7 +52,7 @@ def collect(s, cfg):
 
 
 def headroom_map(cfg):
-    return {a: quota.headroom(a, cfg) for a in cfg["agents"]}
+    return {a: quota.headroom(a, cfg) for a in cfg["routing"]["quota"]["agents"]}
 
 
 def load_map(now):
@@ -107,7 +107,7 @@ def review(ev, cfg, s, artifacts, round_no, run_tag):
             for r, ts in plan.items()}
     before = changes.snapshot(s["repo"]) if s.get("repo") else None
     with live.tracking({"run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
-                        "round": round_no, "max_rounds": rv["max_rounds"], "reviewers": list(plan), "started": now,
+                        "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "reviewers": list(plan), "started": now,
                         "expires": now + rv["deadline_s"] + 60}) as update:
         outcomes = runner.run_all(jobs, cfg, cwd, run_dir, rv["deadline_s"], on_done=update)
     if before and changes.snapshot(s["repo"]) != before:
@@ -120,7 +120,7 @@ def review(ev, cfg, s, artifacts, round_no, run_tag):
     results = {r: res for r, (_, res) in outcomes.items()}
     failed = [r for r, res in results.items() if res is None]
     action, blocking, advisory = verdict.decide(results, cfg, round_no)
-    msg = verdict.message(plan, blocking, advisory, round_no, rv["max_rounds"], failed)
+    msg = verdict.message(plan, blocking, advisory, round_no, cfg["limits"]["max_rounds_per_turn"], failed)
     state.write_json(run_dir / "verdict.json", {"action": action, "blocking": blocking, "advisory": advisory,
                                                 "failed": failed, "message": msg})
     run.update(action=action, blocking=len(blocking), advisory=len(advisory), failed=failed,
@@ -138,10 +138,10 @@ def turn_end(ev, cfg):
     artifacts, head = collect(s, cfg)
     changed = sum(a["lines_changed"] for a in artifacts)
     # Round 1 skips trivial edits; later rounds re-check any fix, however small.
-    if changed == 0 or (s["round"] == 0 and changed < rv["min_changed_lines"]):
+    if changed == 0 or (s["round"] == 0 and changed < cfg["triggers"]["min_changed_lines"]):
         return None
     round_no = s["round"] + 1
-    if round_no > rv["max_rounds"]:
+    if round_no > cfg["limits"]["max_rounds_per_turn"]:
         return None
     action, msg, run_dir, blocking = review(ev, cfg, s, artifacts, round_no, "turn")
     with state.locked(sf.stem):
@@ -167,7 +167,7 @@ def plan_gate(ev, cfg):
     art = {"path": "(proposed plan)", "kind": "plan", "status": "added",
            "lines_changed": ev.plan_text.count("\n") + 1, "diff": ev.plan_text}
     gate_rounds = s.get("plan_rounds", 0) + 1
-    if gate_rounds > cfg["review"]["max_rounds"]:
+    if gate_rounds > cfg["limits"]["max_rounds_per_turn"]:
         return None
     action, msg, _, _ = review(ev, cfg, {**s, "prior": []}, [art], gate_rounds, "plan-gate")
     with state.locked(_session_file(ev).stem):

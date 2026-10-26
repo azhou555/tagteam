@@ -9,23 +9,24 @@ LENSES = {
 }
 
 
-def needed(kind, artifacts, r):
+def needed(kind, artifacts, rv):
+    per = rv["per_change"]
     if kind in ("design", "plan"):
-        n = r["docs"]
-    elif sum(a["lines_changed"] for a in artifacts) >= r["large_lines"]:
-        n = r["large"]
+        n = per["docs"]
+    elif sum(a["lines_changed"] for a in artifacts) >= rv["large_lines"]:
+        n = per["large"]
     else:
-        n = r["small"]
+        n = per["small"]
     if any(a.get("risk") == "high" for a in artifacts):
-        n = max(n, r["high_risk"])
+        n = max(n, per["high_risk"])
     return n
 
 
 def eligible(author, cfg, headroom):
-    r = cfg["routing"]
+    r = cfg["routing"]["quota"]
     out = {}
-    for name, a in cfg["agents"].items():
-        if name == author or not a.get("enabled", True):
+    for name, a in r["agents"].items():
+        if name == author:
             continue
         h = headroom.get(name)
         if h is None and a["tier"] == "primary":    # can't prove a primary is above its reserve floor
@@ -41,7 +42,8 @@ def eligible(author, cfg, headroom):
 
 def route(author, groups, cfg, headroom, load):
     """groups: {kind: [artifact]}. Returns {reviewer: [{kind, lens, artifacts}]}."""
-    r, agents = cfg["routing"], cfg["agents"]
+    r = cfg["routing"]["quota"]
+    agents = r["agents"]
     pool = eligible(author, cfg, headroom)
     load = dict(load)
     plan = {}
@@ -49,7 +51,7 @@ def route(author, groups, cfg, headroom, load):
         arts = groups.get(kind)
         if not arts:
             continue
-        n = min(needed(kind, arts, r), len(pool))
+        n = min(needed(kind, arts, cfg["review"]), len(pool))
 
         def score(a):
             s = (load.get(a, 0) + 1) / (agents[a]["weight"][kind] * pool[a])

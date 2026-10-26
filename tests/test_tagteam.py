@@ -134,7 +134,7 @@ class Router(unittest.TestCase):
         h = {**FULL, "copilot": 0.0, "agy": 0.02}
         self.assertEqual(list(router.route("claude", {"code": [art("a.py")]}, CFG, h, {})), ["codex"])
         cfg = copy.deepcopy(CFG)
-        cfg["routing"]["primary_use"] = "never"
+        cfg["routing"]["quota"]["primary_use"] = "never"
         self.assertEqual(router.route("claude", {"code": [art("a.py")]}, cfg, h, {}), {})
 
     def test_load_spreads_and_shifts_with_headroom(self):
