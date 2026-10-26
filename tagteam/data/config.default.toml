@@ -24,6 +24,7 @@ ignore = [
 [limits]
 max_rounds_per_turn = 2     # blocking rounds per turn before we always allow
 cooldown_min = 15
+max_reviews_per_hour = 30   # review runs across all sessions and agents; a runaway-loop stop
 
 [classify]
 plan = ["tasks/*", "*todo.md", "*plan*.md", "*PLAN*.md", "docs/plans/*", "*/.claude/plans/*"]

@@ -3,7 +3,7 @@ import os
 import time
 import uuid
 
-from . import changes, classify, live, quota, router, runner, state, verdict
+from . import changes, classify, limits, live, quota, router, runner, state, verdict
 from .adapters import MARKER
 
 
@@ -72,13 +72,30 @@ def completion(run, lines_changed):
 
 
 def review(ev, cfg, s, artifacts, round_no, run_tag):
-    """Route, run, decide. Returns (action, message, run_dir, blocking); message is the block reason or,
-    on allow, a one-line completion notice."""
+    """Guard, route, run, decide. Returns (action, message, run_dir, blocking); message is the block reason or,
+    on allow, a one-line completion notice. run_dir None means no run happened: allow with no message is a
+    silent skip, block is a re-issued block."""
+    with limits.session_lock(ev.agent, ev.session_id) as got:
+        if not got:
+            state.log("review already running for this session; skipped", author=ev.agent, session=ev.session_id)
+            return "allow", None, None, []
+        return _review(ev, cfg, s, artifacts, round_no, run_tag)
+
+
+def _review(ev, cfg, s, artifacts, round_no, run_tag):
     now = time.time()
     rv = cfg["review"]
     groups = {}
-    for a in classify.annotate(artifacts, cfg):
+    annotated = classify.annotate(artifacts, cfg)
+    for a in annotated:
         groups.setdefault(a["kind"], []).append(a)
+    key, dig = _session_file(ev).stem, limits.digest(annotated)
+    seen = limits.remembered(key, dig)
+    if seen:
+        state.log("same diff already reviewed; not reviewing again", author=ev.agent, action=seen["action"], round=round_no)
+        if seen["action"] == "block":
+            return "block", seen["message"], None, seen["blocking"]
+        return "allow", None, None, []
     hm = headroom_map(cfg)
     plan, reason = router.route(ev.agent, groups, cfg, hm, load_map(now))
     listed = cfg["reviewers"].get("use") or []
@@ -88,6 +105,8 @@ def review(ev, cfg, s, artifacts, round_no, run_tag):
         plan = {r: ts for r, ts in plan.items() if r in listed}
         reason = reason or (None if plan else "no listed reviewer is available")
     run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:4]
+    if plan and not limits.reserve(run_id, f"{ev.agent}:{ev.session_id}", now, cfg):
+        plan, reason = {}, limits.limit_reason(cfg)
     run_dir = state.path("runs", run_id, "x").parent
     run_dir.mkdir(parents=True, exist_ok=True)
     request = {"run_id": run_id, "tag": run_tag, "author": ev.agent, "session_id": ev.session_id,
@@ -129,6 +148,8 @@ def review(ev, cfg, s, artifacts, round_no, run_tag):
     failed = [r for r, res in results.items() if res is None]
     action, blocking, advisory = verdict.decide(results, cfg, round_no)
     msg = verdict.message(plan, blocking, advisory, round_no, cfg["limits"]["max_rounds_per_turn"], failed)
+    if len(failed) < len(results):                   # a run with no verdict must not suppress a retry
+        limits.remember(key, dig, action, blocking, msg)
     state.write_json(run_dir / "verdict.json", {"action": action, "blocking": blocking, "advisory": advisory,
                                                 "failed": failed, "message": msg})
     run.update(action=action, blocking=len(blocking), advisory=len(advisory), failed=failed,
@@ -161,6 +182,8 @@ def turn_end(ev, cfg):
     if round_no > cfg["limits"]["max_rounds_per_turn"]:
         return None
     action, msg, run_dir, blocking = review(ev, cfg, s, artifacts, round_no, "turn")
+    if run_dir is None and action == "allow":
+        return None                                  # skipped: another review is running, or this diff passed already
     with state.locked(sf.stem):
         s = state.read_json(sf) or s
         s["round"] = round_no
@@ -188,7 +211,9 @@ def plan_gate(ev, cfg):
     gate_rounds = s.get("plan_rounds", 0) + 1
     if gate_rounds > cfg["limits"]["max_rounds_per_turn"]:
         return None
-    action, msg, _, _ = review(ev, cfg, {**s, "prior": []}, [art], gate_rounds, "plan-gate")
+    action, msg, run_dir, _ = review(ev, cfg, {**s, "prior": []}, [art], gate_rounds, "plan-gate")
+    if run_dir is None and action == "allow":
+        return None
     with state.locked(_session_file(ev).stem):
         cur = state.read_json(_session_file(ev))
         if cur:

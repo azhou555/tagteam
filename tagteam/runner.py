@@ -9,7 +9,7 @@ import tempfile
 import time
 import tomllib
 
-from . import harnesses, quota, resources, state
+from . import harnesses, limits, quota, resources, state
 
 RUBRICS = tomllib.loads(resources.text("rubrics.toml"))
 QUOTA_ERR = re.compile(r"rate.?limit|quota|usage limit|too many requests|\b429\b|insufficient (credits|balance)|"
@@ -74,14 +74,16 @@ def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
     usage = reviewer.usage(stdout, workdir)
     if "premium_requests" in usage:
         rec["cost"] = usage["premium_requests"]
-    if result is None:
+    if result is not None:
+        limits.note_result(agent, True, cfg)
+    else:
         tail = (stderr or "")[-2000:] + (stdout or "")[-2000:]
         rec["error"] = tail[-500:]
         if QUOTA_ERR.search(tail):
             rec["quota_error"] = True
             quota.cooldown(agent, cfg["limits"]["cooldown_min"] * 4)
         else:
-            quota.cooldown(agent, cfg["limits"]["cooldown_min"])
+            limits.note_result(agent, False, cfg)
     state.write_json(os.path.join(workdir, "result.json"), {"meta": rec, "result": result,
                                                              "stdout_tail": (stdout or "")[-4000:],
                                                              "stderr_tail": (stderr or "")[-4000:]})
