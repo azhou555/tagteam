@@ -9,7 +9,7 @@ kinds = ["code", "plan", "design"]
 min_changed_lines = 5
 
 [review]
-per_change = { small = 1, large = 2, high_risk = 3, docs = 2 }   # reviewers per change; docs = design + plan
+per_change = { small = 1, large = 2, high_risk = 2, docs = 2 }   # reviewers per change; docs = design + plan
 large_lines = 150           # a code change this big counts as "large"
 deadline_s = 240            # per-reviewer wall clock; Stop hook timeout is set above this
 block_at = "major"          # blocker | major | minor

@@ -111,11 +111,20 @@ class Router(unittest.TestCase):
                 self.assertTrue(set(plan) <= {"copilot", "agy"}, (author, groups, plan))
 
     def test_high_risk_adds_primary_with_headroom_never_author(self):
-        plan = router.route("claude", {"code": [art("auth.py", risk="high")]}, CFG, FULL, {})
+        cfg = copy.deepcopy(CFG)
+        cfg["review"]["per_change"]["high_risk"] = 3                    # default is 2; 3 reaches a primary
+        plan = router.route("claude", {"code": [art("auth.py", risk="high")]}, cfg, FULL, {})
         self.assertEqual(set(plan), {"copilot", "agy", "codex"})
         low = {**FULL, "codex": 0.3}                                     # below 50% reserve floor
-        self.assertEqual(set(router.route("claude", {"code": [art("auth.py", risk="high")]}, CFG, low, {})),
+        self.assertEqual(set(router.route("claude", {"code": [art("auth.py", risk="high")]}, cfg, low, {})),
                          {"copilot", "agy"})
+
+    def test_disabled_agent_is_never_picked(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["reviewers"]["copilot"]["enabled"] = False
+        plan = router.route("claude", {"design": [art("d.md", kind="design")]}, cfg, FULL, {})
+        self.assertNotIn("copilot", plan)
+        self.assertTrue(plan)
 
     def test_primary_with_unknown_quota_is_never_used(self):
         h = {**FULL, "claude": None}                                     # e.g. stale status line cache

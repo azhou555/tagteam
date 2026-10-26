@@ -84,6 +84,12 @@ class Load(ConfigCase):
         self.user("[[[")
         with self.assertRaises(config.ConfigError):
             config.load()
+        self.user("[review]\nper_change = 3\n")
+        with self.assertRaises(config.ConfigError):
+            config.load()
+        self.user("[reviewers.codex]\nmodel = 5\n")
+        with self.assertRaises(config.ConfigError):
+            config.load()
         (self.home / "config.toml").unlink()
         self.repo_file("[[[")
         with self.assertRaises(config.ConfigError):
@@ -98,6 +104,31 @@ class Load(ConfigCase):
             self.assertEqual(cli.show_config(), 0)
         self.assertIn("triggers.min_changed_lines = 9  # user", out.getvalue())
         self.assertIn('review.block_at = "major"  # default', out.getvalue())
+
+
+class RepoTightens(ConfigCase):
+    def test_repo_cannot_loosen(self):
+        self.repo_file('[limits]\nmax_rounds_per_turn = 99\n[review]\nmax_diff_chars = 9999999\nignore = ["x/*"]\n')
+        cfg, src = config.load_with_sources(str(self.repo))
+        self.assertEqual(cfg["limits"]["max_rounds_per_turn"], 2)
+        self.assertEqual(cfg["review"]["max_diff_chars"], 60000)
+        self.assertIn(".claude/settings*.json", cfg["review"]["ignore"])
+        self.assertIn("x/*", cfg["review"]["ignore"])
+        self.assertEqual(src["limits.max_rounds_per_turn"], "default")
+        self.assertEqual(src["review.max_diff_chars"], "default")
+
+    def test_repo_can_tighten(self):
+        self.user('[limits]\nmax_rounds_per_turn = 4\n')
+        self.repo_file('[limits]\nmax_rounds_per_turn = 1\n[review]\nmax_diff_chars = 100\n')
+        cfg, src = config.load_with_sources(str(self.repo))
+        self.assertEqual((cfg["limits"]["max_rounds_per_turn"], cfg["review"]["max_diff_chars"]), (1, 100))
+        self.assertEqual(src["limits.max_rounds_per_turn"], "repo")
+
+    def test_legacy_repo_routing_keys_log_no_false_drop(self):
+        self.repo_file('[routing]\nsmall = 2\n')
+        cfg = config.load(str(self.repo))
+        self.assertEqual(cfg["review"]["per_change"]["small"], 2)
+        self.assertNotIn("repo config ignored", self.log_msgs())
 
 
 class HookFailsOpen(ConfigCase):
@@ -121,6 +152,16 @@ class HookFailsOpen(ConfigCase):
         self.assertEqual(out, {"systemMessage": "[tagteam] ⚠ Not reviewed: config error, see tagteam.log"})
         run_all.assert_not_called()
         self.assertIn("config error, not reviewing", self.log_msgs())
+
+    def test_nested_type_mismatch_fails_open(self):
+        self.repo_dir = make_repo()
+        self.run_hook("UserPromptSubmit", prompt="go")
+        pathlib.Path(self.repo_dir, "f.py").write_text("a = 1\n" * 10)
+        self.user("[review]\nper_change = 3\n")
+        with mock.patch.object(runner, "run_all") as run_all:
+            out = self.run_hook("Stop", stop_hook_active=False)
+        self.assertEqual(out, {"systemMessage": "[tagteam] ⚠ Not reviewed: config error, see tagteam.log"})
+        run_all.assert_not_called()
 
 
 if __name__ == "__main__":

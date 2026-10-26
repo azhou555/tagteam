@@ -26,7 +26,7 @@ def eligible(author, cfg, headroom):
     r = cfg["routing"]["quota"]
     out = {}
     for name, a in r["agents"].items():
-        if name == author:
+        if name == author or not cfg["reviewers"].get(name, {}).get("enabled", True):
             continue
         h = headroom.get(name)
         if h is None and a["tier"] == "primary":    # can't prove a primary is above its reserve floor
