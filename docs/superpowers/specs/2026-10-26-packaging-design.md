@@ -253,8 +253,9 @@ because it's installed.
 Each guard is enforced in code, has a test, and logs when it fires. None depends on a price.
 
 1. **No nesting** (exists): reviewer processes carry `TAGTEAM_DEPTH`, and hooks inside them do nothing.
-2. **Rounds per turn** (exists): at most `max_rounds_per_turn` blocking rounds. After that the turn is always
-   allowed.
+2. **Rounds per turn** (exists): at most `max_rounds_per_turn` blocking rounds. If the last of them blocked, the
+   next Stop gets one **confirm review** that can't block (§5a). After that the turn is always allowed. Worst
+   case per turn is `max_rounds_per_turn + 1` runs, and the confirm review counts toward the hourly ceiling.
 3. **Global hourly ceiling** (new): at most `max_reviews_per_hour` review runs across all sessions and agents.
    A user's own turns aren't capped, since a person in the loop isn't a runaway. This limit is for agents
    looping on their own, and for many parallel sessions. When it fires, the status line, completion notice,
@@ -297,6 +298,26 @@ The default of 30 an hour is my call and can be tuned during the "week of use" p
 - `status` and `watch` show reviews this week per reviewer, plus summed cost where known
   ("~$1.84 reported; 3 reviews didn't report cost").
 - The menu bar dropdown shows the same weekly line. No caps, no warnings.
+
+### 5a. Issue follow-through (requested by Alec)
+
+When reviewers request changes, the status line, completion notice, and menu bar keep showing that until a
+later review settles it, so the user can tell whether the issues were actually resolved:
+
+| Moment | Shown |
+|---|---|
+| A round blocks | `✗ Changes requested: N issues to fix (round 1/2)`; later rounds say `N issues still open after fixes` |
+| A re-review after a block approves | `✓ Issues resolved: all N fixed and re-checked` |
+| The confirm review still finds issues | `⚠ Unresolved: N issues still open after 2 fix rounds` (turn allowed) |
+| The follow-up review failed or found no reviewer | the usual failed/not-reviewed text plus `· N earlier issues not re-checked` |
+| The author reverted everything it changed | `✓ Issues resolved: changes reverted` (no review spent) |
+
+To make that possible:
+- The author answering with a rebuttal and no file changes is re-reviewed (today it skips review, so the block
+  stays unconfirmed). The reviewers get the turn's whole diff since the user's prompt, the prior findings,
+  and the reply.
+- The confirm review from guard 2 re-checks the last round's issues and can't block.
+- The plan gate tracks its own prior findings the same way and passes them to its round 2.
 
 ### 6. Packaging and install
 
