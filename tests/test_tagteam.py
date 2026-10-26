@@ -101,6 +101,15 @@ class Changes(unittest.TestCase):
         arts = changes.diff_trees(repo, base, changes.snapshot(repo), [])
         self.assertEqual([(a["path"], a["status"]) for a in arts], [("a.py", "deleted")])
 
+    def test_snapshot_tolerates_crlf_under_safecrlf(self):
+        repo = make_repo()
+        sh(repo, "git", "config", "core.autocrlf", "input")
+        sh(repo, "git", "config", "core.safecrlf", "true")
+        base = changes.snapshot(repo)
+        pathlib.Path(repo, "win.h").write_bytes(b"int x;\r\nint y;\r\n")
+        arts = changes.diff_trees(repo, base, changes.snapshot(repo), [])
+        self.assertEqual([(a["path"], a["status"]) for a in arts], [("win.h", "added")])
+
 
 class Classify(unittest.TestCase):
     def test_kinds(self):

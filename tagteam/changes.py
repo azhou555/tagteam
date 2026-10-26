@@ -34,7 +34,7 @@ def snapshot(repo):
         if os.path.exists(real):
             shutil.copyfile(real, idx)
         env = {"GIT_INDEX_FILE": idx}
-        git(repo, "add", "-A", env=env)
+        git(repo, "-c", "core.safecrlf=false", "add", "-A", env=env)      # a safecrlf abort would skip the review
         return git(repo, "write-tree", env=env).strip()
 
 
