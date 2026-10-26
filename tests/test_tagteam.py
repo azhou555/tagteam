@@ -549,7 +549,8 @@ class Install(unittest.TestCase):
         self.settings = d / "settings.json"
         patches = {"CLAUDE": self.settings, "CODEX": d / "codex.json", "COPILOT": d / "copilot.json",
                    "AGY": d / "agy.json", "STATUSLINE_ORIG": d / "sl.orig", "STATUSLINE_ORIG_REFRESH": d / "sl.refresh",
-                   "SWIFTBAR_APP": d / "NoSwiftBar.app", "LAUNCHER": d / "tagteam.app"}
+                   "SWIFTBAR_APP": d / "NoSwiftBar.app", "LAUNCHER": d / "tagteam.app",
+                   "SWIFTBAR_DOMAIN": "invalid.tagteam-tests", "SWIFTBAR_DIR": d / "SwiftBar"}  # never the real plugin
         self.ps = [mock.patch.object(install, k, v) for k, v in patches.items()]
         for x in self.ps:
             x.start()
