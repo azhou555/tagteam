@@ -7,7 +7,7 @@ import sys
 import time
 import traceback
 
-from . import adapters, config, core, install, live, quota, state
+from . import adapters, config, core, harnesses, install, live, quota, state
 
 
 def hook(agent, phase):
@@ -142,6 +142,9 @@ def main(argv=None):
     i = sub.add_parser("install")
     i.add_argument("--dry-run", action="store_true")
     i.add_argument("--agents", default="claude,codex,copilot,agy")
+    i.add_argument("--reviewers", help="agents that may review your changes, in order; saves reviewers.use")
+    i.add_argument("--authors", help="agents whose turns get reviewed; saves authors.review")
+    i.add_argument("--yes", action="store_true", help="don't prompt; without --reviewers no reviewer list is saved")
     w = sub.add_parser("watch")
     w.add_argument("--once", action="store_true")
     sub.add_parser("uninstall")
@@ -161,6 +164,11 @@ def main(argv=None):
     elif a.cmd == "watch":
         live.watch(once=a.once)
     elif a.cmd == "install":
+        names = {k: a.__dict__[k].split(",") if a.__dict__[k] else None for k in ("reviewers", "authors")}
+        bad = [n for v in names.values() for n in v or [] if n not in harnesses.ALL]
+        if bad:
+            p.error(f"unknown agent: {', '.join(bad)} (choose from {', '.join(harnesses.ALL)})")
         install.install(a.agents.split(","), dry_run=a.dry_run)
+        install.set_consent(names["reviewers"], names["authors"], a.yes, a.dry_run)
     elif a.cmd == "uninstall":
         install.uninstall()

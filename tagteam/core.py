@@ -80,7 +80,13 @@ def review(ev, cfg, s, artifacts, round_no, run_tag):
     for a in classify.annotate(artifacts, cfg):
         groups.setdefault(a["kind"], []).append(a)
     hm = headroom_map(cfg)
-    plan = router.route(ev.agent, groups, cfg, hm, load_map(now))
+    plan, reason = router.route(ev.agent, groups, cfg, hm, load_map(now))
+    listed = cfg["reviewers"].get("use") or []
+    stray = [r for r in plan if r not in listed]
+    if stray:                                        # last line of defence: only the user's list ever sees code
+        state.log("router planned unlisted reviewers; dropped", reviewers=stray)
+        plan = {r: ts for r, ts in plan.items() if r in listed}
+        reason = reason or (None if plan else "no listed reviewer is available")
     run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:4]
     run_dir = state.path("runs", run_id, "x").parent
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -93,9 +99,11 @@ def review(ev, cfg, s, artifacts, round_no, run_tag):
     run = {"ts": now, "run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
            "round": round_no, "reviewers": list(plan), "action": "allow", "blocking": 0, "advisory": 0,
            "failed": [], "duration": 0.0}
+    if reason:
+        run["reason"] = reason
     lines_changed = sum(a["lines_changed"] for a in artifacts)
     if not plan:
-        state.log("no eligible reviewers", run_id=run_id, headroom=hm)
+        state.log("not reviewed", run_id=run_id, reason=reason, headroom=hm)
         live.record_run(run)
         return "allow", completion(run, lines_changed), run_dir, []
     cwd = s.get("repo") or ev.cwd
@@ -129,6 +137,13 @@ def review(ev, cfg, s, artifacts, round_no, run_tag):
     return action, msg if action == "block" else completion(run, lines_changed), run_dir, blocking
 
 
+def wanted(ev, cfg, artifacts):
+    """Author and trigger filters: False means this change is nobody's business, so no run and no notice."""
+    if ev.agent not in cfg["authors"]["review"]:
+        return False
+    return bool({a["kind"] for a in classify.annotate(artifacts, cfg)} & set(cfg["triggers"]["kinds"]))
+
+
 def turn_end(ev, cfg):
     sf = _session_file(ev)
     s = state.read_json(sf)
@@ -139,6 +154,8 @@ def turn_end(ev, cfg):
     changed = sum(a["lines_changed"] for a in artifacts)
     # Round 1 skips trivial edits; later rounds re-check any fix, however small.
     if changed == 0 or (s["round"] == 0 and changed < cfg["triggers"]["min_changed_lines"]):
+        return None
+    if not wanted(ev, cfg, artifacts):
         return None
     round_no = s["round"] + 1
     if round_no > cfg["limits"]["max_rounds_per_turn"]:
@@ -166,6 +183,8 @@ def plan_gate(ev, cfg):
     s = state.read_json(_session_file(ev)) or {"prompt": "", "repo": changes.repo_root(ev.cwd), "prior": []}
     art = {"path": "(proposed plan)", "kind": "plan", "status": "added",
            "lines_changed": ev.plan_text.count("\n") + 1, "diff": ev.plan_text}
+    if not wanted(ev, cfg, [art]):
+        return None
     gate_rounds = s.get("plan_rounds", 0) + 1
     if gate_rounds > cfg["limits"]["max_rounds_per_turn"]:
         return None

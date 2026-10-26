@@ -3,7 +3,9 @@
 Old-shape files keep loading through a shim that maps their keys and logs one deprecation line.
 """
 import copy
+import json
 import pathlib
+import re
 import tomllib
 
 from . import resources, state
@@ -147,3 +149,26 @@ def load_with_sources(repo=None):
 
 def load(repo=None):
     return load_with_sources(repo)[0]
+
+
+def save_user(table, key, items):
+    """Set `key = [..strings..]` under `[table]` in ~/.tagteam/config.toml, keeping every other line as it is."""
+    p = state.HOME / "config.toml"
+    text = p.read_text() if p.is_file() else ""
+    line = f"{key} = {json.dumps(list(items))}"
+    head = re.search(rf"^\[{re.escape(table)}\][ \t]*(#.*)?$", text, re.M)
+    if not head:
+        new = text + ("\n" if text and not text.endswith("\n\n") else "") + f"[{table}]\n{line}\n"
+    else:
+        end = re.search(r"^\[", text[head.end():], re.M)
+        stop = head.end() + end.start() if end else len(text)
+        body = text[head.end():stop]
+        old = re.search(rf"^{re.escape(key)}[ \t]*=[ \t]*\[.*?\][ \t]*(#.*)?$", body, re.M | re.S)
+        body = body[:old.start()] + line + body[old.end():] if old else "\n" + line + body
+        new = text[:head.end()] + body + text[stop:]
+    try:
+        tomllib.loads(new)
+    except ValueError as e:
+        raise ConfigError(f"{p}: can't update {table}.{key} automatically ({e}); edit it by hand") from e
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(new)

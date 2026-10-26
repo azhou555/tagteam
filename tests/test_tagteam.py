@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest import mock
 
-from tests.helpers import CFG, art, finding, fx, make_repo, sh  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
+from tests.helpers import CFG, FULL, HookRig, art, finding, fx, make_repo, sh, use_toml  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
 from tagteam import adapters, changes, classify, core, harnesses, install, live, router, runner, state, verdict  # noqa: E402
 from tagteam.harnesses import agy as agy_h, base as harness_base, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
 
@@ -99,68 +99,79 @@ class Classify(unittest.TestCase):
         self.assertEqual(classify.annotate([{"path": "db/migrations/1.sql"}], CFG)[0]["risk"], "high")
 
 
-FULL = {"claude": 0.9, "codex": 0.9, "copilot": 0.9, "agy": 0.9}
+QCFG = copy.deepcopy(CFG)
+QCFG["routing"]["mode"] = "quota"
+QCFG["reviewers"]["use"] = ["claude", "codex", "copilot", "agy"]
+
+
+def route(*a):
+    return router.route(*a)[0]
 
 
 class Router(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(harnesses, "detected", return_value=["claude", "codex", "copilot", "agy"])
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_reviewer_tier_takes_all_normal_work(self):
         for author in ("claude", "codex"):
             for groups in ({"code": [art("a.py")]}, {"code": [art("a.py", 500)]},
                            {"plan": [art("p.md", kind="plan")]}, {"design": [art("d.md", kind="design")]}):
-                plan = router.route(author, groups, CFG, FULL, {})
+                plan = route(author, groups, QCFG, FULL, {})
                 self.assertTrue(set(plan) <= {"copilot", "agy"}, (author, groups, plan))
 
     def test_high_risk_adds_primary_with_headroom_never_author(self):
-        cfg = copy.deepcopy(CFG)
+        cfg = copy.deepcopy(QCFG)
         cfg["review"]["per_change"]["high_risk"] = 3                    # default is 2; 3 reaches a primary
-        plan = router.route("claude", {"code": [art("auth.py", risk="high")]}, cfg, FULL, {})
+        plan = route("claude", {"code": [art("auth.py", risk="high")]}, cfg, FULL, {})
         self.assertEqual(set(plan), {"copilot", "agy", "codex"})
         low = {**FULL, "codex": 0.3}                                     # below 50% reserve floor
-        self.assertEqual(set(router.route("claude", {"code": [art("auth.py", risk="high")]}, cfg, low, {})),
+        self.assertEqual(set(route("claude", {"code": [art("auth.py", risk="high")]}, cfg, low, {})),
                          {"copilot", "agy"})
 
-    def test_disabled_agent_is_never_picked(self):
-        cfg = copy.deepcopy(CFG)
-        cfg["reviewers"]["copilot"]["enabled"] = False
-        plan = router.route("claude", {"design": [art("d.md", kind="design")]}, cfg, FULL, {})
+    def test_unlisted_agent_is_never_picked(self):
+        cfg = copy.deepcopy(QCFG)
+        cfg["reviewers"]["use"] = ["agy", "claude", "codex"]
+        plan = route("claude", {"design": [art("d.md", kind="design")]}, cfg, FULL, {})
         self.assertNotIn("copilot", plan)
         self.assertTrue(plan)
 
     def test_primary_with_unknown_quota_is_never_used(self):
         h = {**FULL, "claude": None}                                     # e.g. stale status line cache
-        self.assertEqual(set(router.route("codex", {"code": [art("auth.py", risk="high")]}, CFG, h, {})),
+        self.assertEqual(set(route("codex", {"code": [art("auth.py", risk="high")]}, QCFG, h, {})),
                          {"copilot", "agy"})
         h2 = {**FULL, "agy": None}                                       # unknown reviewer-tier is still usable
-        self.assertIn("agy", router.route("claude", {"plan": [art("p.md", kind="plan")]}, CFG, h2, {}))
+        self.assertIn("agy", route("claude", {"plan": [art("p.md", kind="plan")]}, QCFG, h2, {}))
 
     def test_reviewer_author_gets_other_reviewer_first(self):
-        plan = router.route("copilot", {"code": [art("a.py")]}, CFG, FULL, {})
+        plan = route("copilot", {"code": [art("a.py")]}, QCFG, FULL, {})
         self.assertEqual(list(plan), ["agy"])
-        plan = router.route("copilot", {"plan": [art("p.md", kind="plan")]}, CFG, FULL, {})
+        plan = route("copilot", {"plan": [art("p.md", kind="plan")]}, QCFG, FULL, {})
         self.assertEqual(set(plan), {"agy", "claude"})                   # tie on headroom -> name order
 
     def test_fallback_to_primary_when_reviewers_exhausted(self):
         h = {**FULL, "copilot": 0.0, "agy": 0.02}
-        self.assertEqual(list(router.route("claude", {"code": [art("a.py")]}, CFG, h, {})), ["codex"])
-        cfg = copy.deepcopy(CFG)
+        self.assertEqual(list(route("claude", {"code": [art("a.py")]}, QCFG, h, {})), ["codex"])
+        cfg = copy.deepcopy(QCFG)
         cfg["routing"]["quota"]["primary_use"] = "never"
-        self.assertEqual(router.route("claude", {"code": [art("a.py")]}, cfg, h, {}), {})
+        self.assertEqual(route("claude", {"code": [art("a.py")]}, cfg, h, {}), {})
 
     def test_load_spreads_and_shifts_with_headroom(self):
         load = {}
         for _ in range(300):
-            for r in router.route("claude", {"code": [art("a.py")]}, CFG, FULL, load):
+            for r in route("claude", {"code": [art("a.py")]}, QCFG, FULL, load):
                 load[r] = load.get(r, 0) + 1
         self.assertEqual(set(load), {"copilot", "agy"})
         self.assertLess(abs(load["copilot"] / load["agy"] - 0.9 / 0.8), 0.05)  # proportional to weight
         load2 = {}
         for _ in range(300):
-            for r in router.route("claude", {"code": [art("a.py")]}, CFG, {**FULL, "copilot": 0.2}, load2):
+            for r in route("claude", {"code": [art("a.py")]}, QCFG, {**FULL, "copilot": 0.2}, load2):
                 load2[r] = load2.get(r, 0) + 1
         self.assertGreater(load2["agy"], 3 * load2["copilot"])
 
     def test_distinct_lenses(self):
-        plan = router.route("claude", {"design": [art("d.md", kind="design")]}, CFG, FULL, {})
+        plan = route("claude", {"design": [art("d.md", kind="design")]}, QCFG, FULL, {})
         self.assertEqual(sorted(t["lens"] for ts in plan.values() for t in ts), ["correctness", "design"])
 
 
@@ -206,40 +217,14 @@ class Runner(unittest.TestCase):
             self.assertIn(s, p)
 
 
-class EndToEnd(unittest.TestCase):
+class EndToEnd(HookRig, unittest.TestCase):
     """Real hook flow through cli.hook with the reviewer CLIs stubbed."""
 
-    def run_hook(self, agent, phase, payload):
-        from tagteam import cli
-        with mock.patch("sys.stdin", new=__import__("io").StringIO(json.dumps(payload))), \
-                mock.patch("builtins.print") as pr:
-            cli.hook(agent, phase)
-        return json.loads(pr.call_args[0][0])
-
     def setUp(self):
-        self.repo = make_repo()
-        self.calls = []
-        self.seen_active = []
-        self.p = mock.patch.object(core, "headroom_map", return_value=FULL)
-        self.p.start()
+        self.rig(use_toml(["copilot", "agy"]))
 
     def tearDown(self):
-        self.p.stop()
-
-    def fake_run_all(self, results):
-        def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
-            self.calls.append(jobs)
-            self.seen_active.append(live.active())
-            out = {r: ({"reviewer": r, "ok": True, "duration": 1}, results.get(r, {"verdict": "approve", "summary": "",
-                                                                                 "findings": []})) for r in jobs}
-            for r, (meta, _) in out.items():
-                on_done(r, meta)
-            return out
-        return run_all
-
-    def claude(self, event, **kw):
-        return {"hook_event_name": event, "session_id": "sess1", "cwd": self.repo, "prompt_id": "p",
-                "transcript_path": "/Users/u/.claude/projects/x.jsonl", **kw}
+        self.unrig()
 
     def test_block_then_fix_then_allow(self):
         self.assertEqual(self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature")), {})

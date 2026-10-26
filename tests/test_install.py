@@ -1,4 +1,5 @@
 import contextlib
+import io
 import json
 import os
 import pathlib
@@ -9,8 +10,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests.helpers import FIX, state  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
-from tagteam import harnesses, install  # noqa: E402
+from tests.helpers import FIX, USER_CONFIG, clear_user_config, state, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
+from tagteam import cli, config, harnesses, install  # noqa: E402
 from tagteam.harnesses import agy as agy_h, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
 
 ROOT = state.ROOT
@@ -218,6 +219,97 @@ class Install(unittest.TestCase):
         self.assertIn("tagteam-hook-form=1", self.settings.read_text())
         self.assertIn("/opt/bin/tagteam hook claude", self.settings.read_text())
         self.assertTrue(any("codex: kept existing hooks (check failed" in str(c.args[0]) for c in pr.call_args_list))
+
+
+class Consent(unittest.TestCase):
+    def setUp(self):
+        clear_user_config()
+        p = mock.patch.object(harnesses, "detected", return_value=["codex", "copilot"])
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(clear_user_config)
+
+    def ask(self, text, detected=("codex", "copilot"), preselected=()):
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(text)), contextlib.redirect_stdout(out):
+            got = install.ask_consent(list(detected), list(preselected))
+        return got, out.getvalue()
+
+    def consent(self, **kw):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            install.set_consent(**{"reviewers": None, "authors": None, "yes": False, **kw})
+        return out.getvalue()
+
+    def test_ask_orders_choices_and_shows_copy(self):
+        got, shown = self.ask("2,1\n")
+        self.assertEqual(got, ["copilot", "codex"])
+        self.assertIn("These agents can review your changes. Each one you pick receives your diffs. "
+                      "Pick reviewers in order (e.g. 2,1), or press Enter for none:", shown)
+        self.assertNotIn("[x]", shown)
+
+    def test_ask_enter_is_none_and_bad_input_reprompts(self):
+        self.assertEqual(self.ask("\n")[0], [])
+        self.assertEqual(self.ask("")[0], [])
+        self.assertEqual(self.ask("9,x\n1\n")[0], ["codex"])
+        self.assertEqual(self.ask("1,1,2\n")[0], ["codex", "copilot"])
+
+    def test_preselected_marked_with_x(self):
+        _, shown = self.ask("\n", preselected=["codex"])
+        [codex_line] = [ln for ln in shown.splitlines() if "codex" in ln and ln.strip().startswith("1")]
+        [copilot_line] = [ln for ln in shown.splitlines() if "copilot" in ln and ln.strip().startswith("2")]
+        self.assertIn("[x]", codex_line)
+        self.assertNotIn("[x]", copilot_line)
+
+    def test_interactive_saves_ordered_use(self):
+        with mock.patch("sys.stdin", io.StringIO("2,1\n")):
+            self.consent()
+        self.assertEqual(config.load()["reviewers"]["use"], ["copilot", "codex"])
+
+    def test_yes_alone_saves_no_use_and_says_so(self):
+        with mock.patch.object(install, "ask_consent", side_effect=AssertionError("prompted")):
+            shown = self.consent(yes=True)
+        self.assertNotIn("use", config.load()["reviewers"])
+        self.assertIn("no reviewer list saved", shown)
+        self.assertIn("--reviewers", shown)
+
+    def test_reviewers_flag_is_the_consent_without_prompt(self):
+        with mock.patch.object(install, "ask_consent", side_effect=AssertionError("prompted")):
+            self.consent(reviewers=["codex"])
+        self.assertEqual(config.load()["reviewers"]["use"], ["codex"])
+
+    def test_legacy_enabled_preselects_but_is_never_saved_as_use(self):
+        write_user_config('[agents.codex]\nenabled = true\n[agents.copilot]\nenabled = false\n')
+        with mock.patch.object(install, "ask_consent", return_value=[]) as ask:
+            self.consent()
+        ask.assert_called_once_with(["codex", "copilot"], ["codex"])
+        self.assertNotIn("use", config.load()["reviewers"])
+
+    def test_save_keeps_other_settings_and_replaces_old_list(self):
+        write_user_config('[limits]\nmax_reviews_per_hour = 7\n\n[reviewers]\nuse = ["agy"]\n'
+                          '[reviewers.codex]\nmodel = "m"\n')
+        self.consent(reviewers=["codex", "copilot"], authors=["claude"])
+        cfg = config.load()
+        self.assertEqual((cfg["reviewers"]["use"], cfg["reviewers"]["codex"]["model"], cfg["authors"]["review"],
+                          cfg["limits"]["max_reviews_per_hour"]), (["codex", "copilot"], "m", ["claude"], 7))
+
+    def test_dry_run_writes_nothing(self):
+        self.consent(reviewers=["codex"], dry_run=True)
+        self.assertFalse(USER_CONFIG.exists())
+
+    def test_no_detected_agents_saves_nothing(self):
+        with mock.patch.object(harnesses, "detected", return_value=[]):
+            shown = self.consent()
+        self.assertFalse(USER_CONFIG.exists())
+        self.assertIn("no reviewer list saved", shown)
+
+    def test_cli_passes_flags(self):
+        with mock.patch.object(install, "install") as inst, mock.patch.object(install, "set_consent") as sc:
+            cli.main(["install", "--reviewers", "codex,copilot", "--authors", "claude", "--yes"])
+        sc.assert_called_once_with(["codex", "copilot"], ["claude"], True, False)
+        with mock.patch.object(install, "install"), mock.patch.object(install, "set_consent"), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.main(["install", "--reviewers", "kiro"])
 
 
 class Entry(unittest.TestCase):

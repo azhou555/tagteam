@@ -149,8 +149,13 @@ KINDS = {
 }
 
 
+REASONS = {"no reviewers configured": "no reviewers configured; run tagteam install"}
+
+
 def outcome(run):
     """(kind, detail) for a finished run, in plain words."""
+    if run.get("reason"):
+        return "unreviewed", REASONS.get(run["reason"], run["reason"])
     if not run["reviewers"]:
         return "unreviewed", "no reviewer had quota available"
     if set(run["failed"]) >= set(run["reviewers"]):

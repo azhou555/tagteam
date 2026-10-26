@@ -103,11 +103,15 @@ def self_metered(agent, now, cfg):
     return max(0.0, 1.0 - len(runs) / cfg["quota"].get("daily_budget_runs", 80))
 
 
+def cooling(agent, now=None):
+    """True while the agent is in cooldown after quota or other failures."""
+    return state.read_json(state.path("cooldowns.json"), {}).get(agent, 0) > (now or time.time())
+
+
 def headroom(agent, cfg, now=None):
     now = now or time.time()
     acfg = cfg["routing"]["quota"]["agents"][agent]
-    cool = state.read_json(state.path("cooldowns.json"), {}).get(agent, 0)
-    if cool > now:
+    if cooling(agent, now):
         return 0.0
     src = acfg["quota"]["source"]
     try:

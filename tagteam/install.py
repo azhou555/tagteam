@@ -51,6 +51,49 @@ def check_agent(name):
     return r.returncode
 
 
+def ask_consent(detected, preselected):
+    """Numbered prompt on stdin; returns the picked agents in the order typed. Nothing typed means none."""
+    print("These agents can review your changes. Each one you pick receives your diffs. "
+          "Pick reviewers in order (e.g. 2,1), or press Enter for none:")
+    for i, name in enumerate(detected, 1):
+        print(f"  {i}. [{'x' if name in preselected else ' '}] {name}")
+    if preselected:
+        print("  ([x] = enabled in your old config; type their numbers to keep them)")
+    while True:
+        line = sys.stdin.readline()
+        if not line.strip():
+            return []
+        try:
+            nums = [int(t) for t in line.replace(",", " ").split()]
+            if not all(1 <= n <= len(detected) for n in nums):
+                raise ValueError
+        except ValueError:
+            print(f"Enter numbers 1-{len(detected)} separated by commas, or press Enter for none:")
+            continue
+        return list(dict.fromkeys(detected[n - 1] for n in nums))
+
+
+def set_consent(reviewers, authors, yes, dry_run=False):
+    """Save who may review (`reviewers.use`) and whose turns are reviewed. Never derived from detection:
+    the list comes from --reviewers or an answer at the prompt, and --yes alone saves none."""
+    found = [n for n in harnesses.detected() if harnesses.get(n).reviewer]
+    if reviewers is None and not yes and found:
+        old = config.load().get("reviewers", {})
+        reviewers = ask_consent(found, [n for n in found if old.get(n, {}).get("enabled") is True])
+    if reviewers:
+        saved = {"reviewers": ("reviewers", "use", reviewers)}
+    else:
+        saved = {}
+        print("no reviewer list saved: nothing is reviewed until you run "
+              "`tagteam install --reviewers codex,claude` (names in your preferred order)")
+    if authors is not None:
+        saved["authors"] = ("authors", "review", authors)
+    for table, key, items in saved.values():
+        print(f"{'would save' if dry_run else 'saved'} {table}.{key} = {', '.join(items)}")
+        if not dry_run:
+            config.save_user(table, key, items)
+
+
 def install(agents, dry_run=False):
     cfg = config.load()
     stop_timeout = cfg["review"]["deadline_s"] + 60
