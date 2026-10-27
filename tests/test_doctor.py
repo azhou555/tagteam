@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from tests.helpers import ALL_AGENTS, clear_user_config, use_toml, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
-from tagteam import config, doctor, harnesses, limits  # noqa: E402
+from tagteam import config, doctor, harnesses, limits, quota, state  # noqa: E402
 from tagteam.harnesses import codex as codex_h  # noqa: E402
 from tagteam.harnesses.base import TAG  # noqa: E402
 
@@ -100,6 +100,21 @@ class Doctor(unittest.TestCase):
         limits.disable("codex", "wrote files")
         _, out = self.run_doctor(clear=True)
         self.assertIn("cleared disabled reviewers: codex", out)
+
+    def test_paused_reviewer_shown_with_time_left_and_cleared(self):
+        write_user_config(use_toml(["codex", "copilot"]))
+        quota.cooldown("codex", 15)
+        state.write_json(state.path("failures.json"), {"copilot": 1})
+        rc, out = self.run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn("paused 15 more min", self.line(out, "codex"))
+        self.assertIn("tagteam doctor --clear", self.line(out, "codex"))
+        self.assertIn("reviewer ✓ listed #2", self.line(out, "copilot"))
+        rc, out = self.run_doctor(clear=True)
+        self.assertIn("resumed paused reviewers: codex", out)
+        self.assertIn("reviewer ✓ listed #1", self.line(out, "codex"))
+        self.assertFalse(quota.cooling("codex"))
+        self.assertEqual(state.read_json(state.path("failures.json")), {})
 
     def test_probe_unknown_when_recheck_fails(self):
         good = json.dumps({"structured_output": {"verdict": "approve", "summary": "", "findings": []}})

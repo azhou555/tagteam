@@ -1,4 +1,4 @@
-"""Config: bundled defaults < ~/.tagteam/config.toml < <repo>/.tagteam.toml (repo limited to REPO_ALLOWED).
+"""Config: bundled defaults < ~/.tagteam/config.toml < <repo>/.tagteam.toml (repo may only add scrutiny: REPO_RULES).
 
 Old-shape files keep loading through a shim that maps their keys and logs one deprecation line.
 """
@@ -10,8 +10,9 @@ import re
 import tomllib
 
 from . import resources, state
+from .verdict import RANK
 
-REPO_ALLOWED = {"triggers", "authors", "limits", "review", "classify"}
+PER_CHANGE_KINDS = ("small", "large", "high_risk", "docs")
 LEGACY_ROUTING = {"small": "per_change", "large": "per_change", "high_risk": "per_change", "docs": "per_change"}
 STRING_LISTS = (("reviewers", "use"), ("authors", "review"), ("triggers", "kinds"))
 LEGACY_QUOTA = ("primary_use", "tier_penalty", "unknown_headroom")
@@ -106,44 +107,53 @@ def _bad_list(cfg):
     return None
 
 
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _lower(floor=None):
+    def rule(v, cur):
+        v = max(v, floor) if _num(v) and floor is not None else v
+        return v if _num(v) and v < cur else None
+    return rule
+
+
+def _raise(v, cur):
+    return v if _num(v) and v > cur else None
+
+
+def _add(v, cur):
+    added = [x for x in v if isinstance(x, str) and x not in cur] if isinstance(v, list) else []
+    return cur + added if added else None
+
+
+def _stricter(v, cur):
+    return v if v in RANK and cur in RANK and RANK[v] > RANK[cur] else None
+
+
+# The only keys a repo file may set, each with the one direction that adds scrutiny. Everything else is dropped.
+REPO_RULES = {
+    "authors.review": _add, "triggers.kinds": _add, "classify.risk": _add,
+    "triggers.min_changed_lines": _lower(), "review.min_confidence": _lower(),
+    "review.block_at": _stricter,
+    "review.large_lines": _lower(1),
+    "limits.max_rounds_per_turn": _lower(1), "limits.max_reviews_per_hour": _lower(1),
+    **{f"review.per_change.{k}": _raise for k in PER_CHANGE_KINDS},
+}
+
+
 def _conservative(cfg, over):
-    """A repo file may only tighten: lower limits and diff size, longer cooldowns, more ignore patterns, more authors and
-    trigger kinds, lower thresholds, a stricter block_at, more reviewers per change. Drops every other key."""
-    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
-    for t, k in [("limits", k) for k in over.get("limits", {})] + [("review", "max_diff_chars")]:
-        if k in over.get(t, {}) and num(over[t][k]) and num(cfg.get(t, {}).get(k)):
-            # a longer cooldown is the safer one; every other limit is safer lower
-            looser = over[t][k] <= cfg[t][k] if k == "cooldown_min" else over[t][k] >= cfg[t][k]
-            if looser:
-                del over[t][k]
-    for t, k in (("authors", "review"), ("triggers", "kinds")):          # a repo can add, never remove
-        if isinstance(over.get(t), dict) and isinstance(over[t].get(k), list):
-            added = [x for x in over[t][k] if x not in cfg[t][k]]
-            if added:
-                over[t][k] = cfg[t][k] + added
-            else:
-                del over[t][k]
-    for t, k in (("triggers", "min_changed_lines"), ("review", "min_confidence")):   # lower reviews more
-        if k in over.get(t, {}) and num(over[t][k]) and over[t][k] >= cfg[t][k]:
-            del over[t][k]
-    if over.get("review", {}).get("block_at") is not None:               # blocking on more severities is stricter
-        order = ["blocker", "major", "minor"]
-        v, cur = over["review"]["block_at"], cfg["review"]["block_at"]
-        if v not in order or cur not in order or order.index(v) <= order.index(cur):
-            del over["review"]["block_at"]
-    pc = over.get("review", {}).get("per_change")
-    if isinstance(pc, dict):                                             # never fewer reviewers than the user chose
-        for k in [k for k, v in pc.items() if not num(v) or v <= cfg["review"]["per_change"].get(k, 0)]:
-            del pc[k]
-    rv = over.get("review", {})
-    if "ignore" in rv:
-        cur = cfg["review"]["ignore"]
-        added = [p for p in rv["ignore"] if p not in cur]
-        if added:
-            rv["ignore"] = cur + added
+    """A repo file is untrusted (the author can edit it mid-turn), so it may only add scrutiny.
+    Returns (the settings that do, dotted keys dropped)."""
+    kept, dropped, cur = {}, [], flat(cfg)
+    for key, v in flat(over).items():
+        rule = REPO_RULES.get(key)
+        new = rule(v, cur[key]) if rule and key in cur else None
+        if new is None:
+            dropped.append(key)
         else:
-            del rv["ignore"]
-    return over
+            _set(kept, key, new)
+    return kept, dropped
 
 
 def _non_finite(node, path=""):
@@ -184,11 +194,9 @@ def load_with_sources(repo=None):
         sources.update(dict.fromkeys(flat(over), "user"))
     rf = repo and (pathlib.Path(repo) / ".tagteam.toml")
     if rf and rf.is_file():
-        over = _read(rf, "repo", cfg)
-        dropped = {k: v for k, v in over.items() if k not in REPO_ALLOWED}
+        over, dropped = _conservative(cfg, _read(rf, "repo", cfg))
         if dropped:
-            state.log("repo config ignored", file=str(rf), keys=sorted(flat(dropped)))
-        over = _conservative(cfg, {k: v for k, v in over.items() if k in REPO_ALLOWED})
+            state.log("repo config ignored", file=str(rf), keys=sorted(dropped))
         _merge(cfg, over)
         sources.update(dict.fromkeys(flat(over), "repo"))
     return cfg, sources

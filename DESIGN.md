@@ -308,7 +308,7 @@ async is also the automatic fallback for any agent whose Stop hook can't block.
 - `TAGTEAM=off` env var, or a `.tagteam-off` file in the repo → hooks no-op.
 - `tagteam status` shows recent runs, per-agent load, cooldowns, and spend.
 - `tagteam review --last` reruns the last request manually (debug).
-- Per-repo overrides: `<repo>/.tagteam.toml` merges over `~/.tagteam/config.toml`.
+- Per-repo overrides: `<repo>/.tagteam.toml` merges over `~/.tagteam/config.toml`, but may only add scrutiny (README, "A repo's own file").
 
 ## 7. Install and uninstall (merge-only)
 

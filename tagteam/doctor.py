@@ -1,12 +1,14 @@
-"""`tagteam doctor`: read-only health check per agent. Only `--clear` writes (it re-enables sandbox-disabled reviewers)."""
+"""`tagteam doctor`: read-only health check per agent. Only `--clear` writes: it re-enables reviewers the sandbox
+disabled and resumes ones paused after failures."""
 import json
+import math
 import os
 import shlex
 import shutil
 import tempfile
 import time
 
-from . import changes, config, harnesses, install, limits, runner, sandbox
+from . import changes, config, harnesses, install, limits, quota, runner, sandbox
 
 PROBE_DIFF = "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
 PROBE_PROMPT = ("Review this one-line diff. Reply with only the JSON findings object; do not run commands "
@@ -52,14 +54,22 @@ def author_part(h, entries):
     return "author ✓ hooks current", True
 
 
-def reviewer_part(name, h, use, off):
+def reviewer_part(name, h, use, off, paused):
     if not h.reviewer:
         return None, True
     if name not in use:
         return "reviewer – not listed", True
     if name in off:
         return f"reviewer ✗ disabled by sandbox ({off[name].get('reason', '?')}); `tagteam doctor --clear` re-enables", False
+    if name in paused:
+        return (f"reviewer ⚠ listed #{use.index(name) + 1}, paused {paused[name]} more min after failures; "
+                "`tagteam doctor --clear` resumes"), True
     return f"reviewer ✓ listed #{use.index(name) + 1}", True
+
+
+def paused_minutes(now):
+    """{agent: whole minutes left} for reviewers in cooldown."""
+    return {a: math.ceil((t - now) / 60) for a, t in quota.cooldowns().items() if t > now}
 
 
 def probe_one(name, cfg):
@@ -98,10 +108,14 @@ def probe_one(name, cfg):
 def run(probe, clear):
     """Print one line per agent; return 0 if every configured role is healthy, else 1."""
     if clear:
-        was = limits.disabled()
+        was, was_paused = limits.disabled(), paused_minutes(time.time())
         limits.clear_disabled()
         print(f"cleared disabled reviewers: {', '.join(was)}" if was and not limits.disabled()
               else "no disabled reviewers to clear" if not was else "could not clear disabled reviewers (see tagteam.log)")
+        if not limits.clear_pauses():                    # also resets failure counts, paused or not
+            print("could not resume paused reviewers (see tagteam.log)")
+        elif was_paused:
+            print(f"resumed paused reviewers: {', '.join(was_paused)}")
     ok = True
     try:
         cfg = config.load()
@@ -109,13 +123,13 @@ def run(probe, clear):
         print(f"config error: {e}")
         cfg, ok = None, False
     use = list(dict.fromkeys((cfg or {}).get("reviewers", {}).get("use") or []))
-    off, found = limits.disabled(), harnesses.detected()
+    off, paused, found = limits.disabled(), paused_minutes(time.time()), harnesses.detected()
     for name, h in harnesses.ALL.items():
         if name not in found:
             print(f"{name:8}not installed")
             continue
         parts, entries = [], hook_entries(h.hooks_path())
-        for text, healthy in (author_part(h, entries), reviewer_part(name, h, use, off)):
+        for text, healthy in (author_part(h, entries), reviewer_part(name, h, use, off, paused)):
             if text:
                 parts.append(text)
             ok &= healthy

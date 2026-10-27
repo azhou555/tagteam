@@ -148,7 +148,7 @@ def main(argv=None):
     i.add_argument("--yes", action="store_true", help="don't prompt; without --reviewers no reviewer list is saved")
     d = sub.add_parser("doctor", help="check each agent's hooks, login and reviewer status; read-only")
     d.add_argument("--probe", action="store_true", help="also run one tiny real review per listed reviewer (costs money)")
-    d.add_argument("--clear", action="store_true", help="re-enable reviewers the sandbox disabled, then check")
+    d.add_argument("--clear", action="store_true", help="re-enable reviewers the sandbox disabled and resume paused ones, then check")
     w = sub.add_parser("watch")
     w.add_argument("--once", action="store_true")
     sub.add_parser("uninstall")

@@ -140,3 +140,15 @@ def clear_disabled():
             state.write_json(state.path("disabled.json"), {})
     except OSError as e:
         state.log("disabled reviewers not cleared", error=repr(e))
+
+
+def clear_pauses():
+    """Forget cooldowns and failure counts (`doctor --clear`). False if the state couldn't be written."""
+    try:
+        for name in ("cooldowns", "failures"):
+            with state.locked(name):
+                state.write_json(state.path(f"{name}.json"), {})
+        return True
+    except OSError as e:
+        state.log("paused reviewers not cleared", error=repr(e))
+        return False

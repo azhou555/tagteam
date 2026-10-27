@@ -1,5 +1,5 @@
-# tagteam defaults. Override any key in ~/.tagteam/config.toml; a repo's .tagteam.toml may set only
-# [triggers], [authors], [limits], [review] and [classify].
+# tagteam defaults. Override any key in ~/.tagteam/config.toml. A repo's .tagteam.toml may only add scrutiny
+# (see README, "A repo's own file"); every other key in it is ignored.
 
 [authors]
 review = ["claude", "codex", "copilot", "agy"]     # whose turns get reviewed

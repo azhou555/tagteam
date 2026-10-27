@@ -139,22 +139,6 @@ Defaults work with no config beyond the reviewer list. Put your changes in `~/.t
 | `routing.mode` | `ordered` | `ordered` takes the first available agents from `reviewers.use`; `quota` is for personal plans (below) |
 | `classify.plan`, `.design`, `.risk` | glob lists | Which paths count as plans, design docs, or high-risk code |
 
-A repo can carry its own `<repo>/.tagteam.toml`. It may set only `[triggers]`, `[authors]`, `[limits]`,
-`[review]` and `[classify]`, and it can only make tagteam stricter. It can never turn reviews off, loosen a
-limit, or change who reviews. Concretely, against your own config and the defaults:
-
-- `authors.review` and `triggers.kinds`: it can add entries, not remove them.
-- `triggers.min_changed_lines` and `review.min_confidence`: it can lower them, not raise them.
-- `review.block_at`: it can block on more severities (for example `minor`), not fewer.
-- `review.per_change.*`: it can ask for more reviewers, not fewer.
-- `limits.*` and `review.max_diff_chars`: lower values only; `limits.cooldown_min`: longer only.
-- `review.ignore`: it can add patterns, not remove them.
-- `review.deadline_s` and `classify.*`: pass through.
-
-It cannot set `[reviewers]`, models, or `[routing]`; which vendors see your code is your choice, not a
-cloned repo's. Anything outside the allowed tables is dropped and noted in `tagteam.log`, and a looser
-value inside them is ignored.
-
 **Quota mode.** If you are on personal plans and want to stretch their usage limits, set
 `routing.mode = "quota"`. Reviewer choice within `reviewers.use` then follows each agent's remaining
 headroom, tier, and reserve floor (see `[routing.quota]` in `tagteam config`). `reviewers.use` is still a
@@ -163,6 +147,35 @@ hard filter: an agent not listed never reviews, in either mode.
 Old-shape config files (`[agents.*]`, `[routing] small/large/…`, `[review] max_rounds`) still load; their
 keys are mapped to the new ones and a deprecation line is logged. An old `enabled = true` never counts as
 consent.
+
+### A repo's own file
+
+A repo can carry its own `<repo>/.tagteam.toml`. tagteam treats it as untrusted, because anyone who
+commits to the repo, including the agent being reviewed in the middle of a turn, can edit it. So it may
+only **add** scrutiny: it can never reduce what gets reviewed, how strictly, or how often, and it never
+affects other repos. Only these keys are read, each in one direction, against your own config and the
+defaults:
+
+| Key | A repo file may... |
+|---|---|
+| `authors.review`, `triggers.kinds` | add entries, not remove them |
+| `triggers.min_changed_lines` | lower it |
+| `review.block_at` | make it stricter (block on more severities, for example `minor`) |
+| `review.min_confidence` | lower it |
+| `review.per_change.small`, `.large`, `.high_risk`, `.docs` | raise them (more reviewers per change) |
+| `review.large_lines` | lower it (minimum 1) |
+| `classify.risk` | add patterns |
+| `limits.max_rounds_per_turn`, `limits.max_reviews_per_hour` | lower them (minimum 1) |
+
+Every other key in a repo file is ignored, and so is a value that moves the other way. That includes
+`review.ignore` (adding patterns would hide code from review; your own list still applies),
+`review.deadline_s`, `review.max_diff_chars`, `classify.plan`, `classify.design`, `limits.cooldown_min`,
+`[reviewers]`, models, and `[routing]`: which vendors see your code is your choice, not a cloned repo's.
+Each ignored key is listed in `tagteam.log` under `repo config ignored`.
+
+`.tagteam.toml` can't turn reviews off, but two switches outside it do. A `<repo>/.tagteam-off` file turns
+tagteam off for that repo, whoever created it: you, a commit you pulled, or an agent with shell access.
+`TAGTEAM=off` in an agent's environment turns it off for that session.
 
 ## Limits
 
@@ -176,7 +189,7 @@ defaults:
 | Reviews per hour | `limits.max_reviews_per_hour = 30` | Across all sessions and agents; past it you see `review limit reached (30 per hour)` and turns are allowed unreviewed. A crashed run still counts |
 | No repeat reviews | always | A diff already approved is not reviewed again; a diff already blocked gets the same block re-issued without spending a review |
 | One review at a time | always | A second trigger in the same session while a review runs is skipped, not queued |
-| Failure breaker | `limits.cooldown_min = 15` | A reviewer that errors twice in a row is paused for 15 minutes; if all are paused, the turn is allowed with `⚠ Not reviewed` |
+| Failure breaker | `limits.cooldown_min = 15` | A reviewer that errors twice in a row is paused for 15 minutes; if all are paused, the turn is allowed with `⚠ Not reviewed`. `tagteam doctor` shows paused reviewers and `tagteam doctor --clear` resumes them |
 
 If tagteam's own state files can't be read or written, it skips the review and says
 `⚠ Not reviewed: state error, see tagteam.log` rather than risk going past a limit.
@@ -189,7 +202,7 @@ and the cost the agents reported (`~$1.84 reported; 3 reviews didn't report cost
 ```sh
 tagteam doctor             # read-only check, one line per agent
 tagteam doctor --probe     # also runs one tiny real review per listed reviewer (this uses their quota)
-tagteam doctor --clear     # re-enable reviewers tagteam disabled for writing, then check
+tagteam doctor --clear     # re-enable reviewers disabled for writing, resume paused ones, then check
 ```
 
 For each agent it shows whether it is installed and, for agents you have configured, whether it is logged in (`✗ not logged in` appears only when tagteam can tell), whether its hooks are present and point at
