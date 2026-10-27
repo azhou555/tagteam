@@ -1,4 +1,5 @@
-"""Live review state for the status line and `tagteam watch`. Imports only `state` so a 2s tick stays cheap.
+"""Live review state for the Claude status line, `tagteam watch`, `tagteam status` and the SwiftBar menu.
+Imports only `state` so a 2s tick stays cheap.
 
 active/<run_id>.json   one per running review; its owner holds active/<run_id>.lock for its whole life
 runs.jsonl             one line per finished review (a "review" = a run, not a reviewer call)
@@ -429,7 +430,8 @@ def statusline_segment(raw):
 
 
 def main(argv):
-    """Entry for the status line (stdin: Claude's status JSON) and SwiftBar (`swiftbar`). Never fails loudly."""
+    """`swiftbar` renders the menu bar item; otherwise print the status segment for Claude's status JSON on stdin.
+    Never fails loudly."""
     try:
         if argv[:1] == ["swiftbar"]:
             print(render_swiftbar())

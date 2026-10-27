@@ -6,7 +6,6 @@ import os
 import pathlib
 import time
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
 HOME = pathlib.Path(os.environ.get("TAGTEAM_HOME", pathlib.Path.home() / ".tagteam"))
 STATE = HOME / "state"
 

@@ -9,9 +9,10 @@ import tempfile
 import unittest
 from unittest import mock
 
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 TMP_HOME = tempfile.mkdtemp(prefix="tagteam-test-")
 os.environ["TAGTEAM_HOME"] = TMP_HOME
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(ROOT))
 
 from tagteam import config, state  # noqa: E402,F401
 

@@ -27,8 +27,6 @@ def parse(phase, p):
             ev.prompt = raw
     elif phase == "touch":
         ev.paths = extract_paths((p.get("toolCall") or {}).get("args"), ws[0])
-    elif phase == "turn-end":
-        ev.stop_hook_active = p.get("executionNum", 0) > 0
     return ev
 
 

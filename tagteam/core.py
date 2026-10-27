@@ -8,8 +8,7 @@ from .adapters import MARKER
 
 
 def _session_file(ev):
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in ev.session_id or "nosession")
-    return state.path("sessions", f"{ev.agent}-{safe}.json")
+    return state.path("sessions", f"{limits.safe_session_key(ev.agent, ev.session_id)}.json")
 
 
 def turn_start(ev, cfg):
@@ -213,7 +212,6 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
     if changed:
         state.log("repo changed during review", run_id=run_id, blamed=list(guilty), tree=seen["repo"]["tree"][:50],
                   refs=seen["repo"]["refs"], outside=seen["outside"])
-    if changed:
         run["real_repo_changed"] = changed
     warn = ""
     if guilty:

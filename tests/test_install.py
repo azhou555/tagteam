@@ -10,11 +10,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests.helpers import FIX, USER_CONFIG, clear_user_config, state, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
+from tests.helpers import FIX, ROOT, USER_CONFIG, clear_user_config, state, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
 from tagteam import cli, config, harnesses, install  # noqa: E402
 from tagteam.harnesses import agy as agy_h, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
 
-ROOT = state.ROOT
 
 
 class Install(unittest.TestCase):
@@ -192,7 +191,7 @@ class Install(unittest.TestCase):
 
     def test_upgrade_from_old_wrapper_keeps_original_command(self):
         claude_h.STATUSLINE_ORIG.write_text("ponytail")
-        old = {"type": "command", "command": f"sh '{state.ROOT / 'bin' / 'tagteam-statusline'}'"}
+        old = {"type": "command", "command": f"sh '{ROOT / 'bin' / 'tagteam-statusline'}'"}
         first, _, after = self.roundtrip(old)
         self.assertEqual(first["refreshInterval"], 2)
         self.assertEqual(after, {"type": "command", "command": "ponytail"})

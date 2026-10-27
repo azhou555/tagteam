@@ -21,7 +21,6 @@ class HookEvent:
     cwd: str
     prompt: str = ""
     paths: list = dataclasses.field(default_factory=list)
-    stop_hook_active: bool = False
     turn_id: str = ""
     last_message: str = ""
     plan_text: str = ""

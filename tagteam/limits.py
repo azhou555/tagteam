@@ -14,6 +14,11 @@ MAX_DIGESTS = 50
 BREAKER_FAILURES = 2
 
 
+def safe_session_key(agent, session_id):
+    """`<agent>-<session id>` made safe for a file name: names the session's state file and lock."""
+    return f"{agent}-" + "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id or "nosession")
+
+
 def limit_reason(cfg):
     return f"review limit reached ({cfg['limits']['max_reviews_per_hour']} per hour)"
 
@@ -101,9 +106,8 @@ HELD, BUSY, ERROR = "held", "busy", "error"
 def session_lock(author, session_id):
     """Yields HELD, BUSY (another review has this session) or ERROR (the lock itself failed).
     The kernel frees the lock if the holder dies."""
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id or "nosession")
     try:
-        f = open(state.path("locks", f"session-{author}-{safe}.lock"), "w")
+        f = open(state.path("locks", f"session-{safe_session_key(author, session_id)}.lock"), "w")
     except OSError as e:
         state.log("session lock unavailable", error=repr(e))
         yield ERROR

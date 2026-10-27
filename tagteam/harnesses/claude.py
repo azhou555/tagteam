@@ -36,7 +36,6 @@ def parse_claude_shaped(agent, p):
         ev.phase, ev.paths = "touch", extract_paths(p.get("tool_input"), cwd)
     elif name == "Stop":
         ev.phase = "turn-end"
-        ev.stop_hook_active = bool(p.get("stop_hook_active"))
         ev.last_message = p.get("last_assistant_message") or ""
     elif name == "PreToolUse" and p.get("tool_name") == "ExitPlanMode":
         ev.phase = "plan-gate"

@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest import mock
 
-from tests.helpers import CFG, FULL, HookRig, art, finding, fx, make_repo, sh, use_toml  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
+from tests.helpers import CFG, FULL, ROOT, HookRig, art, finding, fx, make_repo, sh, use_toml  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
 from tagteam import adapters, changes, classify, core, harnesses, install, live, router, runner, state, verdict  # noqa: E402
 from tagteam.harnesses import agy as agy_h, base as harness_base, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
 
@@ -22,7 +22,7 @@ class Adapters(unittest.TestCase):
         self.assertEqual((ev.phase, [os.path.basename(p) for p in ev.paths]), ("touch", ["hello.txt"]))
         self.assertEqual(adapters.parse("claude", "x", fx("claude-touch-Bash")).paths, [])
         stop = adapters.parse("claude", "x", fx("claude-stop-1"))
-        self.assertEqual((stop.phase, stop.stop_hook_active, stop.last_message), ("turn-end", True, "done"))
+        self.assertEqual((stop.phase, stop.last_message), ("turn-end", "done"))
 
     def test_claude_adapter_ignores_copilot_running_claude_hooks(self):
         for name in ("copilot_as_claude-prompt", "copilot_as_claude-touch-Edit", "copilot_as_claude-stop"):
@@ -39,7 +39,7 @@ class Adapters(unittest.TestCase):
     def test_copilot_native(self):
         ev = adapters.parse("copilot", "touch", fx("copilot-touch-apply_patch"))
         self.assertEqual([os.path.basename(p) for p in ev.paths], ["hello.txt"])
-        self.assertTrue(adapters.parse("copilot", "turn-end", fx("copilot-stop-1")).stop_hook_active)
+        self.assertEqual(adapters.parse("copilot", "turn-end", fx("copilot-stop-1")).phase, "turn-end")
 
     def test_agy(self):
         ev = adapters.parse("agy", "turn-start", fx("agy-prompt"))
@@ -49,8 +49,7 @@ class Adapters(unittest.TestCase):
         self.assertEqual(adapters.parse("agy", "turn-start", fx("agy-prompt-1")).phase, "ignore")
         self.assertEqual([os.path.basename(p) for p in adapters.parse("agy", "touch", fx("agy-touch-write_file")).paths],
                          ["hello.txt"])
-        self.assertFalse(adapters.parse("agy", "turn-end", fx("agy-stop")).stop_hook_active)
-        self.assertTrue(adapters.parse("agy", "turn-end", fx("agy-stop-1")).stop_hook_active)
+        self.assertEqual(adapters.parse("agy", "turn-end", fx("agy-stop-1")).phase, "turn-end")
 
     def test_encode(self):
         block = {"action": "block", "message": "m"}
@@ -460,7 +459,7 @@ class Live(unittest.TestCase):
     def test_killed_owner_and_expired_record_are_stale(self):
         code = ("import os, signal, sys; sys.path.insert(0, sys.argv[1]); from tagteam import live; "
                 "cm = live.tracking(eval(sys.argv[2])); cm.__enter__(); os.kill(os.getpid(), signal.SIGKILL)")
-        subprocess.run([sys.executable, "-c", code, str(state.ROOT), repr(self.rec("dead"))])
+        subprocess.run([sys.executable, "-c", code, str(ROOT), repr(self.rec("dead"))])
         self.assertTrue((live._active_dir() / "dead.json").exists())     # SIGKILL skipped cleanup
         self.assertEqual(live.active(), [])
         self.assertFalse((live._active_dir() / "dead.json").exists())
@@ -472,7 +471,7 @@ class Live(unittest.TestCase):
                 "live.record_run(dict(ts=time.time(), run_id=sys.argv[2], author='codex', session_id=sys.argv[2], "
                 "tag='turn', round=1, reviewers=['agy'], action='allow', blocking=0, advisory=0, failed=[], "
                 "duration=1.0))")
-        procs = [subprocess.Popen([sys.executable, "-c", code, str(state.ROOT), f"p{i}"]) for i in range(12)]
+        procs = [subprocess.Popen([sys.executable, "-c", code, str(ROOT), f"p{i}"]) for i in range(12)]
         for pr in procs:
             pr.wait()
         self.assertEqual(len(state.read_jsonl(state.path("runs.jsonl"))), 12)
@@ -553,13 +552,13 @@ class Live(unittest.TestCase):
     def test_statusline_entry_reads_stdin(self):
         live.record_run(self.done_run(session_id="abc"))
         r = subprocess.run([sys.executable, "-m", "tagteam.live"], input=json.dumps({"session_id": "abc"}),
-                           capture_output=True, text=True, cwd=state.ROOT, env={**os.environ, "NO_COLOR": "1"})
+                           capture_output=True, text=True, cwd=ROOT, env={**os.environ, "NO_COLOR": "1"})
         self.assertEqual(r.stdout.strip(), "tagteam ✓ Review passed: no issues found · just now · 1 review today")
         r = subprocess.run([sys.executable, "-m", "tagteam.live", "swiftbar"], capture_output=True, text=True,
-                           cwd=state.ROOT)
+                           cwd=ROOT)
         self.assertTrue(r.stdout.startswith(":person.2.fill: :checkmark.seal.fill: 1 | "), r.stdout)
         r = subprocess.run([sys.executable, "-m", "tagteam.live"], input="not json", capture_output=True,
-                           text=True, cwd=state.ROOT)
+                           text=True, cwd=ROOT)
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
 
 
