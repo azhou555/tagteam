@@ -149,8 +149,14 @@ Spec: `docs/superpowers/specs/2026-10-26-packaging-design.md`.
 - [x] `scripts/clean_install_test.sh` (temp HOME, `uv tool install`, install, doctor, uninstall byte-identical);
       `TAGTEAM_NO_MACOS_EXTRAS=1` makes install/uninstall skip SwiftBar, launcher and status line
 - [ ] Linux container run of the clean-install script (Docker daemon was not running)
-- [ ] After the branch is approved: migrate the author's machine (`uv tool install -e .`, `tagteam install`,
-      confirm reviewers, `tagteam doctor`, one live Claude turn; check menu bar and status line)
+- [x] Migrate the author's machine, Claude side (2026-10-27): `uv tool install -e .`, `tagteam install
+      --reviewers copilot,agy,claude,codex` with `routing.mode = "quota"`; `tagteam doctor` shows all hooks current.
+      Live headless Claude turn after the install: agy reviewed in 56s, allowed; the menu bar's "no reviewers
+      configured" warning was replaced by `✓ Review passed`, and the status line agrees. Between the packaging merge
+      and this install, nothing was reviewed (no `reviewers.use` yet).
+- [x] Codex side (2026-10-27): hooks approved in `/hooks`; `doctor` shows them trusted. Live `codex exec` turn:
+      copilot reviewed in 8.8s, allowed. Note: `codex exec` with piped stdin waits for EOF even with a prompt;
+      run it with `</dev/null`.
 - [x] Existing user config with no `routing.mode` gets `mode = "quota"` on `tagteam install`; fresh installs stay `ordered`
 - [x] `install` wires only detected agents by default (`--agents` overrides); skipped ones are named
 - Follow-ups: an authors prompt in `install` (today only `--authors`); `--menubar` flag; Kiro, Cursor, OpenCode, Pi harnesses.
