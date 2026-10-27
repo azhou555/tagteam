@@ -1,4 +1,5 @@
 import dataclasses
+import itertools
 import os
 import shutil
 import pathlib
@@ -61,6 +62,23 @@ class Checkout(unittest.TestCase):
         with sandbox.checkout(repo, "0" * 40, cwd=repo) as path:
             self.assertEqual(path, repo)
 
+    def test_worktrees_are_made_in_parallel_and_all_removed_if_one_fails(self):
+        repo = make_repo()
+        tree = changes.snapshot(repo)
+        with sandbox.checkouts(repo, tree, ["a", "b", "c"], cwd=repo) as m:
+            self.assertEqual(len(set(m.values())), 3)
+            self.assertTrue(all(pathlib.Path(p, "a.py").is_file() and p != repo for p in m.values()))
+        self.assertEqual(len(worktrees(repo)), 1)
+        real, n = sandbox._worktree, itertools.count()
+
+        def flaky(r, c):
+            if next(n) == 1:
+                raise RuntimeError("boom")
+            return real(r, c)
+        with mock.patch.object(sandbox, "_worktree", flaky), sandbox.checkouts(repo, tree, ["a", "b", "c"], cwd=repo) as m:
+            self.assertEqual(set(m.values()), {repo})
+        self.assertEqual(len(worktrees(repo)), 1)
+
     def test_non_git_checkout_yields_cwd(self):
         d = tempfile.mkdtemp()
         with sandbox.checkout(None, None, cwd=d) as path:
@@ -80,6 +98,31 @@ class EndToEnd(HookRig, unittest.TestCase):
         pathlib.Path(self.repo, name).write_text("a = 1\n" * 20)
         with mock.patch.object(harnesses, "get", fake_harness(script, result)):
             return self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+
+    def timed_stop(self, setup_s):
+        """A Stop whose setup (everything before reviewers start) took `setup_s` on the hook's clock."""
+        ticks, deadlines = iter([0.0]), []
+
+        def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
+            deadlines.append(deadline)
+            self.calls.append(jobs)
+            return {r: ({"reviewer": r, "ok": True, "duration": 1}, APPROVE) for r in jobs}
+        pathlib.Path(self.repo, "feature.py").write_text("a = 1\n" * 20)
+        with mock.patch.object(core, "_clock", side_effect=lambda: next(ticks, setup_s)), \
+                mock.patch.object(runner, "run_all", run_all):
+            return self.run_hook("claude", "x", self.claude("Stop")), deadlines
+
+    def test_setup_time_comes_out_of_the_reviewer_deadline(self):
+        _, deadlines = self.timed_stop(30.0)
+        self.assertEqual(deadlines, [config.load()["review"]["deadline_s"] - 30.0])
+
+    def test_slow_setup_skips_the_review_and_cleans_up(self):
+        out, deadlines = self.timed_stop(61.0)
+        self.assertEqual((deadlines, self.calls), ([], []))
+        self.assertEqual(out["systemMessage"], "[tagteam] ⚠ Not reviewed: repo too slow to sandbox, see tagteam.log")
+        self.assertEqual(len(worktrees(self.repo)), 1)
+        last = state.read_jsonl(state.path("runs.jsonl"))[-1]
+        self.assertEqual((last["reason"], last["reviewers"]), (core.SLOW_SETUP, []))
 
     def test_reviewer_writes_land_in_sandbox_only_and_disable_that_reviewer(self):
         self.stop("echo x > pwned.txt")

@@ -81,6 +81,11 @@ def completion(run, lines_changed):
 
 
 STATE_ERROR = "state error, see tagteam.log"
+SLOW_SETUP = "repo too slow to sandbox, see tagteam.log"
+
+
+def _clock():
+    return time.monotonic()
 
 
 def _run_record(ev, cfg, s, run_tag, round_no, confirm, **kw):
@@ -92,20 +97,21 @@ def _run_record(ev, cfg, s, run_tag, round_no, confirm, **kw):
             "duration": 0.0, **kw}
 
 
-def review(ev, cfg, s, artifacts, round_no, run_tag, lock, confirm=False, rebuttal=False):
+def review(ev, cfg, s, artifacts, round_no, run_tag, lock, confirm=False, rebuttal=False, started=None):
     """Guard, route, run, decide. The caller holds the session lock (`lock` says how that went). Returns
     (action, message, run_dir, open_issues); message is the block reason or, on allow, a one-line completion
     notice. open_issues are the findings still open afterwards: the new blocking ones, or `s["prior"]` when no
     reviewer gave a verdict. run_dir None means no run was spawned: a block is a re-issued one, an allow with
     open issues is a re-issued block on the confirm round, an allow with a message and none is a state-error
     notice, and an allow without a message is a silent skip. `confirm` marks the review after the last fix
-    round, which can never block. `rebuttal` marks a re-review of an unchanged diff against the author's reply."""
+    round, which can never block. `rebuttal` marks a re-review of an unchanged diff against the author's reply.
+    `started` is the `_clock()` reading when the hook began work; setup since then comes out of the deadline."""
     if lock != limits.HELD:
         state.log("session lock failed, not reviewing", author=ev.agent, session=ev.session_id)
         run = _run_record(ev, cfg, s, run_tag, round_no, confirm, reason=STATE_ERROR)
         live.record_run(run)
         return "allow", completion(run, 0), None, []
-    return _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal)
+    return _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, _clock() if started is None else started)
 
 
 def _session_guard(ev, handler, *args):
@@ -117,7 +123,7 @@ def _session_guard(ev, handler, *args):
         return handler(*args, lock)
 
 
-def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal):
+def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started):
     now = time.time()
     rv = cfg["review"]
     groups = {}
@@ -172,6 +178,13 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal):
     before = changes.snapshot(repo) if repo else None
     watch = sandbox.Watch(repo, before, outside)
     with sandbox.checkouts(repo, before, list(plan), repo or ev.cwd, max(7200, 2 * rv["deadline_s"])) as works:   # one disposable tree each
+        setup = _clock() - started                   # snapshots, stale sweep, worktree adds: all inside the hook timeout
+        if setup > min(60, rv["deadline_s"] / 2):
+            state.log("repo too slow to sandbox; not reviewing", run_id=run_id, setup_s=round(setup, 1))
+            run.update(reviewers=[], reason=SLOW_SETUP)
+            live.record_run(run)
+            return "allow", completion(run, lines_changed), run_dir, s.get("prior") or []
+        deadline = rv["deadline_s"] - setup
         jobs = {r: runner.build_prompt(r, ev.agent, works[r], s.get("prompt", ""), ts, rv["max_diff_chars"],
                                        prior=s.get("prior") or None, author_reply=ev.last_message,
                                        git_activity=git_activity)
@@ -180,8 +193,8 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal):
             jobs = {r: p.replace(repo, works[r]) for r, p in jobs.items()}
         with live.tracking({"run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
                             "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "reviewers": list(plan),
-                            "started": now, "expires": now + rv["deadline_s"] + 60}) as update:
-            outcomes = runner.run_all(jobs, cfg, works, run_dir, rv["deadline_s"], on_done=update)
+                            "started": now, "expires": now + deadline + 60}) as update:
+            outcomes = runner.run_all(jobs, cfg, works, run_dir, deadline, on_done=update)
         guilty = {r: "wrote in its sandbox" for r in plan if works[r] != (repo or ev.cwd) and sandbox.dirty(works[r], before)}
     seen = watch.after()
     in_place = any(works[r] == (repo or ev.cwd) for r in plan)
@@ -240,6 +253,7 @@ def turn_end(ev, cfg):
 
 
 def _turn_end(ev, cfg, lock):
+    started = _clock()
     sf = _session_file(ev)
     s = state.read_json(sf)
     if not s:
@@ -275,7 +289,7 @@ def _turn_end(ev, cfg, lock):
         return None
     if not wanted(ev, cfg, artifacts):
         return None
-    action, msg, run_dir, open_issues = review(ev, cfg, s, artifacts, round_no, "turn", lock, confirm, rebuttal)
+    action, msg, run_dir, open_issues = review(ev, cfg, s, artifacts, round_no, "turn", lock, confirm, rebuttal, started)
     if run_dir is None and action == "allow" and not open_issues:   # no round spent: diff already passed, or a state-error notice
         return {"action": action, "message": msg} if msg else None
     with state.locked(sf.stem):
@@ -311,6 +325,7 @@ def plan_gate(ev, cfg):
 
 
 def _plan_gate(ev, cfg, lock):
+    started = _clock()
     if not ev.plan_text.strip():
         return None
     s = state.read_json(_session_file(ev)) or {"prompt": "", "repo": changes.repo_root(ev.cwd), "prior": []}
@@ -323,7 +338,8 @@ def _plan_gate(ev, cfg, lock):
     confirm = gate_rounds == m + 1 and bool(prior)
     if gate_rounds > m and not confirm:
         return None
-    action, msg, run_dir, open_issues = review(ev, cfg, {**s, "prior": prior}, [art], gate_rounds, "plan-gate", lock, confirm)
+    action, msg, run_dir, open_issues = review(ev, cfg, {**s, "prior": prior}, [art], gate_rounds, "plan-gate", lock,
+                                               confirm, started=started)
     with state.locked(_session_file(ev).stem):
         cur = state.read_json(_session_file(ev))
         if cur:                                      # findings carry only from a block to the next try at the same plan

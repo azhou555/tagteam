@@ -1,4 +1,5 @@
 """Run each reviewer in its own disposable checkout of the turn's snapshot, and detect writes that escape it."""
+import concurrent.futures as cf
 import contextlib
 import os
 import shutil
@@ -67,8 +68,12 @@ def checkouts(repo, tree, names, cwd=None, stale_s=7200):
             try:
                 _clear_stale(repo, stale_s)
                 commit = changes.git(repo, "commit-tree", tree, "-m", "tagteam-review", env=_GIT_ENV).strip()
-                for _ in names:
-                    made.append(_worktree(repo, commit))
+                with cf.ThreadPoolExecutor(max_workers=max(1, len(names))) as ex:
+                    futs = [ex.submit(_worktree, repo, commit) for _ in names]
+                made = [f.result() for f in futs if not f.exception()]
+                err = next((f.exception() for f in futs if f.exception()), None)
+                if err:
+                    raise err
             except (RuntimeError, OSError) as e:
                 state.log("sandbox unavailable, reviewing in place", repo=repo, error=repr(e))
                 for p in made:
