@@ -98,8 +98,8 @@ class Changes(unittest.TestCase):
         base = changes.snapshot(repo)
         sh(sub, "git", "commit", "-q", "--allow-empty", "-m", "bump")
         sh(os.path.join(repo, "vendored"), "git", "pull", "-q", "origin", "HEAD")
-        nested = make_repo()
-        os.rename(nested, os.path.join(repo, "worktree"))
+        os.rename(make_repo(), os.path.join(repo, "worktree"))
+        sh(repo, "git", "init", "-q", os.path.join(repo, "deep", "unborn"))
         pathlib.Path(repo, "new.py").write_text("x\n")
         arts = changes.diff_trees(repo, base, changes.snapshot(repo), [])
         self.assertEqual(sorted((a["path"], a["status"]) for a in arts),
