@@ -184,5 +184,5 @@ run, leaves `prior` set.
       line showed `⚠ Review interrupted · 2 earlier issues not re-checked`; next turn's 1-line edit was reviewed
       with the carried issues and showed `✓ Issues resolved: all 2 fixed and re-checked`. on_review received all
       four runs with correct outcome/summary.
-- Follow-up: change snapshots pick up any untracked nested git repo as a gitlink (seen with `.claude/worktrees/`,
-  now gitignored here). Skip nested repos in `changes.snapshot` for every user.
+- [x] Change snapshots skip untracked nested git repos (they became gitlinks, seen with `.claude/worktrees/`);
+  tracked submodules still diff. Unit test plus a live snapshot of this checkout with a nested repo dropped in.

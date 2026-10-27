@@ -90,6 +90,21 @@ class Changes(unittest.TestCase):
         arts = changes.diff_trees(repo, base, changes.snapshot(repo), [])
         self.assertEqual([(a["path"], a["status"]) for a in arts], [("win.h", "added")])
 
+    def test_snapshot_skips_untracked_nested_repo_but_keeps_tracked_submodule(self):
+        repo = make_repo()
+        sub = make_repo()
+        sh(repo, "git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "vendored")
+        sh(repo, "git", "commit", "-qm", "submodule")
+        base = changes.snapshot(repo)
+        sh(sub, "git", "commit", "-q", "--allow-empty", "-m", "bump")
+        sh(os.path.join(repo, "vendored"), "git", "pull", "-q", "origin", "HEAD")
+        nested = make_repo()
+        os.rename(nested, os.path.join(repo, "worktree"))
+        pathlib.Path(repo, "new.py").write_text("x\n")
+        arts = changes.diff_trees(repo, base, changes.snapshot(repo), [])
+        self.assertEqual(sorted((a["path"], a["status"]) for a in arts),
+                         [("new.py", "added"), ("vendored", "modified")])
+
 
     def test_snapshot_sees_same_size_rewrite_in_the_index_second(self):
         """Racy git: a same-size rewrite in the second the index was written looks clean to a stat check,
