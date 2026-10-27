@@ -34,8 +34,9 @@ tagteam install
 
 1. **Hooks.** It adds tagteam's hooks to each agent's own config (`~/.claude/settings.json`,
    `~/.codex/hooks.json`, `~/.copilot/hooks/tagteam.json`, `~/.gemini/config/hooks.json`). It only merges:
-   every entry it adds is tagged, your own hooks and status line are untouched, a backup is saved next to
-   each file as `*.tagteam-bak-<time>`, and re-running changes nothing new. It wires only the agents
+   every entry it adds is tagged, your own hooks and status line are untouched, and a backup is saved next
+   to each file as `*.tagteam-bak-<time>` each time it writes one. Re-running replaces only tagteam's own
+   entries (with the same ones, if nothing changed) and saves another backup. It wires only the agents
    it finds installed and prints the rest (`copilot: not installed, skipped`); `--agents claude,codex`
    names them explicitly. `--dry-run` shows the changes without making them.
 2. **Consent.** It lists the agents that could review and says that each one **receives your diffs**. You
@@ -57,7 +58,7 @@ Two follow-ups:
 
 - **Codex asks you to approve the hooks.** Open `codex`, type `/hooks`, and trust the three tagteam hooks.
   Codex will not run new or changed hooks until you do, and it asks again after any `tagteam install` that
-  rewrites them.
+  changes them.
 - Run `tagteam doctor` (see [Doctor](#doctor)) to confirm everything is wired.
 
 After that, work normally. A review runs when a turn ends with at least 5 changed lines (any change in later
@@ -145,7 +146,7 @@ headroom, tier, and reserve floor (see `[routing.quota]` in `tagteam config`). `
 hard filter: an agent not listed never reviews, in either mode.
 
 Old-shape config files (`[agents.*]`, `[routing] small/large/…`, `[review] max_rounds`) still load; their
-keys are mapped to the new ones and a deprecation line is logged. An old `enabled = true` never counts as
+keys are mapped to the new ones, and `install`, `doctor` and `tagteam config` log a deprecation line. An old `enabled = true` never counts as
 consent.
 
 ### A repo's own file
@@ -205,11 +206,14 @@ tagteam doctor --probe     # also runs one tiny real review per listed reviewer 
 tagteam doctor --clear     # re-enable reviewers disabled for writing, resume paused ones, then check
 ```
 
-For each agent it shows whether it is installed and, for agents you have configured, whether it is logged in (`✗ not logged in` appears only when tagteam can tell), whether its hooks are present and point at
-a tagteam that still exists, whether it is a listed reviewer (and its place in the order), whether it was
-disabled for writing outside its read-only checkout, and, for Codex, whether the `/hooks` approval is
-missing or stale. It exits 0 when everything it checked is healthy and 1 otherwise, and prints the fix in
-plain words.
+For each agent it shows whether it is installed, whether its hooks are present and point at a tagteam
+that still exists, whether it is a listed reviewer (and its place in the order), whether it was disabled
+for writing outside its read-only checkout or is paused after failures (with the minutes left), and, for
+Codex, whether the `/hooks` approval is missing or stale. It does not check whether an agent is logged
+in, because tagteam can't tell offline; `--probe` runs a real review, which needs a working login. If
+tagteam's own list of disabled or paused reviewers can't be read, no reviewer runs until
+`tagteam doctor --clear` resets it, and doctor says so. It exits 0 when everything it checked is healthy
+and 1 otherwise, and prints the fix in plain words.
 
 ## Upgrading
 
@@ -232,9 +236,11 @@ tagteam doctor
 - **Reviews pause until you confirm reviewers.** An old config's `enabled` flags are never read as consent. The
   prompt preselects the agents you had enabled; type their numbers to keep them. Until then turns show
   `⚠ Not reviewed: no reviewers configured; run tagteam install`.
-- Your routing doesn't change: if your config has no `[routing].mode`, `install` writes `mode = "quota"`
-  (with the bundled agent table and any `[agents.*]` tuning you had), so reviewers are still picked by usage
-  headroom. Set `routing.mode = "ordered"` to use your list order instead. New installs start `ordered`.
+- If you have a `~/.tagteam/config.toml` from before, your routing doesn't change: when it has no
+  `routing.mode`, `install` writes `mode = "quota"` (with the bundled agent table and any `[agents.*]`
+  tuning you had), so reviewers are still picked by usage headroom. Set `routing.mode = "ordered"` to use
+  your list order instead. Without that file there is nothing to keep, so you get `ordered` routing, as
+  new installs do. `tagteam config` shows which mode you have.
 - Re-approve the Codex hooks in `/hooks` if `doctor` asks.
 
 ## Uninstall
