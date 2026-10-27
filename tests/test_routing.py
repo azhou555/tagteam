@@ -1,11 +1,12 @@
 import copy
 import pathlib
+import subprocess
 import unittest
 from unittest import mock
 
 from tests.helpers import (ALL_AGENTS, CFG, FULL, HookRig, art, clear_user_config, state, use_toml,  # isort: skip
                            write_user_config)
-from tagteam import harnesses, live, quota, router, runner  # noqa: E402
+from tagteam import core, harnesses, live, quota, router, runner  # noqa: E402
 
 NOTICE_NONE = "[tagteam] ⚠ Not reviewed: no reviewers configured; run tagteam install"
 NOTICE_UNAVAILABLE = "[tagteam] ⚠ Not reviewed: no listed reviewer is available"
@@ -76,6 +77,50 @@ class Routing(unittest.TestCase):
             self.assertEqual(router.route("claude", {"code": [art("a.py")]}, cfg_with(["codex"]), FULL, {}),
                              ({}, "no listed reviewer is available"))
 
+
+
+class Probes(HookRig, unittest.TestCase):
+    """Quota probes (Copilot's is `gh api`) run only in quota mode, and only for listed agents."""
+
+    def setUp(self):
+        self.rig()
+        self.rigs.pop(0).stop()                                 # the real headroom_map, not the rig's stub
+        self.argv = []
+        real = subprocess.run
+
+        def run(argv, *a, **kw):
+            self.argv.append(list(argv))
+            if argv[0] == "gh":                                 # never the real gh
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            return real(argv, *a, **kw)
+        p = mock.patch("subprocess.run", side_effect=run)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def tearDown(self):
+        self.unrig()
+
+    def review(self, user_config):
+        write_user_config(user_config)
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+        self.n = getattr(self, "n", 0) + 1
+        pathlib.Path(self.repo, f"feature{self.n}.py").write_text("a = 1\n" * 20)
+        self.argv.clear()
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            self.run_hook("claude", "x", self.claude("Stop"))
+        return [a for a in self.argv if a[0] != "git"]
+
+    def test_ordered_mode_runs_no_probe(self):
+        self.assertEqual(self.review(use_toml(["copilot", "agy"])), [])
+        self.assertEqual(len(self.calls), 1)                     # the review itself still ran
+
+    def test_quota_mode_probes_only_listed_agents(self):
+        self.assertEqual(self.review(use_toml(["copilot"]) + '[routing]\nmode = "quota"\n'),
+                         [["gh", "api", "/copilot_internal/user"]])
+        with mock.patch.object(quota, "headroom", wraps=quota.headroom) as probe:
+            self.assertEqual(self.review(use_toml(["agy", "kiro"]) + '[routing]\nmode = "quota"\n'), [])
+        self.assertEqual([c.args[0] for c in probe.call_args_list], ["agy"])
+        self.assertEqual(core.headroom_map(cfg_with(["copilot"])), {})
 
 class Consent(HookRig, unittest.TestCase):
     def setUp(self):

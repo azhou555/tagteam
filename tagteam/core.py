@@ -57,7 +57,11 @@ def collect(s, cfg):
 
 
 def headroom_map(cfg):
-    return {a: quota.headroom(a, cfg) for a in cfg["routing"]["quota"]["agents"]}
+    """Quota mode only, and only for listed agents: ordered mode never probes (Copilot's probe is `gh api`)."""
+    if cfg["routing"]["mode"] != "quota":
+        return {}
+    agents = cfg["routing"]["quota"]["agents"]
+    return {a: quota.headroom(a, cfg) for a in dict.fromkeys(cfg["reviewers"].get("use") or []) if a in agents}
 
 
 def load_map(now):
