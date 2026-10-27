@@ -188,6 +188,30 @@ class FollowThrough(HookRig, unittest.TestCase):
         self.assertIn("✗ Changes requested: 1 issue to fix (round 2/2)", self.seg())
         self.assertIn("1 review today", self.seg())
 
+    def test_revert_redo_loop_cannot_land_blocked_code_as_resolved(self):
+        self.start()
+        sf = state.path("sessions", "claude-sess1.json")
+
+        def redo():
+            self.n = 0
+            self.edit()
+            return self.stop(change=False)
+        self.n = 0
+        self.edit()
+        self.stop(issues(1), change=False)                   # 1: block
+        for _ in range(2):
+            pathlib.Path(self.repo, "feature.py").unlink()
+            self.stop(change=False)                          # revert: resolved, nothing spawned
+            self.assertIn("changes reverted", self.seg())
+            last = redo()                                    # redo: block re-issued, then the confirm round
+        self.assertEqual(len(self.calls), 1)
+        self.assertNotIn("decision", last)
+        self.assertIn("⚠ Unresolved: 1 issue still open after 2 fix rounds", self.seg())
+        self.assertNotIn("Issues resolved", self.seg())
+        self.assertEqual(redo(), {})                         # the hook ends: no loop
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(state.read_json(sf)["round"], 3)
+
     def test_plan_gate_silent_allow_still_resets(self):
         self.start()
         issue = finding("blocker", file="(proposed plan)", line=None, claim="step three is missing a rollback")

@@ -23,7 +23,7 @@ def turn_start(ev, cfg):
             "repo": repo, "baseline": snap, "turn_baseline": snap,    # baseline advances each round; turn_baseline never
             "refs": changes.refs(repo) if repo else {},
             "prompt": ev.prompt, "round": 0, "touched": [], "reviewed_digests": {}, "prior": [],
-            "plan_rounds": 0, "plan_prior": [], "outside_touched": [],
+            "plan_rounds": 0, "plan_prior": [], "outside_touched": [], "reverted_prior": [],
         })
     return None
 
@@ -240,13 +240,16 @@ def _turn_end(ev, cfg, lock):
     s = state.read_json(sf)
     if not s:
         return None                                  # hooks installed mid-session: no baseline yet
-    prior, m = s.get("prior") or [], cfg["limits"]["max_rounds_per_turn"]
+    m = cfg["limits"]["max_rounds_per_turn"]
+    artifacts, head = collect(s, cfg)
+    changed = sum(a["lines_changed"] for a in artifacts)
+    prior = s.get("prior") or []
+    if not prior and changed and s.get("reverted_prior"):
+        prior = s["reverted_prior"]                  # a redo of reverted work: the issues are open again
     round_no = s["round"] + 1
     confirm = round_no == m + 1 and bool(prior)      # the last word on the issues still open; it can't block
     if round_no > m and not confirm:
         return None
-    artifacts, head = collect(s, cfg)
-    changed = sum(a["lines_changed"] for a in artifacts)
     whole = None                                     # the turn's whole change so far, for rebuttals and the revert check
     if prior and ev.agent in cfg["authors"]["review"]:
         ignore, repo = cfg["review"]["ignore"], s.get("repo")
@@ -274,7 +277,7 @@ def _turn_end(ev, cfg, lock):
     with state.locked(sf.stem):
         s = state.read_json(sf) or s
         s["round"] = round_no
-        s["prior"] = open_issues
+        s["prior"], s["reverted_prior"] = open_issues, []
         if head:
             s["baseline"] = head                     # next round reviews only the fix delta
         for a in artifacts:
@@ -292,7 +295,7 @@ def _reverted(ev, cfg, s, sf, round_no, head):
     live.record_run(run)
     with state.locked(sf.stem):
         s = state.read_json(sf) or s
-        s.update(prior=[], baseline=head, touched=[])      # not a round: a redo hits the blocked digest, which counts
+        s.update(prior=[], reverted_prior=s.get("prior") or s.get("reverted_prior") or [], baseline=head, touched=[])      # not a round: a redo hits the blocked digest, which counts
         state.write_json(sf, s)
     state.log("changes reverted; open issues resolved without a review", author=ev.agent, round=round_no)
     return {"action": "allow", "message": completion(run, 0)}
