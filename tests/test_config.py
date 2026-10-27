@@ -56,13 +56,13 @@ class Load(ConfigCase):
     def test_repo_file_cannot_set_reviewers_models_or_mode(self):
         self.user('[reviewers]\nuse = ["codex"]\n[reviewers.claude]\nmodel = "opus"\n')
         self.repo_file('[reviewers]\nuse = ["evil"]\n[reviewers.claude]\nmodel = "x"\n[routing]\nmode = "quota"\n'
-                       '[agents.codex]\nmodel = "y"\n[review]\nblock_at = "blocker"\n')
+                       '[agents.codex]\nmodel = "y"\n[review]\nblock_at = "minor"\n')
         cfg = config.load(str(self.repo))
         self.assertEqual(cfg["reviewers"]["use"], ["codex"])
         self.assertEqual(cfg["reviewers"]["claude"]["model"], "opus")
         self.assertEqual(cfg["reviewers"]["codex"]["model"], "")
         self.assertEqual(cfg["routing"]["mode"], "ordered")
-        self.assertEqual(cfg["review"]["block_at"], "blocker")
+        self.assertEqual(cfg["review"]["block_at"], "minor")
         self.assertEqual(self.log_msgs().count("repo config ignored"), 1)
         dropped = next(r for r in state.read_jsonl(state.path("tagteam.log")) if r["msg"] == "repo config ignored")
         self.assertIn("reviewers.use", dropped["keys"])
@@ -133,6 +133,33 @@ class RepoTightens(ConfigCase):
         cfg, src = config.load_with_sources(str(self.repo))
         self.assertEqual((cfg["limits"]["max_rounds_per_turn"], cfg["review"]["max_diff_chars"]), (1, 100))
         self.assertEqual(src["limits.max_rounds_per_turn"], "repo")
+
+    def test_repo_cannot_turn_reviews_off_or_weaken_them(self):
+        self.repo_file('[authors]\nreview = ["claude"]\n[triggers]\nkinds = ["plan"]\nmin_changed_lines = 500\n'
+                       '[review]\nmin_confidence = 0.99\nblock_at = "blocker"\nper_change = { small = 0, large = 1, docs = 0 }\n')
+        cfg, src = config.load_with_sources(str(self.repo))
+        self.assertEqual(cfg["authors"]["review"], ["claude", "codex", "copilot", "agy"])
+        self.assertEqual(cfg["triggers"]["kinds"], ["code", "plan", "design"])
+        self.assertEqual(cfg["triggers"]["min_changed_lines"], 5)
+        self.assertEqual((cfg["review"]["min_confidence"], cfg["review"]["block_at"]), (0.6, "major"))
+        self.assertEqual(cfg["review"]["per_change"], {"small": 1, "large": 2, "high_risk": 2, "docs": 2})
+        for k in ("authors.review", "triggers.kinds", "triggers.min_changed_lines", "review.min_confidence",
+                  "review.block_at", "review.per_change.small", "review.per_change.large"):
+            self.assertEqual(src[k], "default", k)
+
+    def test_repo_can_add_authors_and_kinds_and_lower_thresholds(self):
+        self.user('[authors]\nreview = ["claude"]\n[triggers]\nkinds = ["code"]\n')
+        self.repo_file('[authors]\nreview = ["codex", "claude"]\n[triggers]\nkinds = ["design"]\nmin_changed_lines = 1\n'
+                       '[review]\nmin_confidence = 0.3\nblock_at = "minor"\nper_change = { small = 2, deadline = 9 }\ndeadline_s = 30\n'
+                       '[classify]\nrisk = ["*.x"]\n')
+        cfg, src = config.load_with_sources(str(self.repo))
+        self.assertEqual(cfg["authors"]["review"], ["claude", "codex"])
+        self.assertEqual(cfg["triggers"]["kinds"], ["code", "design"])
+        self.assertEqual((cfg["triggers"]["min_changed_lines"], cfg["review"]["min_confidence"], cfg["review"]["block_at"]),
+                         (1, 0.3, "minor"))
+        self.assertEqual(cfg["review"]["per_change"]["small"], 2)
+        self.assertEqual((cfg["review"]["deadline_s"], cfg["classify"]["risk"]), (30, ["*.x"]))
+        self.assertEqual(src["review.block_at"], "repo")
 
     def test_repo_may_only_lengthen_cooldown(self):
         self.repo_file('[limits]\ncooldown_min = 0\n')

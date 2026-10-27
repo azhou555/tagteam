@@ -17,7 +17,7 @@ You need Python 3.11+, `git`, [`uv`](https://docs.astral.sh/uv/) (or `pipx`), an
 supported agents installed and logged in with your own account: one to write, one to review.
 
 ```sh
-uv tool install git+https://github.com/OWNER/tagteam     # OWNER: wherever your team hosts tagteam
+uv tool install git+https://github.com/azhou555/tagteam
 # or, from a clone:  uv tool install ./tagteam
 ```
 
@@ -35,8 +35,9 @@ tagteam install
 1. **Hooks.** It adds tagteam's hooks to each agent's own config (`~/.claude/settings.json`,
    `~/.codex/hooks.json`, `~/.copilot/hooks/tagteam.json`, `~/.gemini/config/hooks.json`). It only merges:
    every entry it adds is tagged, your own hooks and status line are untouched, a backup is saved next to
-   each file as `*.tagteam-bak-<time>`, and re-running changes nothing new. It writes hooks for all four
-   agents by default; `--agents claude,codex` limits that. `--dry-run` shows the changes without making them.
+   each file as `*.tagteam-bak-<time>`, and re-running changes nothing new. It wires only the agents
+   it finds installed and prints the rest (`copilot: not installed, skipped`); `--agents claude,codex`
+   names them explicitly. `--dry-run` shows the changes without making them.
 2. **Consent.** It lists the agents that could review and says that each one **receives your diffs**. You
    pick which may review and in what order. Nothing is preselected, and pressing Enter picks none.
 
@@ -139,10 +140,20 @@ Defaults work with no config beyond the reviewer list. Put your changes in `~/.t
 | `classify.plan`, `.design`, `.risk` | glob lists | Which paths count as plans, design docs, or high-risk code |
 
 A repo can carry its own `<repo>/.tagteam.toml`. It may set only `[triggers]`, `[authors]`, `[limits]`,
-`[review]` and `[classify]`, and **it can only tighten**: lower limits, a longer cooldown, a smaller
-`review.max_diff_chars`, and extra `review.ignore` patterns. It cannot raise a limit, remove an ignore
-pattern, or set `[reviewers]`, models, or `[routing]`; which vendors see your code is your choice, not a
-cloned repo's. Anything it sets outside that is dropped and noted in `tagteam.log`.
+`[review]` and `[classify]`, and it can only make tagteam stricter. It can never turn reviews off, loosen a
+limit, or change who reviews. Concretely, against your own config and the defaults:
+
+- `authors.review` and `triggers.kinds`: it can add entries, not remove them.
+- `triggers.min_changed_lines` and `review.min_confidence`: it can lower them, not raise them.
+- `review.block_at`: it can block on more severities (for example `minor`), not fewer.
+- `review.per_change.*`: it can ask for more reviewers, not fewer.
+- `limits.*` and `review.max_diff_chars`: lower values only; `limits.cooldown_min`: longer only.
+- `review.ignore`: it can add patterns, not remove them.
+- `review.deadline_s` and `classify.*`: pass through.
+
+It cannot set `[reviewers]`, models, or `[routing]`; which vendors see your code is your choice, not a
+cloned repo's. Anything outside the allowed tables is dropped and noted in `tagteam.log`, and a looser
+value inside them is ignored.
 
 **Quota mode.** If you are on personal plans and want to stretch their usage limits, set
 `routing.mode = "quota"`. Reviewer choice within `reviewers.use` then follows each agent's remaining
@@ -181,7 +192,7 @@ tagteam doctor --probe     # also runs one tiny real review per listed reviewer 
 tagteam doctor --clear     # re-enable reviewers tagteam disabled for writing, then check
 ```
 
-For each agent it shows whether it is installed and logged in, whether its hooks are present and point at
+For each agent it shows whether it is installed and, for agents you have configured, whether it is logged in (`✗ not logged in` appears only when tagteam can tell), whether its hooks are present and point at
 a tagteam that still exists, whether it is a listed reviewer (and its place in the order), whether it was
 disabled for writing outside its read-only checkout, and, for Codex, whether the `/hooks` approval is
 missing or stale. It exits 0 when everything it checked is healthy and 1 otherwise, and prints the fix in
@@ -189,7 +200,7 @@ plain words.
 
 ## Upgrading
 
-**tagteam itself:** reinstall with `uv tool install --reinstall git+https://github.com/OWNER/tagteam`. The
+**tagteam itself:** run the install command above again with `--reinstall`. The
 hooks call the stable `tagteam` path, so they need no rewrite. Afterwards `tagteam doctor` shows anything
 that needs attention.
 
@@ -208,8 +219,9 @@ tagteam doctor
 - **Reviews pause until you confirm reviewers.** An old config's `enabled` flags are never read as consent. The
   prompt preselects the agents you had enabled; type their numbers to keep them. Until then turns show
   `⚠ Not reviewed: no reviewers configured; run tagteam install`.
-- Routing is `ordered` unless you set `routing.mode = "quota"` in `~/.tagteam/config.toml`. Add that line to
-  keep routing by usage headroom.
+- Your routing doesn't change: if your config has no `[routing].mode`, `install` writes `mode = "quota"`
+  (with the bundled agent table and any `[agents.*]` tuning you had), so reviewers are still picked by usage
+  headroom. Set `routing.mode = "ordered"` to use your list order instead. New installs start `ordered`.
 - Re-approve the Codex hooks in `/hooks` if `doctor` asks.
 
 ## Uninstall

@@ -151,5 +151,6 @@ Spec: `docs/superpowers/specs/2026-10-26-packaging-design.md`.
 - [ ] Linux container run of the clean-install script (Docker daemon was not running)
 - [ ] After the branch is approved: migrate the author's machine (`uv tool install -e .`, `tagteam install`,
       confirm reviewers, `tagteam doctor`, one live Claude turn; check menu bar and status line)
-- Not built: `routing.mode = "quota"` is not written for existing installs (old configs route `ordered` until set);
-  Kiro, Cursor, OpenCode, Pi harnesses; `install` writes hooks for all agents named in `--agents` even if not detected.
+- [x] Existing user config with no `routing.mode` gets `mode = "quota"` on `tagteam install`; fresh installs stay `ordered`
+- [x] `install` wires only detected agents by default (`--agents` overrides); skipped ones are named
+- Follow-ups: an authors prompt in `install` (today only `--authors`); `--menubar` flag; Kiro, Cursor, OpenCode, Pi harnesses.

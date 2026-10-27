@@ -319,13 +319,59 @@ class Consent(unittest.TestCase):
         self.assertIn("no reviewer list saved", shown)
 
     def test_cli_passes_flags(self):
-        with mock.patch.object(install, "install") as inst, mock.patch.object(install, "set_consent") as sc:
+        with mock.patch.object(install, "install") as inst, mock.patch.object(install, "set_consent") as sc, \
+                contextlib.redirect_stdout(io.StringIO()):
             cli.main(["install", "--reviewers", "codex,copilot", "--authors", "claude", "--yes"])
         sc.assert_called_once_with(["codex", "copilot"], ["claude"], True, False)
         with mock.patch.object(install, "install"), mock.patch.object(install, "set_consent"), \
                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             cli.main(["install", "--reviewers", "kiro"])
 
+
+    def test_agents_default_to_detected_and_skipped_are_named(self):
+        out = io.StringIO()
+        with mock.patch.object(harnesses, "detected", return_value=["claude", "codex"]), \
+                mock.patch.object(install, "install") as inst, mock.patch.object(install, "set_consent"), \
+                contextlib.redirect_stdout(out):
+            cli.main(["install", "--yes"])
+        inst.assert_called_once_with(["claude", "codex"], dry_run=False)
+        self.assertIn("copilot: not installed, skipped", out.getvalue())
+        self.assertIn("agy: not installed, skipped", out.getvalue())
+        self.assertNotIn("claude: not installed", out.getvalue())
+        out = io.StringIO()
+        with mock.patch.object(harnesses, "detected", return_value=["claude"]), \
+                mock.patch.object(install, "install") as inst, mock.patch.object(install, "set_consent"), \
+                contextlib.redirect_stdout(out):
+            cli.main(["install", "--yes", "--agents", "copilot"])
+        inst.assert_called_once_with(["copilot"], dry_run=False)
+        self.assertNotIn("skipped", out.getvalue())
+
+    def migrate(self, text):
+        if text is None:
+            clear_user_config()
+        else:
+            write_user_config(text)
+        with mock.patch("builtins.print"), mock.patch.object(install, "check_agent", return_value=0), \
+                mock.patch.object(install, "install_swiftbar"):
+            install.install([])
+        return config.load()["routing"]["mode"], USER_CONFIG.read_text() if USER_CONFIG.exists() else None
+
+    def test_existing_old_config_keeps_quota_routing(self):
+        mode, text = self.migrate('[agents.codex]\nenabled = true\n[routing]\nsmall = 2\n')
+        self.assertEqual(mode, "quota")
+        self.assertEqual(self.migrate(text)[0], "quota")                            # idempotent
+        self.assertEqual(text.count("[routing]"), 1)
+        self.assertEqual(self.migrate("# mine\n")[0], "quota")
+
+    def test_fresh_or_new_style_config_stays_ordered(self):
+        self.assertEqual(self.migrate(None), ("ordered", None))
+        self.assertEqual(self.migrate('[reviewers]\nuse = ["codex"]\n')[0], "ordered")   # written by a new install
+        self.assertEqual(self.migrate('[routing]\nmode = "ordered"\n')[0], "ordered")
+
+    def test_extras_off_only_for_truthy_values(self):
+        for v, want in (("1", True), ("true", True), ("yes", True), ("0", False), ("", False), ("no", False)):
+            with mock.patch.dict(os.environ, {"TAGTEAM_NO_MACOS_EXTRAS": v}):
+                self.assertIs(state.extras_off(), want, v)
 
     def test_cli_config_error_is_a_message_not_a_traceback(self):
         write_user_config('[reviewers]\nuse = ["a"\n')

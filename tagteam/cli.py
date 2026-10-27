@@ -142,7 +142,7 @@ def main(argv=None):
     s.add_argument("--days", type=int, default=7)
     i = sub.add_parser("install")
     i.add_argument("--dry-run", action="store_true")
-    i.add_argument("--agents", default="claude,codex,copilot,agy")
+    i.add_argument("--agents", help="agents to wire hooks for (default: the ones installed on this machine)")
     i.add_argument("--reviewers", help="agents that may review your changes, in order; saves reviewers.use")
     i.add_argument("--authors", help="agents whose turns get reviewed; saves authors.review")
     i.add_argument("--yes", action="store_true", help="don't prompt; without --reviewers no reviewer list is saved")
@@ -175,7 +175,11 @@ def main(argv=None):
         if bad:
             p.error(f"unknown agent: {', '.join(bad)} (choose from {', '.join(harnesses.ALL)})")
         try:
-            install.install(a.agents.split(","), dry_run=a.dry_run)
+            agents = a.agents.split(",") if a.agents else harnesses.detected()
+            for n in harnesses.ALL if not a.agents else ():
+                if n not in agents:
+                    print(f"{n}: not installed, skipped")
+            install.install(agents, dry_run=a.dry_run)
             install.set_consent(names["reviewers"], names["authors"], a.yes, a.dry_run)
         except config.ConfigError as e:
             sys.exit(f"config error: {e}")

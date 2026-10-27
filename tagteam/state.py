@@ -11,6 +11,11 @@ HOME = pathlib.Path(os.environ.get("TAGTEAM_HOME", pathlib.Path.home() / ".tagte
 STATE = HOME / "state"
 
 
+def extras_off():
+    """TAGTEAM_NO_MACOS_EXTRAS=1 (clean-install runs): install and uninstall leave SwiftBar, the launcher and the status line alone."""
+    return os.environ.get("TAGTEAM_NO_MACOS_EXTRAS", "").lower() in ("1", "true", "yes")
+
+
 def path(*parts):
     p = STATE.joinpath(*parts)
     p.parent.mkdir(parents=True, exist_ok=True)

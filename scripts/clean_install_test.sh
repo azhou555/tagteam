@@ -21,7 +21,7 @@ export HOME="$T/home" TAGTEAM_HOME="$T/home/.tagteam" UV_TOOL_DIR="$T/uv-tools" 
 export XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache" XDG_STATE_HOME="$HOME/.local/state"
 export TAGTEAM_NO_MACOS_EXTRAS=1                      # no SwiftBar, launcher or status line, even on a Mac
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'   # a bind-mounted repo has another owner
-unset TAGTEAM TAGTEAM_DEPTH
+unset TAGTEAM TAGTEAM_DEPTH CODEX_HOME
 mkdir -p "$HOME" "$T/fakebin" "$HOME/.claude" "$HOME/.codex"
 
 for agent in claude codex; do                         # stand-ins so install detects the agents

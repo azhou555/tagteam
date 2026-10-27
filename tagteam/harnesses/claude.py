@@ -112,7 +112,7 @@ def unwrap_statusline(data):
 
 
 def install(entry_cmd, stop_timeout, dry_run):
-    wrap = None if os.environ.get("TAGTEAM_NO_MACOS_EXTRAS") else lambda data: wrap_statusline(data, entry_cmd, dry_run)
+    wrap = None if state.extras_off() else lambda data: wrap_statusline(data, entry_cmd, dry_run)
     install_claude_shaped("claude", PATH, entry_cmd, stop_timeout, dry_run, before_save=wrap)
 
 

@@ -107,7 +107,8 @@ def _bad_list(cfg):
 
 
 def _conservative(cfg, over):
-    """A repo file may only tighten: lower limits and diff size, longer cooldowns, add ignore patterns. Drops no-op keys."""
+    """A repo file may only tighten: lower limits and diff size, longer cooldowns, more ignore patterns, more authors and
+    trigger kinds, lower thresholds, a stricter block_at, more reviewers per change. Drops every other key."""
     num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
     for t, k in [("limits", k) for k in over.get("limits", {})] + [("review", "max_diff_chars")]:
         if k in over.get(t, {}) and num(over[t][k]) and num(cfg.get(t, {}).get(k)):
@@ -115,6 +116,25 @@ def _conservative(cfg, over):
             looser = over[t][k] <= cfg[t][k] if k == "cooldown_min" else over[t][k] >= cfg[t][k]
             if looser:
                 del over[t][k]
+    for t, k in (("authors", "review"), ("triggers", "kinds")):          # a repo can add, never remove
+        if isinstance(over.get(t), dict) and isinstance(over[t].get(k), list):
+            added = [x for x in over[t][k] if x not in cfg[t][k]]
+            if added:
+                over[t][k] = cfg[t][k] + added
+            else:
+                del over[t][k]
+    for t, k in (("triggers", "min_changed_lines"), ("review", "min_confidence")):   # lower reviews more
+        if k in over.get(t, {}) and num(over[t][k]) and over[t][k] >= cfg[t][k]:
+            del over[t][k]
+    if over.get("review", {}).get("block_at") is not None:               # blocking on more severities is stricter
+        order = ["blocker", "major", "minor"]
+        v, cur = over["review"]["block_at"], cfg["review"]["block_at"]
+        if v not in order or cur not in order or order.index(v) <= order.index(cur):
+            del over["review"]["block_at"]
+    pc = over.get("review", {}).get("per_change")
+    if isinstance(pc, dict):                                             # never fewer reviewers than the user chose
+        for k in [k for k, v in pc.items() if not num(v) or v <= cfg["review"]["per_change"].get(k, 0)]:
+            del pc[k]
     rv = over.get("review", {})
     if "ignore" in rv:
         cur = cfg["review"]["ignore"]
@@ -199,3 +219,28 @@ def save_user(table, key, items):
         raise ConfigError(f"{p}: can't update {table}.{key} automatically ({e}); edit it by hand") from e
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(new)
+
+
+def migrate_routing(dry_run=False):
+    """An existing pre-packaging user config (no routing.mode, and no authors/reviewers saved by a new install)
+    keeps routing by quota: write `mode = "quota"`. The agent table comes from the bundled defaults and the
+    user's own [agents.*] keys. Returns True if it wrote (or would write) the line. A fresh install stays ordered."""
+    p = state.HOME / "config.toml"
+    try:
+        raw = tomllib.loads(p.read_text()) if p.is_file() else None
+    except (OSError, ValueError):
+        return False
+    if raw is None or "mode" in (raw.get("routing") or {}) or "use" in (raw.get("reviewers") or {}) \
+            or "review" in (raw.get("authors") or {}):
+        return False
+    text = p.read_text()
+    head = re.search(r"^\[routing\][ \t]*(#.*)?$", text, re.M)
+    new = (text[:head.end()] + '\nmode = "quota"' + text[head.end():] if head
+           else text + ("" if not text or text.endswith("\n") else "\n") + '\n[routing]\nmode = "quota"\n')
+    try:
+        tomllib.loads(new)
+    except ValueError:
+        return False
+    if not dry_run:
+        p.write_text(new)
+    return True

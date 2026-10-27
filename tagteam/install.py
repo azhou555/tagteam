@@ -95,6 +95,8 @@ def set_consent(reviewers, authors, yes, dry_run=False):
 
 
 def install(agents, dry_run=False):
+    if config.migrate_routing(dry_run):
+        print(f"{'would keep' if dry_run else 'kept'} quota routing for your existing config (routing.mode = \"quota\")")
     cfg = config.load()
     stop_timeout = cfg["review"]["deadline_s"] + 60
     entry_cmd = entry()
@@ -117,13 +119,8 @@ def install(agents, dry_run=False):
               "new hooks until you trust them).")
 
 
-def extras_off():
-    """TAGTEAM_NO_MACOS_EXTRAS=1 (clean-install runs): install and uninstall leave SwiftBar, the launcher and the status line alone."""
-    return bool(os.environ.get("TAGTEAM_NO_MACOS_EXTRAS"))
-
-
 def _swiftbar_dir():
-    if extras_off() or not shutil.which("defaults"):                # not macOS: no SwiftBar
+    if state.extras_off() or not shutil.which("defaults"):                # not macOS: no SwiftBar
         return None
     r = subprocess.run(["defaults", "read", SWIFTBAR_DOMAIN, "PluginDirectory"], capture_output=True, text=True)
     return pathlib.Path(os.path.expanduser(r.stdout.strip())) if r.returncode == 0 and r.stdout.strip() else None
@@ -153,7 +150,7 @@ def install_swiftbar(dry_run=False):
     Order matters: the plugin is written before SwiftBar is repointed or the legacy copy is removed, so a
     failure leaves the previous setup working.
     """
-    if extras_off():
+    if state.extras_off():
         print("menu bar: skipped (TAGTEAM_NO_MACOS_EXTRAS is set)")
         return
     if not SWIFTBAR_APP.exists():
@@ -213,6 +210,6 @@ def uninstall():
     if d and _ours_plugin(d / SWIFTBAR_PLUGIN):
         (d / SWIFTBAR_PLUGIN).unlink()
         print(f"removed {d / SWIFTBAR_PLUGIN}")
-    if not extras_off() and (LAUNCHER / LAUNCHER_MARK).exists():
+    if not state.extras_off() and (LAUNCHER / LAUNCHER_MARK).exists():
         shutil.rmtree(LAUNCHER)
         print(f"removed {LAUNCHER}")
