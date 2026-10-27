@@ -22,6 +22,15 @@ def repo_root(cwd):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def in_repo(path, repo):
+    """True if `path` is `repo` or inside it. Symlinks resolve on both sides: git reports the real
+    top-level while agents report paths through whatever cwd they were started in."""
+    if not repo:
+        return False
+    p, r = os.path.realpath(path), os.path.realpath(repo)
+    return p == r or p.startswith(r + os.sep)
+
+
 def snapshot(repo):
     """Tree id of the full working state (tracked + untracked, minus ignored), user index untouched.
 

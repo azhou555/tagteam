@@ -325,10 +325,13 @@ class Guards(HookRig, unittest.TestCase):
 
     def test_digest_memory_is_capped_at_50(self):
         self.start()
-        for i in range(60):
-            limits.remember("claude-sess1", f"d{i}", "allow", [], "m")
         sf = self.core._session_file(mock.Mock(agent="claude", session_id="sess1"))
+        turn = state.read_json(sf)["turn_id"]
+        for i in range(60):
+            limits.remember("claude-sess1", f"d{i}", "allow", [], "m", turn)
+        limits.remember("claude-sess1", "other-turn", "allow", [], "m", "another turn id")
         d = state.read_json(sf)["digests"]
+        self.assertNotIn("other-turn", d)
         self.assertEqual((len(d), "d0" in d, "d59" in d), (50, False, True))
 
 

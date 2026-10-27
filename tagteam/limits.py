@@ -56,13 +56,14 @@ def remembered(session_key, dig):
     return (state.read_json(_session_path(session_key), {}).get("digests") or {}).get(dig)
 
 
-def remember(session_key, dig, action, blocking, message=None):
-    """Best effort: a finished verdict is never lost to a state error."""
+def remember(session_key, dig, action, blocking, message=None, turn_id=None):
+    """Best effort: a finished verdict is never lost to a state error. Memory is per turn, so nothing is
+    written once a new turn (another `turn_id`) owns the session file."""
     try:
         with state.locked(session_key):
             p = _session_path(session_key)
             s = state.read_json(p)
-            if not s:
+            if not s or s.get("turn_id") != turn_id:
                 return
             d = s.setdefault("digests", {})
             d.pop(dig, None)

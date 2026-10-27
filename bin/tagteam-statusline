@@ -1,3 +1,4 @@
 #!/bin/sh
 # Dev shim kept for old installs: the status line now lives in `tagteam statusline`.
-exec "$(dirname "$0")/tagteam" statusline
+# Old installs pass their Python interpreter as $1; the shebang's python3 may be too old.
+exec "${1:-python3}" "$(dirname "$0")/tagteam" statusline

@@ -468,6 +468,19 @@ class Cli(unittest.TestCase):
         self.assertEqual(pathlib.Path(home, "state", "quota", "claude.json").read_text(), payload)
         self.assertEqual(self.run_tagteam("statusline", stdin="not json", home=home).returncode, 0)
 
+    def test_old_statusline_shim_runs_the_interpreter_it_was_given(self):
+        home, d = tempfile.mkdtemp(), tempfile.mkdtemp()
+        shim = str(ROOT / "bin" / "tagteam-statusline")
+        r = subprocess.run(["sh", shim, sys.executable], input='{"session_id": "s1"}', capture_output=True, text=True,
+                           env={**os.environ, "TAGTEAM_HOME": home, "NO_COLOR": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("tagteam"), r.stdout)
+        fake = pathlib.Path(d, "py")
+        fake.write_text(f"#!/bin/sh\necho \"$@\" > {d}/argv\n")
+        fake.chmod(0o755)
+        subprocess.run(["sh", shim, str(fake)], input=b"{}", capture_output=True)
+        self.assertEqual(pathlib.Path(d, "argv").read_text().split(), [str(ROOT / "bin" / "tagteam"), "statusline"])
+
     def test_statusline_survives_quota_write_failure_and_bad_bytes(self):
         home = tempfile.mkdtemp()
         pathlib.Path(home, "statusline.orig").write_text("echo orig-line")

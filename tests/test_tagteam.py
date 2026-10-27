@@ -244,6 +244,58 @@ class EndToEnd(HookRig, unittest.TestCase):
     def tearDown(self):
         self.unrig()
 
+    def review_racing_a_new_turn(self, payload):
+        """Run `payload` while the user starts a new turn mid-review; return (output, session before, after)."""
+        bad = {"verdict": "changes_requested", "summary": "", "findings": [finding(file="feature.py", line=2)]}
+        blocking = self.fake_run_all({"copilot": bad, "agy": bad})
+        sf = core._session_file(adapters.parse("claude", "turn-start", self.claude("UserPromptSubmit", prompt="x")))
+        new_turn = {}
+
+        def run_all(*a, **kw):
+            self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="next request"))
+            new_turn.update(state.read_json(sf))
+            return blocking(*a, **kw)
+        with mock.patch.object(runner, "run_all", run_all):
+            out = self.run_hook("claude", "x", payload)
+        return out, new_turn, state.read_json(sf)
+
+    def test_turn_end_leaves_a_turn_started_mid_review_alone(self):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+        pathlib.Path(self.repo, "feature.py").write_text("def f(x):\n    return x[0]\n" * 4)
+        out, new_turn, after = self.review_racing_a_new_turn(self.claude("Stop", last_assistant_message="done"))
+        self.assertEqual(out["decision"], "block")                       # the verdict still reaches the author
+        self.assertEqual(after, new_turn)
+        self.assertEqual((after["prompt"], after["round"], after["prior"]), ("next request", 0, []))
+        logged = [r for r in state.read_jsonl(state.path("tagteam.log"))
+                  if r["msg"] == "new turn started during review; session state not updated"]
+        self.assertEqual(len(logged), 1)
+
+    def test_plan_gate_leaves_a_turn_started_mid_review_alone(self):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="plan it"))
+        plan = self.claude("PreToolUse", tool_name="ExitPlanMode", tool_input={"plan": "1. a\n2. b\n"})
+        out, new_turn, after = self.review_racing_a_new_turn(plan)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(after, new_turn)
+        self.assertEqual((after["plan_rounds"], after["plan_prior"]), (0, []))
+
+    def test_repo_reached_through_a_symlink_is_not_outside(self):
+        link = os.path.join(tempfile.mkdtemp(), "link")
+        os.symlink(self.repo, link)
+        path = os.path.join(link, "feature.py")
+        self.assertTrue(changes.in_repo(path, self.repo))
+        self.assertFalse(changes.in_repo(self.repo + "-other/feature.py", self.repo))
+        self.run_hook("claude", "x", {**self.claude("UserPromptSubmit", prompt="add feature"), "cwd": link})
+        pathlib.Path(path).write_text("a = 1\n" * 20)
+        self.run_hook("claude", "x", {**self.claude("PostToolUse", tool_name="Write", tool_input={"file_path": path}),
+                                      "cwd": link})
+        sf = core._session_file(adapters.parse("claude", "turn-start", self.claude("UserPromptSubmit", prompt="x")))
+        self.assertEqual(state.read_json(sf)["outside_touched"], [])
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            self.run_hook("claude", "x", {**self.claude("Stop"), "cwd": link})
+        prompt = next(iter(self.calls[0].values()))
+        self.assertIn("### feature.py (added", prompt)
+        self.assertNotIn("full content of", prompt)                     # not also sent as an outside-repo file
+
     def test_block_then_fix_then_allow(self):
         self.assertEqual(self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature")), {})
         pathlib.Path(self.repo, "feature.py").write_text("def f(x):\n    return x[0]\n" * 4)

@@ -45,7 +45,7 @@ def _clear_stale(repo, stale_s):
 
 def _worktree(repo, commit):
     path = os.path.realpath(tempfile.mkdtemp(prefix=PREFIX))
-    if path.startswith(repo + os.sep):
+    if changes.in_repo(path, repo):
         shutil.rmtree(path, ignore_errors=True)
         raise OSError(f"temp dir {path} is inside the repo")
     try:

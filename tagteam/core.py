@@ -38,7 +38,7 @@ def touch(ev, cfg):
         s["touched"] = sorted(set(s["touched"]) | set(ev.paths))
         repo = s.get("repo")        # never reset: PostToolUse can't see the pre-edit state, so these can't prove a revert
         s["outside_touched"] = sorted(set(s.get("outside_touched", [])) | {
-            p for p in ev.paths if not (repo and os.path.abspath(p).startswith(repo + os.sep))})
+            p for p in ev.paths if not changes.in_repo(p, repo)})
         state.write_json(_session_file(ev), s)
     return None
 
@@ -51,7 +51,7 @@ def collect(s, cfg):
     if repo and s.get("baseline"):
         head = changes.snapshot(repo)
         arts = changes.diff_trees(repo, s["baseline"], head, ignore)
-    outside = [p for p in s["touched"] if not (repo and os.path.abspath(p).startswith(repo + os.sep))]
+    outside = [p for p in s["touched"] if not changes.in_repo(p, repo)]
     arts += changes.outside_changes(outside, s["reviewed_digests"], ignore)
     return arts, head
 
@@ -174,7 +174,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
     repo = s.get("repo")
     git_activity = changes.ref_activity(repo, s["refs"], changes.refs(repo)) if repo and "refs" in s else []
     outside = sorted({p for p in s.get("touched", []) if os.path.isabs(p)} | {a["path"] for a in artifacts if os.path.isabs(a["path"])})
-    outside = [p for p in outside if not (repo and p.startswith(repo + os.sep))]
+    outside = [p for p in outside if not changes.in_repo(p, repo)]
     before = changes.snapshot(repo) if repo else None
     watch = sandbox.Watch(repo, before, outside)
     with sandbox.checkouts(repo, before, list(plan), repo or ev.cwd, max(7200, 2 * rv["deadline_s"])) as works:   # one disposable tree each
@@ -230,7 +230,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
     action, blocking, advisory = verdict.decide(results, cfg, round_no)
     msg = verdict.message(plan, blocking, advisory, round_no, cfg["limits"]["max_rounds_per_turn"], failed)
     if len(failed) < len(results):                   # a run with no verdict must not suppress a retry
-        limits.remember(key, dig, action, blocking, msg)
+        limits.remember(key, dig, action, blocking, msg, s.get("turn_id"))
     state.write_json(run_dir / "verdict.json", {"action": action, "blocking": blocking, "advisory": advisory,
                                                 "failed": failed, "message": msg})
     run["usage"] = {r: meta["usage"] for r, (meta, _) in outcomes.items() if meta.get("usage")}
@@ -246,6 +246,21 @@ def wanted(ev, cfg, artifacts):
     if ev.agent not in cfg["authors"]["review"]:
         return False
     return bool({a["kind"] for a in classify.annotate(artifacts, cfg)} & set(cfg["triggers"]["kinds"]))
+
+
+def _write_back(sf, turn_id, update):
+    """update(session) and save it, unless a new turn has started since the review began: its fresh session
+    state wins, and the verdict reaches the author anyway."""
+    with state.locked(sf.stem):
+        cur = state.read_json(sf)
+        if not cur:
+            return
+        if cur.get("turn_id") != turn_id:
+            state.log("new turn started during review; session state not updated", session=sf.stem,
+                      reviewed_turn=turn_id, current_turn=cur.get("turn_id"))
+            return
+        update(cur)
+        state.write_json(sf, cur)
 
 
 def turn_end(ev, cfg):
@@ -292,17 +307,17 @@ def _turn_end(ev, cfg, lock):
     action, msg, run_dir, open_issues = review(ev, cfg, s, artifacts, round_no, "turn", lock, confirm, rebuttal, started)
     if run_dir is None and action == "allow" and not open_issues:   # no round spent: diff already passed, or a state-error notice
         return {"action": action, "message": msg} if msg else None
-    with state.locked(sf.stem):
-        s = state.read_json(sf) or s
-        s["round"] = round_no
-        s["prior"], s["reverted_prior"] = open_issues, []
+
+    def advance(cur):
+        cur["round"] = round_no
+        cur["prior"], cur["reverted_prior"] = open_issues, []
         if head:
-            s["baseline"] = head                     # next round reviews only the fix delta
+            cur["baseline"] = head                   # next round reviews only the fix delta
         for a in artifacts:
             if os.path.isabs(a["path"]):
-                s["reviewed_digests"][a["path"]] = changes.file_digest(a["path"])
-        s["touched"] = []
-        state.write_json(sf, s)
+                cur["reviewed_digests"][a["path"]] = changes.file_digest(a["path"])
+        cur["touched"] = []
+    _write_back(sf, s.get("turn_id"), advance)
     state.log("review", run=str(run_dir), action=action, author=ev.agent, round=round_no)
     return {"action": action, "message": msg}
 
@@ -311,10 +326,8 @@ def _reverted(ev, cfg, s, sf, round_no, head):
     """The author undid everything it changed this turn: the open issues are gone and no review is spent."""
     run = _run_record(ev, cfg, s, "turn", round_no, False, reason="reverted")
     live.record_run(run)
-    with state.locked(sf.stem):
-        s = state.read_json(sf) or s
-        s.update(prior=[], reverted_prior=s.get("prior") or s.get("reverted_prior") or [], baseline=head, touched=[])      # not a round: a redo hits the blocked digest, which counts
-        state.write_json(sf, s)
+    _write_back(sf, s.get("turn_id"), lambda cur: cur.update(      # not a round: a redo hits the blocked digest, which counts
+        prior=[], reverted_prior=cur.get("prior") or cur.get("reverted_prior") or [], baseline=head, touched=[]))
     state.log("changes reverted; open issues resolved without a review", author=ev.agent, round=round_no)
     return {"action": "allow", "message": completion(run, 0)}
 
@@ -340,11 +353,10 @@ def _plan_gate(ev, cfg, lock):
         return None
     action, msg, run_dir, open_issues = review(ev, cfg, {**s, "prior": prior}, [art], gate_rounds, "plan-gate", lock,
                                                confirm, started=started)
-    with state.locked(_session_file(ev).stem):
-        cur = state.read_json(_session_file(ev))
-        if cur:                                      # findings carry only from a block to the next try at the same plan
-            cur["plan_rounds"], cur["plan_prior"] = (0, []) if action == "allow" else (gate_rounds, open_issues)
-            state.write_json(_session_file(ev), cur)
+
+    def settle(cur):                                 # findings carry only from a block to the next try at the same plan
+        cur["plan_rounds"], cur["plan_prior"] = (0, []) if action == "allow" else (gate_rounds, open_issues)
+    _write_back(_session_file(ev), s.get("turn_id"), settle)
     if run_dir is None and action == "allow" and not open_issues and not msg:
         return None
     return {"action": action, "message": msg}
