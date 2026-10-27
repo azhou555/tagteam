@@ -12,6 +12,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TMP_HOME = tempfile.mkdtemp(prefix="tagteam-test-")
 os.environ["TAGTEAM_HOME"] = TMP_HOME
+os.environ.pop("TAGTEAM_NO_MACOS_EXTRAS", None)       # clean-install runs set it; tests that need it set it themselves
 sys.path.insert(0, str(ROOT))
 
 from tagteam import config, state  # noqa: E402,F401
