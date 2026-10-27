@@ -10,7 +10,7 @@ from unittest import mock
 
 from tests.helpers import CFG, HookRig, finding, make_repo, state, use_toml, write_user_config  # noqa: F401
 
-from tagteam import limits, live, quota, runner
+from tagteam import config, limits, live, quota, router, runner
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 NOTICE = "[tagteam] ⚠ Not reviewed: review limit reached ({n} per hour)"
@@ -52,7 +52,7 @@ class Reservations(unittest.TestCase):
                 "from tagteam import config, limits\ncfg = config.load()\ncfg['limits']['max_reviews_per_hour'] = 5\n"
                 "w = pathlib.Path(sys.argv[3])\n(w / ('ready' + sys.argv[1])).write_text('')\n"
                 "while not (w / 'go').exists(): time.sleep(0.002)\n"
-                "print(limits.reserve(sys.argv[1], 's', time.time(), cfg))\n")
+                "print(limits.reserve(sys.argv[1], 's', time.time(), cfg) is None)\n")
         procs = [subprocess.Popen([sys.executable, "-c", code, str(i), str(ROOT), str(work)], env=env,
                                   stdout=subprocess.PIPE, text=True) for i in range(8)]
         wait_for([work / f"ready{i}" for i in range(8)])
@@ -63,16 +63,16 @@ class Reservations(unittest.TestCase):
 
     def test_reservations_expire_after_an_hour(self):
         seed(5, age=3601)
-        self.assertTrue(limits.reserve("new", "s", time.time(), cfg_max(5)))
+        self.assertIsNone(limits.reserve("new", "s", time.time(), cfg_max(5)))
         self.assertEqual(len(res().read_text().splitlines()), 1)
 
     def test_crashed_run_still_counts(self):
         seed(5)                                       # reservations with no run record, as after a killed hook
-        self.assertFalse(limits.reserve("new", "s", time.time(), cfg_max(5)))
+        self.assertEqual(limits.reserve("new", "s", time.time(), cfg_max(5)), "review limit reached (5 per hour)")
 
     def test_state_error_means_no_reservation(self):
         with mock.patch.object(state, "locked", side_effect=OSError("disk")):
-            self.assertFalse(limits.reserve("new", "s", time.time(), cfg_max(5)))
+            self.assertEqual(limits.reserve("new", "s", time.time(), cfg_max(5)), limits.STATE_ERROR)
 
     def test_digest_ignores_order_and_changes_with_diff(self):
         a, b = {"path": "a", "diff": "1"}, {"path": "b", "diff": "2"}
@@ -177,7 +177,27 @@ class Guards(HookRig, unittest.TestCase):
         with mock.patch.object(state, "locked", locked):
             out = self.stop()
         self.assertEqual(self.calls, [])
-        self.assertEqual(out["systemMessage"], NOTICE.format(n=30))
+        self.assertEqual(out["systemMessage"], "[tagteam] ⚠ Not reviewed: state error, see tagteam.log")
+
+    def test_unreadable_safety_list_fails_closed(self):
+        for name in ("disabled.json", "cooldowns.json"):
+            with self.subTest(name):
+                self.calls.clear()
+                state.path(name).write_text("{not json")
+                self.start()
+                out = self.stop()
+                self.assertEqual(self.calls, [])
+                self.assertEqual(out["systemMessage"], "[tagteam] ⚠ Not reviewed: state error, see tagteam.log")
+                limits.disable("codex", "x")
+                quota.cooldown("codex", 15)
+                self.assertEqual(state.path(name).read_text(), "{not json")     # never "repaired" to one entry
+                if name == "disabled.json":
+                    self.assertEqual(router.candidates("claude", config.load()), [])
+                else:
+                    self.assertTrue(quota.cooling("copilot"))
+                state.path(name).unlink()
+                state.path("disabled.json").unlink(missing_ok=True)
+                state.path("cooldowns.json").unlink(missing_ok=True)
 
     def test_ceiling_reached_notice_and_status(self):
         write_user_config(use_toml(["copilot"]) + "[limits]\nmax_reviews_per_hour = 3\n")

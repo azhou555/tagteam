@@ -35,6 +35,15 @@ def read_json(p, default=None):
         return default
 
 
+def read_dict(p):
+    """{} if `p` doesn't exist, its JSON object if it parses, else None. Safety lists read None as "everyone"."""
+    p = pathlib.Path(p)
+    if not p.exists():
+        return {}
+    d = read_json(p)
+    return d if isinstance(d, dict) else None
+
+
 def write_json(p, data):
     p = pathlib.Path(p)
     p.parent.mkdir(parents=True, exist_ok=True)

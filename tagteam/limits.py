@@ -10,6 +10,7 @@ import time
 from . import quota, state
 
 HOUR = 3600
+STATE_ERROR = "state error, see tagteam.log"
 MAX_DIGESTS = 50
 BREAKER_FAILURES = 2
 
@@ -24,22 +25,22 @@ def limit_reason(cfg):
 
 
 def reserve(run_id, session_key, now, cfg):
-    """Take one of the hour's review slots before any reviewer starts. False means do not review."""
+    """Take one of the hour's review slots before any reviewer starts. None if taken, else why not to review."""
     try:
         with state.locked("limits"):
             p = state.path("reservations.jsonl")
             live = state.read_jsonl(p, now - HOUR)
             if len(live) >= cfg["limits"]["max_reviews_per_hour"]:
                 state.log("hourly review limit reached", run_id=run_id, session=session_key, count=len(live))
-                return False
+                return limit_reason(cfg)
             live.append({"run_id": run_id, "session": session_key, "ts": now})
             tmp = p.with_suffix(f".{os.getpid()}.tmp")
             tmp.write_text("".join(json.dumps(r) + "\n" for r in live))
             os.replace(tmp, p)
-            return True
+            return None
     except OSError as e:
         state.log("reservation state unusable, not reviewing", run_id=run_id, error=repr(e))
-        return False
+        return STATE_ERROR
 
 
 def digest(artifacts, extra=""):
@@ -124,8 +125,9 @@ def session_lock(author, session_id):
 
 
 def disabled():
-    """{reviewer: {reason, ts}} for reviewers that wrote to the real tree, until `clear_disabled`."""
-    return state.read_json(state.path("disabled.json"), {})
+    """{reviewer: {reason, ts}} for reviewers that wrote to the real tree, until `clear_disabled`.
+    None if the list exists but can't be read: every reviewer counts as disabled until `doctor --clear`."""
+    return state.read_dict(state.path("disabled.json"))
 
 
 def disable(reviewer, reason):
@@ -133,6 +135,9 @@ def disable(reviewer, reason):
     try:
         with state.locked("disabled"):
             d = disabled()
+            if d is None:                            # rewriting it would re-enable everyone else
+                state.log("disabled list unreadable; left as is", reviewer=reviewer, reason=reason)
+                return
             d[reviewer] = {"reason": reason, "ts": time.time()}
             state.write_json(state.path("disabled.json"), d)
     except OSError as e:

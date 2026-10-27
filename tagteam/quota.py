@@ -104,13 +104,15 @@ def self_metered(agent, now, cfg):
 
 
 def cooldowns():
-    """{agent: paused-until timestamp}, past entries included."""
-    return state.read_json(state.path("cooldowns.json"), {})
+    """{agent: paused-until timestamp}, past entries included. None if the file exists but can't be read:
+    every agent counts as cooling until `doctor --clear`."""
+    return state.read_dict(state.path("cooldowns.json"))
 
 
 def cooling(agent, now=None):
     """True while the agent is in cooldown after quota or other failures."""
-    return cooldowns().get(agent, 0) > (now or time.time())
+    c = cooldowns()
+    return c is None or c.get(agent, 0) > (now or time.time())
 
 
 def headroom(agent, cfg, now=None):
@@ -135,6 +137,9 @@ def headroom(agent, cfg, now=None):
 def cooldown(agent, minutes):
     with state.locked("cooldowns"):
         p = state.path("cooldowns.json")
-        d = state.read_json(p, {})
+        d = cooldowns()
+        if d is None:                                # rewriting it would end everyone else's cooldown
+            state.log("cooldown list unreadable; left as is", agent=agent)
+            return
         d[agent] = time.time() + minutes * 60
         state.write_json(p, d)

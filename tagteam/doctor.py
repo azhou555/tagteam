@@ -59,8 +59,12 @@ def reviewer_part(name, h, use, off, paused):
         return None, True
     if name not in use:
         return "reviewer – not listed", True
+    if off is None:
+        return "reviewer ✗ disabled-reviewer list unreadable, so none review; `tagteam doctor --clear` resets it", False
     if name in off:
         return f"reviewer ✗ disabled by sandbox ({off[name].get('reason', '?')}); `tagteam doctor --clear` re-enables", False
+    if paused is None:
+        return "reviewer ✗ cooldown list unreadable, so none review; `tagteam doctor --clear` resets it", False
     if name in paused:
         return (f"reviewer ⚠ listed #{use.index(name) + 1}, paused {paused[name]} more min after failures; "
                 "`tagteam doctor --clear` resumes"), True
@@ -68,8 +72,9 @@ def reviewer_part(name, h, use, off, paused):
 
 
 def paused_minutes(now):
-    """{agent: whole minutes left} for reviewers in cooldown."""
-    return {a: math.ceil((t - now) / 60) for a, t in quota.cooldowns().items() if t > now}
+    """{agent: whole minutes left} for reviewers in cooldown; None if the cooldown list can't be read."""
+    c = quota.cooldowns()
+    return None if c is None else {a: math.ceil((t - now) / 60) for a, t in c.items() if t > now}
 
 
 def probe_one(name, cfg):
@@ -110,10 +115,13 @@ def run(probe, clear):
     if clear:
         was, was_paused = limits.disabled(), paused_minutes(time.time())
         limits.clear_disabled()
-        print(f"cleared disabled reviewers: {', '.join(was)}" if was and not limits.disabled()
-              else "no disabled reviewers to clear" if not was else "could not clear disabled reviewers (see tagteam.log)")
+        print("could not clear disabled reviewers (see tagteam.log)" if limits.disabled() != {}
+              else "reset the unreadable disabled-reviewer list" if was is None
+              else f"cleared disabled reviewers: {', '.join(was)}" if was else "no disabled reviewers to clear")
         if not limits.clear_pauses():                    # also resets failure counts, paused or not
             print("could not resume paused reviewers (see tagteam.log)")
+        elif was_paused is None:
+            print("reset the unreadable cooldown list")
         elif was_paused:
             print(f"resumed paused reviewers: {', '.join(was_paused)}")
     ok = True
@@ -144,7 +152,7 @@ def run(probe, clear):
         print(f"{name:8}" + " · ".join(parts))
     if probe:
         for name in use:
-            if name in found and name not in off and harnesses.get(name).reviewer:
+            if name in found and off is not None and name not in off and harnesses.get(name).reviewer:
                 t0 = time.time()
                 result = probe_one(name, cfg)
                 print(f"probe {name}: {result} ({time.time() - t0:.0f}s)")

@@ -79,7 +79,7 @@ def completion(run, lines_changed):
     return msg + (f" · unavailable: {', '.join(run['failed'])}" if run["failed"] else "")
 
 
-STATE_ERROR = "state error, see tagteam.log"
+STATE_ERROR = limits.STATE_ERROR
 SLOW_SETUP = "repo too slow to sandbox, see tagteam.log"
 
 
@@ -142,8 +142,13 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
                 return "allow", completion(run, 0), None, seen["blocking"]
             return "block", seen["message"], None, seen["blocking"]
         return "allow", None, None, []
-    hm = headroom_map(cfg)
-    plan, reason = router.route(ev.agent, groups, cfg, hm, load_map(now))
+    unreadable = [f for f, v in (("disabled.json", limits.disabled()), ("cooldowns.json", quota.cooldowns())) if v is None]
+    if unreadable:                                   # a safety list we can't read fails closed
+        state.log("reviewer safety state unreadable; not reviewing (tagteam doctor --clear resets it)", files=unreadable)
+        hm, (plan, reason) = {}, ({}, STATE_ERROR)
+    else:
+        hm = headroom_map(cfg)
+        plan, reason = router.route(ev.agent, groups, cfg, hm, load_map(now))
     listed = cfg["reviewers"].get("use") or []
     stray = [r for r in plan if r not in listed]
     if stray:                                        # last line of defence: only the user's list ever sees code
@@ -152,8 +157,9 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         reason = reason or (None if plan else "no listed reviewer is available")
     run = _run_record(ev, cfg, s, run_tag, round_no, confirm, ts=now)
     run_id = run["run_id"]
-    if plan and not limits.reserve(run_id, f"{ev.agent}:{ev.session_id}", now, cfg):
-        plan, reason = {}, limits.limit_reason(cfg)
+    refused = plan and limits.reserve(run_id, f"{ev.agent}:{ev.session_id}", now, cfg)
+    if refused:
+        plan, reason = {}, refused
     run["reviewers"] = list(plan)
     run_dir = state.path("runs", run_id, "x").parent
     run_dir.mkdir(parents=True, exist_ok=True)

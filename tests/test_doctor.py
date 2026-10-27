@@ -116,6 +116,21 @@ class Doctor(unittest.TestCase):
         self.assertFalse(quota.cooling("codex"))
         self.assertEqual(state.read_json(state.path("failures.json")), {})
 
+    def test_unreadable_safety_lists_reported_and_reset(self):
+        write_user_config(use_toml(["codex"]))
+        for name, said in (("disabled.json", "reset the unreadable disabled-reviewer list"),
+                           ("cooldowns.json", "reset the unreadable cooldown list")):
+            with self.subTest(name):
+                state.path(name).write_text("[1, 2")
+                rc, out = self.run_doctor()
+                self.assertEqual(rc, 1)
+                self.assertIn("unreadable", self.line(out, "codex"))
+                self.assertIn("tagteam doctor --clear", self.line(out, "codex"))
+                rc, out = self.run_doctor(clear=True)
+                self.assertIn(said, out)
+                self.assertEqual((rc, state.read_json(state.path(name))), (0, {}))
+                self.assertIn("reviewer ✓ listed #1", self.line(out, "codex"))
+
     def test_probe_unknown_when_recheck_fails(self):
         good = json.dumps({"structured_output": {"verdict": "approve", "summary": "", "findings": []}})
         real = doctor.changes.snapshot

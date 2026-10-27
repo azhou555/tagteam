@@ -28,6 +28,8 @@ def needed(kind, artifacts, rv):
 def candidates(author, cfg):
     """Listed agents that are installed, enabled and not the author, in list order."""
     have, off = harnesses.detected(), limits.disabled()
+    if off is None:                                 # unreadable disabled list: nobody is trusted
+        return []
     return [a for a in dict.fromkeys(cfg["reviewers"].get("use") or []) if a != author and a in have and a not in off]
 
 
