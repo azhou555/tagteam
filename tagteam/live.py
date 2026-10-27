@@ -56,18 +56,32 @@ def _alive(lock_path):
 
 
 def active(now=None):
-    """Running reviews, oldest first. Records whose owner died (or that passed `expires`) are dropped."""
+    """Running reviews, oldest first. A record whose owner died is recorded as an interrupted run by the one
+    reader that claims it; one that passed `expires` is dropped."""
     now = now or time.time()
     out = []
     for p in sorted(_active_dir().glob("*.json")):
         rec = state.read_json(p)
         lock_path = p.with_suffix(".lock")
-        if rec and now <= rec.get("expires", 0) and _alive(lock_path):
+        alive = _alive(lock_path)
+        if rec and now <= rec.get("expires", 0) and alive:
             out.append(rec)
             continue
-        for q in (p, lock_path):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            continue                                 # another reader claimed it, or the owner just finished
+        except OSError:
+            pass
+        else:
+            if rec and not alive:
+                _roll({**{k: rec[k] for k in ("run_id", "author", "session_id", "tag", "round", "max_rounds")},
+                            "ts": rec["started"], "prior": rec.get("prior", 0),
+                            "reviewers": list(rec["reviewers"]), "action": "allow", "blocking": 0, "advisory": 0,
+                            "failed": [], "duration": round(now - rec["started"], 1), "reason": "interrupted"})
+        if not alive:                                # a live owner still holds it, and may rewrite its record
             with contextlib.suppress(OSError):
-                q.unlink()
+                lock_path.unlink()
     return out
 
 
@@ -85,10 +99,15 @@ def _load_status(now):
 
 
 def record_run(run, now=None):
-    """Append a finished run and roll it into status.json, atomically with respect to other writers.
+    """Append a finished run and roll it into status.json. A review killed earlier is recorded first, so it
+    never lands after, and shows over, a later run."""
+    active()
+    _roll(run, now)
 
-    The rollup counts the run on the day it finished (`now`); backfill passes the run's own start time.
-    """
+
+def _roll(run, now=None):
+    """Append and roll up, atomically with respect to other writers. The rollup counts the run on the day it
+    finished (`now`); backfill passes the run's own start time."""
     now = now or time.time()
     with state.locked("runs"):
         state.append_jsonl(state.path("runs.jsonl"), run)
@@ -153,6 +172,8 @@ KINDS = {
                    "hex": "#B08A1E,#FFF1A8"},
     "failed": {"icon": "⚠", "label": "Review failed", "ansi": 229, "sf": "exclamationmark.circle.fill",
                "hex": "#B08A1E,#FFF1A8"},
+    "interrupted": {"icon": "⚠", "label": "Review interrupted", "ansi": 229, "sf": "exclamationmark.circle.fill",
+                    "hex": "#B08A1E,#FFF1A8"},
 }
 
 
@@ -166,6 +187,8 @@ def outcome(run):
     if reason == "reverted":
         return "resolved", "changes reverted"
     owed = f" · {_plural(prior, 'earlier issue')} not re-checked" if prior else ""
+    if reason == "interrupted":
+        return "interrupted", "stopped before reviewers finished" + owed
     if reason:
         return "unreviewed", REASONS.get(reason, reason) + owed
     n = run["blocking"]

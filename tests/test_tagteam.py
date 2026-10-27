@@ -463,8 +463,43 @@ class Live(unittest.TestCase):
         self.assertTrue((live._active_dir() / "dead.json").exists())     # SIGKILL skipped cleanup
         self.assertEqual(live.active(), [])
         self.assertFalse((live._active_dir() / "dead.json").exists())
-        with live.tracking(self.rec("old", expires=time.time() - 1)):
+        with live.tracking(self.rec("old", expires=time.time() - 1)) as update:
             self.assertEqual(live.active(), [])                          # backstop even while lock is held
+            update("copilot", {"ok": True, "duration": 1})               # the owner rewrites its dropped record
+            self.assertEqual(live.active(), [])
+        self.assertEqual([r["run_id"] for r in state.read_jsonl(state.path("runs.jsonl"))], ["dead"])   # expiry alone records nothing
+
+    def test_killed_owner_is_recorded_once_by_concurrent_readers(self):
+        code = ("import os, signal, sys; sys.path.insert(0, sys.argv[1]); from tagteam import live; "
+                "cm = live.tracking(eval(sys.argv[2])); cm.__enter__(); os.kill(os.getpid(), signal.SIGKILL)")
+        subprocess.run([sys.executable, "-c", code, str(ROOT), repr(self.rec("dead", prior=2))])
+        read, raced = state.read_json, []
+
+        def second_reader_interleaves(p, default=None):      # both readers see the record before either claims it
+            rec = read(p, default)
+            if p.parent == live._active_dir() and not raced:
+                raced.append(True)
+                self.assertEqual(live.active(), [])
+            return rec
+        with mock.patch.object(state, "read_json", second_reader_interleaves):
+            self.assertEqual(live.active(), [])
+        self.assertEqual(raced, [True])
+        [run] = state.read_jsonl(state.path("runs.jsonl"))
+        self.assertEqual((run["run_id"], run["reason"], run["reviewers"], run["prior"]), ("dead", "interrupted", ["copilot", "agy"], 2))
+        self.assertEqual(list(live._active_dir().glob("*")), [])
+        self.assertTrue(live.segment("claude", "s").startswith(
+            "tagteam ⚠ Review interrupted: stopped before reviewers finished · 2 earlier issues not re-checked · "))
+        self.assertIn("⚠ Review interrupted", live.render_watch())
+        self.assertIn(f"Review interrupted: stopped before reviewers finished · 2 earlier issues not re-checked "
+                      f"| color={live.KINDS['interrupted']['hex']}", live.render_swiftbar())
+
+    def test_killed_review_lands_before_a_later_run(self):
+        code = ("import os, signal, sys; sys.path.insert(0, sys.argv[1]); from tagteam import live; "
+                "cm = live.tracking(eval(sys.argv[2])); cm.__enter__(); os.kill(os.getpid(), signal.SIGKILL)")
+        subprocess.run([sys.executable, "-c", code, str(ROOT), repr(self.rec("dead"))])
+        live.record_run(self.done_run())
+        self.assertEqual([r["run_id"] for r in state.read_jsonl(state.path("runs.jsonl"))], ["dead", "x"])
+        self.assertTrue(live.segment("claude", "s").startswith("tagteam ✓ Review passed: no issues found · "))
 
     def test_concurrent_finishes_are_all_counted(self):
         code = ("import sys, time; sys.path.insert(0, sys.argv[1]); from tagteam import live; "

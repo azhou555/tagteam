@@ -1,11 +1,13 @@
+import json
 import pathlib
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
 
-from tests.helpers import HookRig, finding, sh, state, use_toml
+from tests.helpers import ROOT, HookRig, finding, sh, state, use_toml
 
 from tagteam import limits, live, runner
 
@@ -158,6 +160,28 @@ class FollowThrough(HookRig, unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertIn("✗ Changes requested: 1 issue to fix (round 1/2)", self.seg())
         self.assertEqual(len(self.session()["prior"]), 1)
+
+    def test_killed_review_is_interrupted_and_its_issues_carry(self):
+        self.start()
+        self.stop(issues(2))
+        self.edit()
+        code = ("import io, os, signal, sys; sys.path.insert(0, sys.argv[1]); from unittest import mock; "
+                "from tagteam import cli, core, harnesses, runner; "
+                "mock.patch.object(core, 'headroom_map', return_value={'copilot': 0.9}).start(); "
+                "mock.patch.object(harnesses, 'detected', return_value=['claude', 'copilot']).start(); "
+                "mock.patch.object(runner, 'run_all', lambda *a, **k: os.kill(os.getpid(), signal.SIGKILL)).start(); "
+                "sys.stdin = io.StringIO(sys.argv[2]); cli.hook('claude', 'x')")
+        stop = json.dumps(self.claude("Stop", stop_hook_active=True, last_assistant_message="fixed"))
+        self.assertEqual(subprocess.run([sys.executable, "-c", code, str(ROOT), stop]).returncode, -9)
+        self.assertIn("⚠ Review interrupted: stopped before reviewers finished · 2 earlier issues not re-checked",
+                      self.seg())
+        self.seg()
+        self.assertEqual([r.get("reason") for r in state.read_jsonl(state.path("runs.jsonl"))], [None, "interrupted"])
+        self.start()
+        self.small_fix()
+        self.stop(change=False)
+        self.assertIn("alpha breaks when input is empty", self.last_prompt())
+        self.assertIn("✓ Issues resolved: all 2 fixed and re-checked", self.seg())
 
     def test_rebuttal_without_changes_is_rechecked(self):
         self.start()

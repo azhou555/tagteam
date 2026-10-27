@@ -218,7 +218,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
             jobs = {r: swap_root(p, repo, works[r]) for r, p in jobs.items()}
         with live.tracking({"run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
                             "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "reviewers": list(plan),
-                            "started": now, "expires": now + deadline + 60}) as update:
+                            "prior": run["prior"], "started": now, "expires": now + deadline + 60}) as update:
             outcomes = runner.run_all(jobs, cfg, works, run_dir, deadline, on_done=update)
         guilty = {r: "wrote in its sandbox" for r in plan if works[r] != (repo or ev.cwd) and sandbox.dirty(works[r], before)}
     seen = watch.after()
