@@ -532,7 +532,12 @@ Spec §5a and guard 2. Runs after Task 6, because it builds on its round countin
     run with no reviewers and `reason="reverted"`. Spawn nothing, and clear `prior`.
   - The round-1 `min_changed_lines` skip is unchanged.
 - `plan_gate` passes `plan_prior` as `prior`, stores the new blocking list back, and follows the same confirm
-  rule using `plan_rounds`.
+  rule using `plan_rounds`. Plan-gate state lifecycle:
+  - `turn_start` rewrites the session file, so each user prompt starts with `plan_rounds = 0` and
+    `plan_prior = []` (write both explicitly).
+  - When the plan gate allows (an approval, a confirm review, or the round limit), it resets both to `0` / `[]`,
+    so a later plan in the same turn starts fresh. Findings carry only between attempts at the same plan, that is,
+    between a block and the next ExitPlanMode.
 - Task 6's blocked-digest re-issue on a confirm round records an `unresolved` run without spawning.
 
 - [ ] **Step 1: Write the failing tests:**
@@ -553,6 +558,9 @@ Spec §5a and guard 2. Runs after Task 6, because it builds on its round countin
     outcome with `· 2 earlier issues not re-checked`.
   - `test_plan_gate_tracks_prior`: plan gate blocks, the next ExitPlanMode's prompt contains the prior finding,
     and an approval shows `Issues resolved`.
+  - `test_plan_gate_state_resets_after_allow`: plan A blocks, then is approved. Plan B in the same turn gets
+    round 1/2 with no prior findings in its prompt, and a clean review shows `✓ Review passed`, not
+    `Issues resolved`. A new user prompt also resets a blocked plan's state.
   - `test_swiftbar_uses_new_kinds`: the menu bar header carries the `resolved` / `unresolved` sf symbol and hex.
 - [ ] **Step 2: Run them.** Expected: FAIL.
 - [ ] **Step 3: Implement** per the interfaces. `completion()` needs no change, since it already uses
