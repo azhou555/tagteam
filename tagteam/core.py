@@ -23,7 +23,7 @@ def turn_start(ev, cfg):
             "repo": repo, "baseline": snap, "turn_baseline": snap,    # baseline advances each round; turn_baseline never
             "refs": changes.refs(repo) if repo else {},
             "prompt": ev.prompt, "round": 0, "touched": [], "reviewed_digests": {}, "prior": [],
-            "plan_rounds": 0, "plan_prior": [],
+            "plan_rounds": 0, "plan_prior": [], "outside_touched": [],
         })
     return None
 
@@ -36,6 +36,9 @@ def touch(ev, cfg):
         if not s:
             return None
         s["touched"] = sorted(set(s["touched"]) | set(ev.paths))
+        repo = s.get("repo")        # never reset: PostToolUse can't see the pre-edit state, so these can't prove a revert
+        s["outside_touched"] = sorted(set(s.get("outside_touched", [])) | {
+            p for p in ev.paths if not (repo and os.path.abspath(p).startswith(repo + os.sep))})
         state.write_json(_session_file(ev), s)
     return None
 
@@ -121,11 +124,13 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal):
     seen = limits.remembered(key, dig)
     if seen:
         state.log("same diff already reviewed; not reviewing again", author=ev.agent, action=seen["action"], round=round_no)
-        if seen["action"] == "block" and confirm:    # the last word can't block: record what is still open
-            run = _run_record(ev, cfg, s, run_tag, round_no, confirm, action="allow", blocking=len(seen["blocking"]))
+        if seen["action"] == "block":                # no reviewer spawned, but the status must show this round
+            final = confirm                          # the last word can't block: record what is still open
+            run = _run_record(ev, cfg, s, run_tag, round_no, confirm, action="allow" if final else "block",
+                              blocking=len(seen["blocking"]))
             live.record_run(run)
-            return "allow", completion(run, 0), None, seen["blocking"]
-        if seen["action"] == "block":
+            if final:
+                return "allow", completion(run, 0), None, seen["blocking"]
             return "block", seen["message"], None, seen["blocking"]
         return "allow", None, None, []
     hm = headroom_map(cfg)
@@ -242,15 +247,20 @@ def _turn_end(ev, cfg, lock):
         return None
     artifacts, head = collect(s, cfg)
     changed = sum(a["lines_changed"] for a in artifacts)
-    if prior and ev.agent in cfg["authors"]["review"] and s.get("repo") and s.get("turn_baseline") and head:
-        whole = changes.diff_trees(s["repo"], s["turn_baseline"], head, cfg["review"]["ignore"])
-        if not whole and not any(os.path.isabs(a["path"]) for a in artifacts):
-            return _reverted(ev, cfg, s, sf, round_no, head)
-    else:
-        whole = None
+    whole = None                                     # the turn's whole change so far, for rebuttals and the revert check
+    if prior and ev.agent in cfg["authors"]["review"]:
+        ignore, repo = cfg["review"]["ignore"], s.get("repo")
+        outside = changes.outside_changes(s.get("outside_touched", []), {}, ignore)
+        if repo and s.get("turn_baseline") and head:
+            whole = changes.diff_trees(repo, s["turn_baseline"], head, ignore) + outside
+            if not whole and not changes.ref_activity(repo, s.get("refs", {}), changes.refs(repo)):
+                return _reverted(ev, cfg, s, sf, round_no, head)
+        elif outside:
+            whole = outside
     rebuttal = changed == 0 and bool(prior)
     if rebuttal:                                     # no fix: the author may be answering, so recheck the turn's whole diff
-        if whole is None:
+        if not whole:
+            state.log("rebuttal not re-checked (nothing to diff)", author=ev.agent, session=ev.session_id)
             return None
         artifacts, changed = whole, sum(a["lines_changed"] for a in whole)
     # Round 1 skips trivial edits; later rounds re-check any fix, however small.
@@ -282,7 +292,7 @@ def _reverted(ev, cfg, s, sf, round_no, head):
     live.record_run(run)
     with state.locked(sf.stem):
         s = state.read_json(sf) or s
-        s.update(round=round_no, prior=[], baseline=head, touched=[])
+        s.update(prior=[], baseline=head, touched=[])      # not a round: a redo hits the blocked digest, which counts
         state.write_json(sf, s)
     state.log("changes reverted; open issues resolved without a review", author=ev.agent, round=round_no)
     return {"action": "allow", "message": completion(run, 0)}
@@ -307,13 +317,13 @@ def _plan_gate(ev, cfg, lock):
     if gate_rounds > m and not confirm:
         return None
     action, msg, run_dir, open_issues = review(ev, cfg, {**s, "prior": prior}, [art], gate_rounds, "plan-gate", lock, confirm)
-    if run_dir is None and action == "allow" and not open_issues:
-        return {"action": action, "message": msg} if msg else None
     with state.locked(_session_file(ev).stem):
         cur = state.read_json(_session_file(ev))
         if cur:                                      # findings carry only from a block to the next try at the same plan
             cur["plan_rounds"], cur["plan_prior"] = (0, []) if action == "allow" else (gate_rounds, open_issues)
             state.write_json(_session_file(ev), cur)
+    if run_dir is None and action == "allow" and not open_issues and not msg:
+        return None
     return {"action": action, "message": msg}
 
 

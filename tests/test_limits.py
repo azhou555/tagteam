@@ -10,7 +10,7 @@ from unittest import mock
 
 from tests.helpers import CFG, HookRig, finding, make_repo, state, use_toml, write_user_config  # noqa: F401
 
-from tagteam import limits, quota, runner
+from tagteam import limits, live, quota, runner
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 NOTICE = "[tagteam] ⚠ Not reviewed: review limit reached ({n} per hour)"
@@ -215,15 +215,18 @@ class Guards(HookRig, unittest.TestCase):
         self.start()
         first = self.stop(self.blocker())
         self.assertEqual(first["decision"], "block")
-        status = state.path("status.json").read_bytes()
+        today = state.read_json(state.path("status.json"))["today"]
         runs = state.read_jsonl(state.path("runs.jsonl"))
         self.rewind()
         second = self.stop(self.blocker(), change=False)
         self.assertEqual(second, first)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(len(res().read_text().splitlines()), 1)
-        self.assertEqual(state.read_jsonl(state.path("runs.jsonl")), runs)
-        self.assertEqual(state.path("status.json").read_bytes(), status)
+        recorded = state.read_jsonl(state.path("runs.jsonl"))          # the re-issue is shown, but spawned and spent nothing
+        self.assertEqual(recorded[:-1], runs)
+        self.assertEqual((recorded[-1]["round"], recorded[-1]["reviewers"], recorded[-1]["blocking"]), (2, [], 1))
+        self.assertEqual(state.read_json(state.path("status.json"))["today"], today)
+        self.assertIn("1 issue still open after fixes (round 2/2)", live.segment("claude", "sess1"))
         sf = self.core._session_file(mock.Mock(agent="claude", session_id="sess1"))
         self.assertEqual(state.read_json(sf)["round"], 2)
         self.rewind()

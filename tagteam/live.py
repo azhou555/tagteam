@@ -170,9 +170,9 @@ def outcome(run):
     n = run["blocking"]
     if run.get("confirm") and n:                     # may be a re-issued block with no reviewer spawned
         return "unresolved", f"{_plural(n, 'issue')} still open after {_plural(m, 'fix round')}"
-    if not run["reviewers"]:
+    if not run["reviewers"] and run["action"] != "block":      # a re-issued block spawned no one, but it is a verdict
         return "unreviewed", "no reviewer had quota available" + owed
-    if set(run["failed"]) >= set(run["reviewers"]):
+    if run["reviewers"] and set(run["failed"]) >= set(run["reviewers"]):
         return "failed", "every reviewer errored or timed out" + owed
     where = f" (round {run['round']}/{m})" if m else ""
     if run["action"] == "block":

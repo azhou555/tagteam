@@ -1,11 +1,13 @@
 import pathlib
+import subprocess
+import tempfile
 import time
 import unittest
 from unittest import mock
 
-from tests.helpers import HookRig, finding, state, use_toml
+from tests.helpers import HookRig, finding, sh, state, use_toml
 
-from tagteam import live, runner
+from tagteam import limits, live, runner
 
 PLAN = {"hook_event_name": "PreToolUse", "tool_name": "ExitPlanMode", "session_id": "sess1"}
 
@@ -18,6 +20,10 @@ def issues(n):
     names = ["alpha", "bravo", "charlie"]
     return verdict(*[finding("blocker", file="feature.py", line=1 + 20 * i, claim=f"{names[i]} breaks when input is empty")
                      for i in range(n)])
+
+
+def git_out(cwd, *args):
+    return subprocess.run(("git", *args), cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
 class FollowThrough(HookRig, unittest.TestCase):
@@ -126,6 +132,74 @@ class FollowThrough(HookRig, unittest.TestCase):
         self.stop(issues(1), change=False, message="Still not a bug, see the validator")
         self.assertEqual(len(self.calls), 3)
 
+    def touch_outside(self, cwd):
+        path = pathlib.Path(self.outside, "notes.py")
+        path.write_text("b = 1\n" * 20)
+        self.run_hook("claude", "x", {**self.claude("PostToolUse", tool_name="Write", tool_input={"file_path": str(path)}),
+                                      "cwd": cwd})
+
+    def test_rebuttal_of_outside_repo_change_is_rechecked_not_reverted(self):
+        self.outside = tempfile.mkdtemp()
+        self.start()
+        self.touch_outside(self.repo)
+        self.stop(issues(1), change=False)
+        self.assertEqual(len(self.calls), 1)
+        out = self.stop(issues(1), change=False, message="Not a bug")
+        self.assertEqual(len(self.calls), 2)
+        self.assertNotIn("reverted", str(out) + self.seg())
+        self.assertIn("b = 1", self.last_prompt())
+
+    def test_rebuttal_without_git_is_rechecked(self):
+        self.outside = self.repo = tempfile.mkdtemp()
+        self.start()
+        self.touch_outside(self.outside)
+        self.stop(issues(1), change=False)
+        self.stop(issues(1), change=False, message="Not a bug")
+        self.assertEqual(len(self.calls), 2)
+        self.assertNotIn("reverted", self.seg())
+
+    def test_commit_then_checkout_base_is_not_reverted(self):
+        base = git_out(self.repo, "rev-parse", "HEAD")
+        self.start()
+        self.stop(issues(1))
+        sh(self.repo, "git", "add", "-A")
+        sh(self.repo, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "work")
+        sh(self.repo, "git", "checkout", "-q", "--detach", base)
+        out = self.stop(issues(1), change=False)
+        self.assertNotIn("reverted", str(out) + self.seg())
+
+    def test_revert_is_not_a_round_but_a_redo_hits_the_blocked_digest(self):
+        self.start()
+        self.n = 0
+        self.edit()
+        first = self.stop(issues(1), change=False)
+        self.assertEqual(first["decision"], "block")
+        pathlib.Path(self.repo, "feature.py").unlink()
+        self.stop(change=False)
+        self.assertIn("changes reverted", self.seg())
+        sf = state.path("sessions", "claude-sess1.json")
+        self.assertEqual(state.read_json(sf)["round"], 1)
+        self.n = 0
+        self.edit()
+        again = self.stop(change=False)
+        self.assertEqual(again, first)                       # same code: the block is re-issued, no spawn
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(state.read_json(sf)["round"], 2)
+        self.assertIn("✗ Changes requested: 1 issue to fix (round 2/2)", self.seg())
+        self.assertIn("1 review today", self.seg())
+
+    def test_plan_gate_silent_allow_still_resets(self):
+        self.start()
+        issue = finding("blocker", file="(proposed plan)", line=None, claim="step three is missing a rollback")
+        self.plan("plan X\nstep\n")                          # approved
+        self.plan("plan Y\nstep\n", verdict(issue))          # blocked
+        self.plan("plan X\nstep\n")                          # approved digest: skipped silently, still an allow
+        spawned = len(self.calls)
+        self.plan("plan Z\nstep\n")
+        self.assertEqual(len(self.calls), spawned + 1)
+        self.assertNotIn("step three is missing a rollback", self.last_prompt())
+        self.assertEqual(state.read_jsonl(state.path("runs.jsonl"))[-1]["round"], 1)
+
     def test_rebuttal_accepted_resolves(self):
         self.start()
         self.stop(issues(2))
@@ -232,3 +306,10 @@ class Display(unittest.TestCase):
         self.assertTrue(live.render_swiftbar().startswith(":person.2.fill: :exclamationmark.circle.fill: 0 | "))
         live.record_run(self.run_rec())
         self.assertIn("1 review today", live.segment("claude", "s"))
+
+
+class Digest(unittest.TestCase):
+    def test_rebuttal_text_cannot_masquerade_as_a_diff_part(self):
+        a = {"path": "p", "diff": "d"}
+        self.assertNotEqual(limits.digest([a]), limits.digest([], extra="p\0d\1"))
+        self.assertEqual(limits.digest([a], ""), limits.digest([a]))
