@@ -68,9 +68,20 @@ def hook_trust():
     return "stale" if any(snap.get(k) == _hash(records, k) for k in keys) else "trusted"
 
 
+def _our_entries():
+    """tagteam's hook groups with their positions (Codex keys approvals by position), or None if unreadable."""
+    try:
+        hooks = json.loads(PATH.read_text()).get("hooks", {})
+    except (OSError, ValueError):
+        return None
+    return [(event, i, g) for event, groups in hooks.items() if isinstance(groups, list)
+            for i, g in enumerate(groups) if base.ours(g)]
+
+
 def install(entry_cmd, stop_timeout, dry_run):
+    before = _our_entries()
     install_claude_shaped("codex", PATH, entry_cmd, stop_timeout, dry_run)
-    if not dry_run:
+    if not dry_run and _our_entries() != before:     # unchanged hooks keep their approvals: so must the snapshot
         save_trust_snapshot()
 
 

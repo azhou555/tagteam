@@ -225,6 +225,17 @@ class CodexTrust(unittest.TestCase):
             codex_h.install("/bin/tagteam", 100, dry_run=False)
         self.assertEqual(set(json.loads(self.snap.read_text())), set(codex_h._our_keys()))
 
+    def test_idempotent_reinstall_keeps_a_valid_approval(self):
+        self.records({})
+        with contextlib.redirect_stdout(io.StringIO()):
+            codex_h.install("/bin/tagteam", 100, dry_run=False)
+            self.records({k: "sha256:approved" for k in codex_h._our_keys()})        # user approves in /hooks
+            self.assertEqual(codex_h.hook_trust(), "trusted")
+            codex_h.install("/bin/tagteam", 100, dry_run=False)                       # same hooks again
+            self.assertEqual(codex_h.hook_trust(), "trusted")
+            codex_h.install("/opt/tagteam", 100, dry_run=False)                       # changed hooks: re-approve
+            self.assertEqual(codex_h.hook_trust(), "stale")
+
     def test_unreadable_files(self):
         self.cfg.write_text("not [ toml")
         self.assertIsNone(codex_h.hook_trust())
