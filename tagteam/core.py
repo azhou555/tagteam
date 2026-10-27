@@ -119,17 +119,16 @@ def _run_record(ev, cfg, s, run_tag, round_no, confirm, **kw):
 def review(ev, cfg, s, artifacts, round_no, run_tag, lock, confirm=False, rebuttal=False, started=None):
     """Guard, route, run, decide. The caller holds the session lock (`lock` says how that went). Returns
     (action, message, run_dir, open_issues); message is the block reason or, on allow, a one-line completion
-    notice. open_issues are the findings still open afterwards: the new blocking ones, or `s["prior"]` when no
-    reviewer gave a verdict. run_dir None means no run was spawned: a block is a re-issued one, an allow with
-    open issues is a re-issued block on the confirm round, an allow with a message and none is a state-error
-    notice, and an allow without a message is a silent skip. `confirm` marks the review after the last fix
+    notice. open_issues are the findings still open afterwards, or None when no reviewer gave a verdict.
+    run_dir None means no run was spawned: a block is a re-issued one, an allow with open issues is a re-issued
+    block on the confirm round, an allow with a message and none is a state-error notice, and an allow without a message is a silent skip. `confirm` marks the review after the last fix
     round, which can never block. `rebuttal` marks a re-review of an unchanged diff against the author's reply.
     `started` is the `_clock()` reading when the hook began work; setup since then comes out of the deadline."""
     if lock != limits.HELD:
         state.log("session lock failed, not reviewing", author=ev.agent, session=ev.session_id)
         run = _run_record(ev, cfg, s, run_tag, round_no, confirm, reason=STATE_ERROR)
         live.record_run(run)
-        return "allow", completion(run, 0), None, []
+        return "allow", completion(run, 0), None, None
     return _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, _clock() if started is None else started)
 
 
@@ -195,7 +194,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
     if not plan:
         state.log("not reviewed", run_id=run_id, reason=reason, headroom=hm)
         live.record_run(run)
-        return "allow", completion(run, lines_changed), run_dir, s.get("prior") or []
+        return "allow", completion(run, lines_changed), run_dir, None
     repo = s.get("repo")
     git_activity = changes.ref_activity(repo, s["refs"], changes.refs(repo)) if repo and "refs" in s else []
     outside = sorted({p for p in s.get("touched", []) if os.path.isabs(p)} | {a["path"] for a in artifacts if os.path.isabs(a["path"])})
@@ -208,7 +207,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
             state.log("repo too slow to sandbox; not reviewing", run_id=run_id, setup_s=round(setup, 1))
             run.update(reviewers=[], reason=SLOW_SETUP)
             live.record_run(run)
-            return "allow", completion(run, lines_changed), run_dir, s.get("prior") or []
+            return "allow", completion(run, lines_changed), run_dir, None
         deadline = rv["deadline_s"] - setup
         jobs = {r: runner.build_prompt(r, ev.agent, works[r], s.get("prompt", ""), ts, rv["max_diff_chars"],
                                        prior=s.get("prior") or None, author_reply=ev.last_message,
@@ -264,7 +263,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
     run.update(action=action, blocking=len(blocking), advisory=len(advisory), failed=failed,
                duration=round(time.time() - now, 1))
     live.record_run(run)
-    open_issues = blocking if len(failed) < len(results) else s.get("prior") or []
+    open_issues = blocking if len(failed) < len(results) else None
     return action, (msg if action == "block" else completion(run, lines_changed)) + warn, run_dir, open_issues
 
 
@@ -338,16 +337,21 @@ def _turn_end(ev, cfg, lock):
     if run_dir is None and action == "allow" and not open_issues:   # no round spent: diff already passed, or a state-error notice
         return {"action": action, "message": msg} if msg else None
 
+    if open_issues is None:                          # no verdict: what was open stays open
+        open_issues = s.get("prior") or []
+    elif confirm:                                    # a confirm verdict is the last word: the cycle closes
+        open_issues = []
+
     def advance(cur):
         cur["round"] = round_no
-        cur["prior"], cur["reverted_prior"] = [] if confirm else open_issues, []    # the confirm round is the last word
+        cur["prior"], cur["reverted_prior"] = open_issues, []
         if head:
             cur["baseline"] = head                   # next round reviews only the fix delta
         for a in artifacts:
             if os.path.isabs(a["path"]):
                 cur["reviewed_digests"][a["path"]] = changes.file_digest(a["path"])
         cur["touched"] = []
-    _write_back(sf, s.get("turn_id"), advance, [] if confirm else open_issues)
+    _write_back(sf, s.get("turn_id"), advance, open_issues)
     state.log("review", run=str(run_dir), action=action, author=ev.agent, round=round_no)
     return {"action": action, "message": msg}
 

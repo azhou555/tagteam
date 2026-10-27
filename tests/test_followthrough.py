@@ -152,6 +152,22 @@ class FollowThrough(HookRig, unittest.TestCase):
         self.stop(change=False)
         self.assertEqual(len(self.calls), 3)
 
+    def test_confirm_round_with_no_verdict_leaves_the_issues_open(self):
+        def failing(jobs, cfg, cwd, run_dir, deadline, on_done=None):
+            self.calls.append(jobs)
+            return {r: ({"reviewer": r, "ok": False, "duration": 1}, None) for r in jobs}
+        self.start()
+        self.stop(issues(1))
+        self.stop(issues(1))
+        self.stop(runner_fn=failing)
+        self.assertIn("⚠ Review failed: every reviewer errored or timed out · 1 earlier issue not re-checked", self.seg())
+        self.assertEqual(len(self.session()["prior"]), 1)
+        self.start()
+        self.small_fix()
+        self.stop(change=False)
+        self.assertEqual(len(self.calls), 4)
+        self.assertIn("✓ Issues resolved: all 1 fixed and re-checked", self.seg())
+
     def test_carried_issues_without_a_change_spawn_nothing(self):
         self.start()
         self.stop(issues(1))
