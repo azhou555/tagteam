@@ -1,5 +1,6 @@
 """Hook phase handlers: turn-start snapshots, touch ledger, turn-end review, plan gate."""
 import os
+import re
 import time
 import uuid
 
@@ -68,6 +69,24 @@ def load_map(now):
     for r in state.read_jsonl(state.path("history.jsonl"), now - 86400):
         load[r["reviewer"]] = load.get(r["reviewer"], 0) + 1
     return load
+
+
+def swap_root(text, root, new):
+    """Replace `root` where it is a whole path (`<root>` or `<root>/...`, never `<root>-other`) with `new`;
+    an empty `new` makes paths under `root` relative."""
+    def sub(m):
+        return new + m.group(1) if new else "" if m.group(1) else "."
+    return re.sub(rf"(?<![\w./-]){re.escape(root)}(/|(?![\w-]|\.\w))", sub, text)
+
+
+def _unsandbox(result, work):
+    """Findings name files by their sandbox path; make them repo-relative so reviewers' findings merge and the
+    author never sees a temp path. The temp dir may also be reported without macOS's /private prefix."""
+    roots = [work] + ([work.removeprefix("/private")] if work.startswith("/private/") else [])
+    for f in result["findings"]:
+        for k in ("file", "claim", "evidence", "suggested_fix"):
+            for root in roots:
+                f[k] = swap_root(f[k], root, "")
 
 
 def completion(run, lines_changed):
@@ -195,7 +214,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
                                        git_activity=git_activity)
                 for r, ts in plan.items()}
         if repo:                                     # intent, replies and findings may quote the real path
-            jobs = {r: p.replace(repo, works[r]) for r, p in jobs.items()}
+            jobs = {r: swap_root(p, repo, works[r]) for r, p in jobs.items()}
         with live.tracking({"run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
                             "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "reviewers": list(plan),
                             "started": now, "expires": now + deadline + 60}) as update:
@@ -230,6 +249,9 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
                                {"ts": now, "run_id": run_id, "author": ev.agent, **meta,
                                 "kinds": [t["kind"] for t in plan[r]]})
     results = {r: res for r, (_, res) in outcomes.items()}
+    for r, res in results.items():
+        if res and works[r] != (repo or ev.cwd):
+            _unsandbox(res, works[r])
     failed = [r for r, res in results.items() if res is None]
     action, blocking, advisory = verdict.decide(results, cfg, round_no)
     msg = verdict.message(plan, blocking, advisory, round_no, cfg["limits"]["max_rounds_per_turn"], failed)

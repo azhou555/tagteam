@@ -99,6 +99,32 @@ class EndToEnd(HookRig, unittest.TestCase):
         with mock.patch.object(harnesses, "get", fake_harness(script, result)):
             return self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
 
+    def test_findings_name_repo_paths_and_merge_across_reviewers(self):
+        write_user_config(use_toml(["copilot", "agy"]) + "[review.per_change]\nsmall = 2\n")
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit",
+                                                 prompt=f"edit {self.repo}/feature.py, not {self.repo}-other/x.py"))
+        seen = {}
+
+        def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
+            seen.update(jobs=jobs, cwd=cwd)
+            out = {}
+            for r, work in cwd.items():
+                shown = work.removeprefix("/private") if r == "agy" else work       # as `pwd` may print it
+                f = finding("blocker", file=f"{shown}/feature.py", line=2, claim=f"{shown}/feature.py: off by one")
+                out[r] = ({"reviewer": r, "ok": True, "duration": 1},
+                          {"verdict": "request_changes", "summary": "", "findings": [{**f, "evidence": f"see {shown}"}]})
+            return out
+        pathlib.Path(self.repo, "feature.py").write_text("a = 1\n" * 20)
+        with mock.patch.object(runner, "run_all", run_all):
+            out = self.run_hook("claude", "x", self.claude("Stop"))
+        self.assertEqual(sorted(seen["jobs"]), ["agy", "copilot"])
+        for r, prompt in seen["jobs"].items():
+            self.assertIn(f"edit {seen['cwd'][r]}/feature.py", prompt)
+            self.assertIn(f"not {self.repo}-other/x.py", prompt)                 # a different path, left alone
+        self.assertIn("1. [blocker] feature.py:2: feature.py: off by one  (agy, copilot)", out["reason"])
+        self.assertIn("Evidence: see .", out["reason"])
+        self.assertNotIn("tagteam-review-", out["reason"])
+
     def timed_stop(self, setup_s):
         """A Stop whose setup (everything before reviewers start) took `setup_s` on the hook's clock."""
         ticks, deadlines = iter([0.0]), []
