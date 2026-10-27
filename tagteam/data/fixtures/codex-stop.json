@@ -1,0 +1,11 @@
+{
+ "hook_event_name": "Stop",
+ "session_id": "s",
+ "turn_id": "t1",
+ "cwd": "/tmp/spike/ws-codex",
+ "model": "m",
+ "transcript_path": "/Users/user/.codex/sessions/x.jsonl",
+ "stop_hook_active": false,
+ "last_assistant_message": "ok",
+ "permission_mode": "default"
+}

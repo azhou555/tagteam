@@ -1,7 +1,7 @@
 """Headroom (fraction of usage limit remaining, 0..1) per agent. None = unknown.
 
 Sources verified 2026-10-25:
-  claude  - status line stdin `rate_limits.{five_hour,seven_day}.used_percentage`, cached by bin/tagteam-statusline
+  claude  - status line stdin `rate_limits.{five_hour,seven_day}.used_percentage`, cached by `tagteam statusline`
   codex   - `rate_limits.primary/secondary.used_percent` lines in ~/.codex/sessions rollout JSONL
   copilot - `gh api /copilot_internal/user` premium_interactions.percent_remaining (undocumented; self-meter fallback)
   agy     - nothing exposed; self-metered runs per day
@@ -103,11 +103,22 @@ def self_metered(agent, now, cfg):
     return max(0.0, 1.0 - len(runs) / cfg["quota"].get("daily_budget_runs", 80))
 
 
+def cooldowns():
+    """{agent: paused-until timestamp}, past entries included. None if the file exists but can't be read:
+    every agent counts as cooling until `doctor --clear`."""
+    return state.read_dict(state.path("cooldowns.json"))
+
+
+def cooling(agent, now=None):
+    """True while the agent is in cooldown after quota or other failures."""
+    c = cooldowns()
+    return c is None or c.get(agent, 0) > (now or time.time())
+
+
 def headroom(agent, cfg, now=None):
     now = now or time.time()
-    acfg = cfg["agents"][agent]
-    cool = state.read_json(state.path("cooldowns.json"), {}).get(agent, 0)
-    if cool > now:
+    acfg = cfg["routing"]["quota"]["agents"][agent]
+    if cooling(agent, now):
         return 0.0
     src = acfg["quota"]["source"]
     try:
@@ -126,6 +137,9 @@ def headroom(agent, cfg, now=None):
 def cooldown(agent, minutes):
     with state.locked("cooldowns"):
         p = state.path("cooldowns.json")
-        d = state.read_json(p, {})
+        d = cooldowns()
+        if d is None:                                # rewriting it would end everyone else's cooldown
+            state.log("cooldown list unreadable; left as is", agent=agent)
+            return
         d[agent] = time.time() + minutes * 60
         state.write_json(p, d)

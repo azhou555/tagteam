@@ -1,0 +1,74 @@
+# tagteam defaults. Override any key in ~/.tagteam/config.toml. A repo's .tagteam.toml may only add scrutiny
+# (see README, "A repo's own file"); every other key in it is ignored.
+
+[authors]
+review = ["claude", "codex", "copilot", "agy"]     # whose turns get reviewed
+
+[triggers]
+kinds = ["code", "plan", "design"]
+min_changed_lines = 5
+
+[review]
+per_change = { small = 1, large = 2, high_risk = 2, docs = 2 }   # reviewers per change; docs = design + plan
+large_lines = 150           # a code change this big counts as "large"
+deadline_s = 240            # review wall clock, setup included; Stop hook timeout is set above this
+block_at = "major"          # blocker | major | minor
+min_confidence = 0.6
+max_diff_chars = 60000      # total diff text sent to reviewers
+ignore = [
+  "*.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock", "poetry.lock", "uv.lock",
+  "dist/*", "build/*", "node_modules/*", ".next/*", "*.min.js", "*.min.css", "*.map",
+  ".tagteam*", ".claude/settings*.json",
+]
+
+[limits]
+max_rounds_per_turn = 2     # blocking rounds per turn before we always allow
+cooldown_min = 15
+max_reviews_per_hour = 30   # review runs across all sessions and agents; a runaway-loop stop
+
+[classify]
+plan = ["tasks/*", "*todo.md", "*plan*.md", "*PLAN*.md", "docs/plans/*", "*/.claude/plans/*"]
+design = ["*design*.md", "*DESIGN*.md", "docs/*.md", "*/adr/*", "RFC*", "*.puml", "*.mmd", "*spec*.md", "*SPEC*.md"]
+risk = ["*auth*", "*migration*", "*/migrations/*", "infra/*", "*.sql", ".github/workflows/*", "*secret*", "*security*", "Dockerfile*", "*.tf"]
+
+# Who may review is `reviewers.use`; it is set only in ~/.tagteam/config.toml, never here.
+[reviewers.copilot]
+model = ""                  # empty = Copilot default; set e.g. a 0x model to save premium requests
+
+[reviewers.agy]
+model = ""
+effort = "medium"           # default effort spent ~26k thinking tokens / 200s on a 5-line diff
+
+[reviewers.claude]
+model = "sonnet"            # reviewer runs use a cheaper model than your main sessions
+
+[reviewers.codex]
+model = ""
+
+[routing]
+mode = "ordered"            # ordered | quota
+
+[routing.quota]             # quota mode only
+primary_use = "overflow"    # overflow | never | balanced
+tier_penalty = 4.0          # balanced mode only
+unknown_headroom = 0.5      # assumed headroom when no quota data is available
+
+[routing.quota.agents.copilot]
+tier = "reviewer"
+weight = { code = 0.9, design = 0.8, plan = 0.8 }
+quota = { source = "copilot_api", monthly_budget = 200 }
+
+[routing.quota.agents.agy]
+tier = "reviewer"
+weight = { code = 0.8, design = 1.0, plan = 1.0 }
+quota = { source = "self", daily_budget_runs = 80 }
+
+[routing.quota.agents.claude]
+tier = "primary"
+weight = { code = 1.0, design = 1.0, plan = 1.0 }
+quota = { source = "claude_statusline", reserve_floor = 0.5 }
+
+[routing.quota.agents.codex]
+tier = "primary"
+weight = { code = 1.0, design = 0.7, plan = 0.8 }
+quota = { source = "codex_rollout", reserve_floor = 0.5 }

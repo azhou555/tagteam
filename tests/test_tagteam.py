@@ -10,31 +10,9 @@ import time
 import unittest
 from unittest import mock
 
-TMP_HOME = tempfile.mkdtemp(prefix="tagteam-test-")
-os.environ["TAGTEAM_HOME"] = TMP_HOME
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-
-from tagteam import adapters, changes, classify, core, install, live, router, runner, state, verdict  # noqa: E402
-
-FIX = pathlib.Path(__file__).parent / "fixtures"
-CFG = state.load_config()
-
-
-def fx(name):
-    return json.loads((FIX / f"{name}.json").read_text())
-
-
-def sh(cwd, *cmd):
-    subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
-
-
-def make_repo():
-    d = tempfile.mkdtemp()
-    sh(d, "git", "init", "-q")
-    pathlib.Path(d, "a.py").write_text("x = 1\n")
-    sh(d, "git", "add", "-A")
-    sh(d, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
-    return os.path.realpath(d)
+from tests.helpers import CFG, FULL, ROOT, HookRig, art, finding, fx, make_repo, sh, use_toml  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
+from tagteam import adapters, changes, classify, core, harnesses, install, live, router, runner, state, verdict  # noqa: E402
+from tagteam.harnesses import agy as agy_h, base as harness_base, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
 
 
 class Adapters(unittest.TestCase):
@@ -44,7 +22,7 @@ class Adapters(unittest.TestCase):
         self.assertEqual((ev.phase, [os.path.basename(p) for p in ev.paths]), ("touch", ["hello.txt"]))
         self.assertEqual(adapters.parse("claude", "x", fx("claude-touch-Bash")).paths, [])
         stop = adapters.parse("claude", "x", fx("claude-stop-1"))
-        self.assertEqual((stop.phase, stop.stop_hook_active, stop.last_message), ("turn-end", True, "done"))
+        self.assertEqual((stop.phase, stop.last_message), ("turn-end", "done"))
 
     def test_claude_adapter_ignores_copilot_running_claude_hooks(self):
         for name in ("copilot_as_claude-prompt", "copilot_as_claude-touch-Edit", "copilot_as_claude-stop"):
@@ -61,7 +39,7 @@ class Adapters(unittest.TestCase):
     def test_copilot_native(self):
         ev = adapters.parse("copilot", "touch", fx("copilot-touch-apply_patch"))
         self.assertEqual([os.path.basename(p) for p in ev.paths], ["hello.txt"])
-        self.assertTrue(adapters.parse("copilot", "turn-end", fx("copilot-stop-1")).stop_hook_active)
+        self.assertEqual(adapters.parse("copilot", "turn-end", fx("copilot-stop-1")).phase, "turn-end")
 
     def test_agy(self):
         ev = adapters.parse("agy", "turn-start", fx("agy-prompt"))
@@ -71,8 +49,7 @@ class Adapters(unittest.TestCase):
         self.assertEqual(adapters.parse("agy", "turn-start", fx("agy-prompt-1")).phase, "ignore")
         self.assertEqual([os.path.basename(p) for p in adapters.parse("agy", "touch", fx("agy-touch-write_file")).paths],
                          ["hello.txt"])
-        self.assertFalse(adapters.parse("agy", "turn-end", fx("agy-stop")).stop_hook_active)
-        self.assertTrue(adapters.parse("agy", "turn-end", fx("agy-stop-1")).stop_hook_active)
+        self.assertEqual(adapters.parse("agy", "turn-end", fx("agy-stop-1")).phase, "turn-end")
 
     def test_encode(self):
         block = {"action": "block", "message": "m"}
@@ -113,6 +90,24 @@ class Changes(unittest.TestCase):
         self.assertEqual([(a["path"], a["status"]) for a in arts], [("win.h", "added")])
 
 
+    def test_snapshot_sees_same_size_rewrite_in_the_index_second(self):
+        """Racy git: a same-size rewrite in the second the index was written looks clean to a stat check,
+        unless the temp index keeps the real index's mtime so git knows to re-hash the file."""
+        repo = make_repo()
+        sh(repo, "git", "config", "core.trustctime", "false")        # utime and the rewrite both move ctime
+        sh(repo, "git", "config", "core.checkStat", "minimal")
+        f, index, second = os.path.join(repo, "a.py"), os.path.join(repo, ".git", "index"), int(time.time()) - 100
+        os.utime(f, (second, second))
+        sh(repo, "git", "update-index", "--refresh")                  # the index now records mtime `second`
+        os.utime(index, (second, second))
+        with open(f, "r+") as fh:
+            fh.write("y = 2\n")                                       # same size as "x = 1\n"
+        os.utime(f, (second, second))
+        tree = changes.snapshot(repo)
+        want = subprocess.run(["git", "hash-object", "a.py"], cwd=repo, capture_output=True, text=True).stdout.strip()
+        got = subprocess.run(["git", "ls-tree", tree, "a.py"], cwd=repo, capture_output=True, text=True).stdout.split()
+        self.assertEqual(got[2], want)
+
 class Classify(unittest.TestCase):
     def test_kinds(self):
         k = lambda p: classify.kind(p, CFG)  # noqa: E731
@@ -121,69 +116,80 @@ class Classify(unittest.TestCase):
         self.assertEqual(classify.annotate([{"path": "db/migrations/1.sql"}], CFG)[0]["risk"], "high")
 
 
-def art(path, lines=10, risk="normal", kind="code"):
-    return {"path": path, "lines_changed": lines, "risk": risk, "kind": kind, "diff": "", "status": "modified"}
+QCFG = copy.deepcopy(CFG)
+QCFG["routing"]["mode"] = "quota"
+QCFG["reviewers"]["use"] = ["claude", "codex", "copilot", "agy"]
 
 
-FULL = {"claude": 0.9, "codex": 0.9, "copilot": 0.9, "agy": 0.9}
+def route(*a):
+    return router.route(*a)[0]
 
 
 class Router(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(harnesses, "detected", return_value=["claude", "codex", "copilot", "agy"])
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_reviewer_tier_takes_all_normal_work(self):
         for author in ("claude", "codex"):
             for groups in ({"code": [art("a.py")]}, {"code": [art("a.py", 500)]},
                            {"plan": [art("p.md", kind="plan")]}, {"design": [art("d.md", kind="design")]}):
-                plan = router.route(author, groups, CFG, FULL, {})
+                plan = route(author, groups, QCFG, FULL, {})
                 self.assertTrue(set(plan) <= {"copilot", "agy"}, (author, groups, plan))
 
     def test_high_risk_adds_primary_with_headroom_never_author(self):
-        plan = router.route("claude", {"code": [art("auth.py", risk="high")]}, CFG, FULL, {})
+        cfg = copy.deepcopy(QCFG)
+        cfg["review"]["per_change"]["high_risk"] = 3                    # default is 2; 3 reaches a primary
+        plan = route("claude", {"code": [art("auth.py", risk="high")]}, cfg, FULL, {})
         self.assertEqual(set(plan), {"copilot", "agy", "codex"})
         low = {**FULL, "codex": 0.3}                                     # below 50% reserve floor
-        self.assertEqual(set(router.route("claude", {"code": [art("auth.py", risk="high")]}, CFG, low, {})),
+        self.assertEqual(set(route("claude", {"code": [art("auth.py", risk="high")]}, cfg, low, {})),
                          {"copilot", "agy"})
+
+    def test_unlisted_agent_is_never_picked(self):
+        cfg = copy.deepcopy(QCFG)
+        cfg["reviewers"]["use"] = ["agy", "claude", "codex"]
+        plan = route("claude", {"design": [art("d.md", kind="design")]}, cfg, FULL, {})
+        self.assertNotIn("copilot", plan)
+        self.assertTrue(plan)
 
     def test_primary_with_unknown_quota_is_never_used(self):
         h = {**FULL, "claude": None}                                     # e.g. stale status line cache
-        self.assertEqual(set(router.route("codex", {"code": [art("auth.py", risk="high")]}, CFG, h, {})),
+        self.assertEqual(set(route("codex", {"code": [art("auth.py", risk="high")]}, QCFG, h, {})),
                          {"copilot", "agy"})
         h2 = {**FULL, "agy": None}                                       # unknown reviewer-tier is still usable
-        self.assertIn("agy", router.route("claude", {"plan": [art("p.md", kind="plan")]}, CFG, h2, {}))
+        self.assertIn("agy", route("claude", {"plan": [art("p.md", kind="plan")]}, QCFG, h2, {}))
 
     def test_reviewer_author_gets_other_reviewer_first(self):
-        plan = router.route("copilot", {"code": [art("a.py")]}, CFG, FULL, {})
+        plan = route("copilot", {"code": [art("a.py")]}, QCFG, FULL, {})
         self.assertEqual(list(plan), ["agy"])
-        plan = router.route("copilot", {"plan": [art("p.md", kind="plan")]}, CFG, FULL, {})
+        plan = route("copilot", {"plan": [art("p.md", kind="plan")]}, QCFG, FULL, {})
         self.assertEqual(set(plan), {"agy", "claude"})                   # tie on headroom -> name order
 
     def test_fallback_to_primary_when_reviewers_exhausted(self):
         h = {**FULL, "copilot": 0.0, "agy": 0.02}
-        self.assertEqual(list(router.route("claude", {"code": [art("a.py")]}, CFG, h, {})), ["codex"])
-        cfg = copy.deepcopy(CFG)
-        cfg["routing"]["primary_use"] = "never"
-        self.assertEqual(router.route("claude", {"code": [art("a.py")]}, cfg, h, {}), {})
+        self.assertEqual(list(route("claude", {"code": [art("a.py")]}, QCFG, h, {})), ["codex"])
+        cfg = copy.deepcopy(QCFG)
+        cfg["routing"]["quota"]["primary_use"] = "never"
+        self.assertEqual(route("claude", {"code": [art("a.py")]}, cfg, h, {}), {})
 
     def test_load_spreads_and_shifts_with_headroom(self):
         load = {}
         for _ in range(300):
-            for r in router.route("claude", {"code": [art("a.py")]}, CFG, FULL, load):
+            for r in route("claude", {"code": [art("a.py")]}, QCFG, FULL, load):
                 load[r] = load.get(r, 0) + 1
         self.assertEqual(set(load), {"copilot", "agy"})
         self.assertLess(abs(load["copilot"] / load["agy"] - 0.9 / 0.8), 0.05)  # proportional to weight
         load2 = {}
         for _ in range(300):
-            for r in router.route("claude", {"code": [art("a.py")]}, CFG, {**FULL, "copilot": 0.2}, load2):
+            for r in route("claude", {"code": [art("a.py")]}, QCFG, {**FULL, "copilot": 0.2}, load2):
                 load2[r] = load2.get(r, 0) + 1
         self.assertGreater(load2["agy"], 3 * load2["copilot"])
 
     def test_distinct_lenses(self):
-        plan = router.route("claude", {"design": [art("d.md", kind="design")]}, CFG, FULL, {})
+        plan = route("claude", {"design": [art("d.md", kind="design")]}, QCFG, FULL, {})
         self.assertEqual(sorted(t["lens"] for ts in plan.values() for t in ts), ["correctness", "design"])
-
-
-def finding(sev="major", conf=0.9, claim="off by one in loop", line=10, file="a.py"):
-    return {"severity": sev, "file": file, "line": line, "claim": claim, "evidence": "e",
-            "suggested_fix": "f", "confidence": conf}
 
 
 class Verdict(unittest.TestCase):
@@ -212,11 +218,11 @@ class Runner(unittest.TestCase):
         agy = json.dumps({"status": "SUCCESS", "response": json.dumps(payload), "structured_output": payload})
         copilot = "Here you go:\n```json\n" + json.dumps(payload) + "\n```"
         for agent, out in (("claude", claude), ("agy", agy), ("copilot", copilot)):
-            self.assertEqual(runner.parse_output(agent, out, None)["findings"][0]["claim"], "off by one in loop", agent)
-        self.assertIsNone(runner.parse_output("copilot", "no json here", None))
+            self.assertEqual(harnesses.get(agent).reviewer.parse(out, None)["findings"][0]["claim"], "off by one in loop", agent)
+        self.assertIsNone(harnesses.get("copilot").reviewer.parse("no json here", None))
 
     def test_normalize_repairs_bad_fields(self):
-        r = runner.normalize({"findings": [{"claim": "x", "severity": "huge", "confidence": "?"}]})
+        r = harness_base.normalize({"findings": [{"claim": "x", "severity": "huge", "confidence": "?"}]})
         self.assertEqual((r["verdict"], r["findings"][0]["severity"], r["findings"][0]["confidence"]),
                          ("changes_requested", "minor", 0.5))
 
@@ -228,40 +234,66 @@ class Runner(unittest.TestCase):
             self.assertIn(s, p)
 
 
-class EndToEnd(unittest.TestCase):
+class EndToEnd(HookRig, unittest.TestCase):
     """Real hook flow through cli.hook with the reviewer CLIs stubbed."""
 
-    def run_hook(self, agent, phase, payload):
-        from tagteam import cli
-        with mock.patch("sys.stdin", new=__import__("io").StringIO(json.dumps(payload))), \
-                mock.patch("builtins.print") as pr:
-            cli.hook(agent, phase)
-        return json.loads(pr.call_args[0][0])
-
     def setUp(self):
-        self.repo = make_repo()
-        self.calls = []
-        self.seen_active = []
-        self.p = mock.patch.object(core, "headroom_map", return_value=FULL)
-        self.p.start()
+        self.rig(use_toml(["copilot", "agy"]))
 
     def tearDown(self):
-        self.p.stop()
+        self.unrig()
 
-    def fake_run_all(self, results):
-        def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
-            self.calls.append(jobs)
-            self.seen_active.append(live.active())
-            out = {r: ({"reviewer": r, "ok": True, "duration": 1}, results.get(r, {"verdict": "approve", "summary": "",
-                                                                                 "findings": []})) for r in jobs}
-            for r, (meta, _) in out.items():
-                on_done(r, meta)
-            return out
-        return run_all
+    def review_racing_a_new_turn(self, payload):
+        """Run `payload` while the user starts a new turn mid-review; return (output, session before, after)."""
+        bad = {"verdict": "changes_requested", "summary": "", "findings": [finding(file="feature.py", line=2)]}
+        blocking = self.fake_run_all({"copilot": bad, "agy": bad})
+        sf = core._session_file(adapters.parse("claude", "turn-start", self.claude("UserPromptSubmit", prompt="x")))
+        new_turn = {}
 
-    def claude(self, event, **kw):
-        return {"hook_event_name": event, "session_id": "sess1", "cwd": self.repo, "prompt_id": "p",
-                "transcript_path": "/Users/u/.claude/projects/x.jsonl", **kw}
+        def run_all(*a, **kw):
+            self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="next request"))
+            new_turn.update(state.read_json(sf))
+            return blocking(*a, **kw)
+        with mock.patch.object(runner, "run_all", run_all):
+            out = self.run_hook("claude", "x", payload)
+        return out, new_turn, state.read_json(sf)
+
+    def test_turn_end_leaves_a_turn_started_mid_review_alone(self):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+        pathlib.Path(self.repo, "feature.py").write_text("def f(x):\n    return x[0]\n" * 4)
+        out, new_turn, after = self.review_racing_a_new_turn(self.claude("Stop", last_assistant_message="done"))
+        self.assertEqual(out["decision"], "block")                       # the verdict still reaches the author
+        self.assertEqual(after, new_turn)
+        self.assertEqual((after["prompt"], after["round"], after["prior"]), ("next request", 0, []))
+        logged = [r for r in state.read_jsonl(state.path("tagteam.log"))
+                  if r["msg"] == "new turn started during review; session state not updated"]
+        self.assertEqual(len(logged), 1)
+
+    def test_plan_gate_leaves_a_turn_started_mid_review_alone(self):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="plan it"))
+        plan = self.claude("PreToolUse", tool_name="ExitPlanMode", tool_input={"plan": "1. a\n2. b\n"})
+        out, new_turn, after = self.review_racing_a_new_turn(plan)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(after, new_turn)
+        self.assertEqual((after["plan_rounds"], after["plan_prior"]), (0, []))
+
+    def test_repo_reached_through_a_symlink_is_not_outside(self):
+        link = os.path.join(tempfile.mkdtemp(), "link")
+        os.symlink(self.repo, link)
+        path = os.path.join(link, "feature.py")
+        self.assertTrue(changes.in_repo(path, self.repo))
+        self.assertFalse(changes.in_repo(self.repo + "-other/feature.py", self.repo))
+        self.run_hook("claude", "x", {**self.claude("UserPromptSubmit", prompt="add feature"), "cwd": link})
+        pathlib.Path(path).write_text("a = 1\n" * 20)
+        self.run_hook("claude", "x", {**self.claude("PostToolUse", tool_name="Write", tool_input={"file_path": path}),
+                                      "cwd": link})
+        sf = core._session_file(adapters.parse("claude", "turn-start", self.claude("UserPromptSubmit", prompt="x")))
+        self.assertEqual(state.read_json(sf)["outside_touched"], [])
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            self.run_hook("claude", "x", {**self.claude("Stop"), "cwd": link})
+        prompt = next(iter(self.calls[0].values()))
+        self.assertIn("### feature.py (added", prompt)
+        self.assertNotIn("full content of", prompt)                     # not also sent as an outside-repo file
 
     def test_block_then_fix_then_allow(self):
         self.assertEqual(self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature")), {})
@@ -277,7 +309,7 @@ class EndToEnd(unittest.TestCase):
         pathlib.Path(self.repo, "feature.py").write_text("def f(x):\n    return x[0] if x else None\n" * 4)
         with mock.patch.object(runner, "run_all", self.fake_run_all({})):
             out = self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=True, last_assistant_message="fixed"))
-        self.assertTrue(out["systemMessage"].startswith("[tagteam] ✓ Review passed: no issues found"), out)
+        self.assertTrue(out["systemMessage"].startswith("[tagteam] ✓ Issues resolved: all 1 fixed and re-checked"), out)
         prompt = next(iter(self.calls[1].values()))
         self.assertIn("Round 2", prompt)
         self.assertIn("fixed", prompt)
@@ -406,7 +438,7 @@ class Live(unittest.TestCase):
 
     def done_run(self, **kw):
         return {"ts": time.time(), "run_id": "x", "author": "claude", "session_id": "s", "tag": "turn", "round": 1,
-                "reviewers": ["copilot"], "action": "allow", "blocking": 0, "advisory": 0, "failed": [],
+                "max_rounds": 2, "reviewers": ["copilot"], "action": "allow", "blocking": 0, "advisory": 0, "failed": [],
                 "duration": 3.0, **kw}
 
     def test_tracking_lifecycle_and_progress(self):
@@ -427,7 +459,7 @@ class Live(unittest.TestCase):
     def test_killed_owner_and_expired_record_are_stale(self):
         code = ("import os, signal, sys; sys.path.insert(0, sys.argv[1]); from tagteam import live; "
                 "cm = live.tracking(eval(sys.argv[2])); cm.__enter__(); os.kill(os.getpid(), signal.SIGKILL)")
-        subprocess.run([sys.executable, "-c", code, str(state.ROOT), repr(self.rec("dead"))])
+        subprocess.run([sys.executable, "-c", code, str(ROOT), repr(self.rec("dead"))])
         self.assertTrue((live._active_dir() / "dead.json").exists())     # SIGKILL skipped cleanup
         self.assertEqual(live.active(), [])
         self.assertFalse((live._active_dir() / "dead.json").exists())
@@ -439,7 +471,7 @@ class Live(unittest.TestCase):
                 "live.record_run(dict(ts=time.time(), run_id=sys.argv[2], author='codex', session_id=sys.argv[2], "
                 "tag='turn', round=1, reviewers=['agy'], action='allow', blocking=0, advisory=0, failed=[], "
                 "duration=1.0))")
-        procs = [subprocess.Popen([sys.executable, "-c", code, str(state.ROOT), f"p{i}"]) for i in range(12)]
+        procs = [subprocess.Popen([sys.executable, "-c", code, str(ROOT), f"p{i}"]) for i in range(12)]
         for pr in procs:
             pr.wait()
         self.assertEqual(len(state.read_jsonl(state.path("runs.jsonl"))), 12)
@@ -453,20 +485,20 @@ class Live(unittest.TestCase):
                          "tagteam ✓ Review passed: no blocking issues, 2 minor notes · just now · 1 review today")
         live.record_run(self.done_run(action="block", blocking=2))
         live.note_error()
-        self.assertEqual(live.segment("claude", "s"), "tagteam ✗ Changes requested: 2 issues sent back to fix · "
+        self.assertEqual(live.segment("claude", "s"), "tagteam ✗ Changes requested: 2 issues to fix (round 1/2) · "
                                                       "just now · 2 reviews today · ⚠ 1 hook error (24h)")
         live.record_run(self.done_run(failed=["copilot"]))
         self.assertIn("⚠ Review failed: every reviewer errored or timed out", live.segment("claude", "s"))
         live.record_run(self.done_run(reviewers=[]))
         self.assertIn("⚠ Not reviewed: no reviewer had quota available", live.segment("claude", "s"))
         self.assertEqual(live.segment("claude", "never-reviewed"),
-                         "tagteam no review yet this session · 4 reviews today · ⚠ 1 hook error (24h)")
+                         "tagteam no review yet this session · 3 reviews today · ⚠ 1 hook error (24h)")
 
     def test_colored_segment_uses_sage_brand_and_pastel_text(self):
         live.record_run(self.done_run(action="block", blocking=1))
         seg = live.segment("claude", "s", color=True)
         self.assertTrue(seg.startswith("\x1b[38;5;108mtagteam\x1b[0m "), seg)
-        self.assertIn("\x1b[38;5;217m✗ Changes requested: 1 issue sent back to fix\x1b[0m", seg)
+        self.assertIn("\x1b[38;5;217m✗ Changes requested: 1 issue to fix (round 1/2)\x1b[0m", seg)
         self.assertNotIn("48;5", seg)                                        # no background blocks
         with live.tracking(self.rec()):
             self.assertIn("\x1b[38;5;223m⟳ Reviewing changes\x1b[0m", live.segment("claude", "s", color=True))
@@ -479,7 +511,7 @@ class Live(unittest.TestCase):
         rose = live.KINDS["blocked"]["hex"]
         self.assertTrue(out.startswith(":person.2.fill: :xmark.octagon.fill: 1 | "), out)
         self.assertIn(f"sfcolor2={rose}", out.splitlines()[0])
-        self.assertIn(f"Changes requested: 1 issue sent back to fix | color={rose} bash=/usr/bin/open", out)
+        self.assertIn(f"Changes requested: 1 issue to fix (round 1/2) | color={rose} bash=/usr/bin/open", out)
         live.note_error()
         head = live.render_swiftbar().splitlines()[0]
         self.assertIn(":exclamationmark.triangle.fill:", head)
@@ -504,7 +536,7 @@ class Live(unittest.TestCase):
             self.assertEqual(live.backfill(), 2)
             self.assertEqual(state.read_json(state.path("status.json"))["day"], "2020-01-02")   # stored day is old
             self.assertRegex(live.segment("claude", "s"),
-                             r"^tagteam ✗ Changes requested: 1 issue sent back to fix · \d+d ago · 0 reviews today$")
+                             r"^tagteam ✗ Changes requested: 1 issue to fix · \d+d ago · 0 reviews today$")
             self.assertEqual(live.backfill(), 0)                                               # once only
 
     def test_watch_render(self):
@@ -515,18 +547,18 @@ class Live(unittest.TestCase):
         self.assertIn("Running (1):", out)
         self.assertIn("Reviews today: 2", out)
         self.assertIn("copilot 1", out)
-        self.assertIn("✗ Changes requested: 1 issue sent back to fix", out)
+        self.assertIn("✗ Changes requested: 1 issue to fix (round 1/2)", out)
 
     def test_statusline_entry_reads_stdin(self):
         live.record_run(self.done_run(session_id="abc"))
         r = subprocess.run([sys.executable, "-m", "tagteam.live"], input=json.dumps({"session_id": "abc"}),
-                           capture_output=True, text=True, cwd=state.ROOT, env={**os.environ, "NO_COLOR": "1"})
+                           capture_output=True, text=True, cwd=ROOT, env={**os.environ, "NO_COLOR": "1"})
         self.assertEqual(r.stdout.strip(), "tagteam ✓ Review passed: no issues found · just now · 1 review today")
         r = subprocess.run([sys.executable, "-m", "tagteam.live", "swiftbar"], capture_output=True, text=True,
-                           cwd=state.ROOT)
+                           cwd=ROOT)
         self.assertTrue(r.stdout.startswith(":person.2.fill: :checkmark.seal.fill: 1 | "), r.stdout)
         r = subprocess.run([sys.executable, "-m", "tagteam.live"], input="not json", capture_output=True,
-                           text=True, cwd=state.ROOT)
+                           text=True, cwd=ROOT)
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
 
 
@@ -541,169 +573,6 @@ class Encode(unittest.TestCase):
         self.assertEqual(adapters.encode("claude", "turn-end", None), "{}")
         self.assertEqual(json.loads(adapters.encode("claude", "turn-end", {"action": "block", "message": "m"})),
                          {"decision": "block", "reason": "m"})
-
-
-class Install(unittest.TestCase):
-    def setUp(self):
-        d = pathlib.Path(tempfile.mkdtemp())
-        self.settings = d / "settings.json"
-        patches = {"CLAUDE": self.settings, "CODEX": d / "codex.json", "COPILOT": d / "copilot.json",
-                   "AGY": d / "agy.json", "STATUSLINE_ORIG": d / "sl.orig", "STATUSLINE_ORIG_REFRESH": d / "sl.refresh",
-                   "SWIFTBAR_APP": d / "NoSwiftBar.app", "LAUNCHER": d / "tagteam.app",
-                   "SWIFTBAR_DOMAIN": "invalid.tagteam-tests", "SWIFTBAR_DIR": d / "SwiftBar"}  # never the real plugin
-        self.ps = [mock.patch.object(install, k, v) for k, v in patches.items()]
-        for x in self.ps:
-            x.start()
-
-    def tearDown(self):
-        for x in self.ps:
-            x.stop()
-
-    def roundtrip(self, statusline):
-        self.settings.write_text(json.dumps({"statusLine": statusline}))
-        with mock.patch("builtins.print"):
-            install.install(["claude"])
-            first = json.loads(self.settings.read_text())["statusLine"]
-            install.install(["claude"])                        # re-install over our own wrapper
-            again = json.loads(self.settings.read_text())["statusLine"]
-            install.uninstall()
-        return first, again, json.loads(self.settings.read_text())["statusLine"]
-
-    def test_refresh_added_and_removed(self):
-        first, again, after = self.roundtrip({"type": "command", "command": "ponytail"})
-        self.assertIn("tagteam-statusline", first["command"])
-        self.assertEqual((first["refreshInterval"], again), (2, first))
-        self.assertEqual(after, {"type": "command", "command": "ponytail"})
-
-    def test_users_refresh_restored(self):
-        first, _, after = self.roundtrip({"type": "command", "command": "ponytail", "refreshInterval": 10})
-        self.assertEqual(first["refreshInterval"], 2)
-        self.assertEqual(after, {"type": "command", "command": "ponytail", "refreshInterval": 10})
-
-    def test_swiftbar_plugin_installed_runs_and_uninstalls(self):
-        app, plugins = pathlib.Path(tempfile.mkdtemp()), pathlib.Path(tempfile.mkdtemp())
-        plugin = plugins / install.SWIFTBAR_PLUGIN
-        with mock.patch.object(install, "SWIFTBAR_APP", app), \
-                mock.patch.object(install, "_swiftbar_dir", return_value=plugins), mock.patch("builtins.print"), \
-                mock.patch.object(install, "install_launcher"):
-            with mock.patch.object(install.subprocess, "run") as run:
-                install.install_swiftbar()
-            self.assertEqual(run.call_args_list[0].args[0][:3], ["open", "-g", "-a"])   # folder kept: no restart
-            self.assertTrue(os.access(plugin, os.X_OK))
-            out = subprocess.run([str(plugin)], capture_output=True, text=True).stdout
-            self.assertRegex(out.splitlines()[0], r"^:person\.2\.fill: :[a-z.]+: ")
-            self.assertIn("Open live view (tagteam watch)", out)
-            install.uninstall()
-            self.assertFalse(plugin.exists())
-            plugin.write_text("#!/bin/sh\necho mine\n")              # a user's plugin with the same name
-            with mock.patch.object(install.subprocess, "run"):
-                install.install_swiftbar()
-            install.uninstall()
-        self.assertEqual(plugin.read_text(), "#!/bin/sh\necho mine\n")
-        plugin.write_bytes(b"\xff\xfe binary plugin")
-        self.assertFalse(install._ours_plugin(plugin))
-        with mock.patch.object(install.shutil, "which", return_value=None):
-            self.assertIsNone(install._swiftbar_dir())                   # no `defaults`: SwiftBar is a no-op
-
-    def test_swiftbar_folder_set_when_unset_or_hidden_legacy(self):
-        app, home = pathlib.Path(tempfile.mkdtemp()), pathlib.Path(tempfile.mkdtemp())
-        legacy = home / ".tagteam" / "swiftbar"
-        legacy.mkdir(parents=True)
-        for configured in (None, legacy):
-            with mock.patch.object(install, "SWIFTBAR_APP", app), \
-                    mock.patch.object(install, "SWIFTBAR_DIR", home / "SwiftBar"), \
-                    mock.patch.object(install, "SWIFTBAR_OLD_DIR", legacy), \
-                    mock.patch.object(install, "_swiftbar_dir", return_value=configured), \
-                    mock.patch.object(install.time, "sleep"), mock.patch("builtins.print"), \
-                    mock.patch.object(install, "install_launcher"), \
-                    mock.patch.object(install.subprocess, "run") as run:
-                (legacy / install.SWIFTBAR_PLUGIN).write_text(install.swiftbar_plugin())
-                install.install_swiftbar()
-            cmds = [c.args[0] for c in run.call_args_list]
-            self.assertIn(["defaults", "write", install.SWIFTBAR_DOMAIN, "PluginDirectory", str(home / "SwiftBar")], cmds)
-            self.assertIn(["pkill", "-x", "SwiftBar"], cmds)
-            self.assertTrue((home / "SwiftBar" / install.SWIFTBAR_PLUGIN).exists())
-        self.assertFalse((legacy / install.SWIFTBAR_PLUGIN).exists())
-
-    def swiftbar_env(self, configured, home):
-        return [mock.patch.object(install, "SWIFTBAR_APP", pathlib.Path(tempfile.mkdtemp())),
-                mock.patch.object(install, "SWIFTBAR_DIR", home / "SwiftBar"),
-                mock.patch.object(install, "SWIFTBAR_OLD_DIR", home / ".tagteam" / "swiftbar"),
-                mock.patch.object(install, "_swiftbar_dir", return_value=configured),
-                mock.patch.object(install.time, "sleep"), mock.patch("builtins.print"),
-                mock.patch.object(install, "install_launcher")]
-
-    def test_swiftbar_migration_keeps_old_setup_when_destination_is_taken(self):
-        home = pathlib.Path(tempfile.mkdtemp())
-        legacy = home / ".tagteam" / "swiftbar"
-        legacy.mkdir(parents=True)
-        (legacy / install.SWIFTBAR_PLUGIN).write_text(install.swiftbar_plugin())
-        (home / "SwiftBar").mkdir()
-        (home / "SwiftBar" / install.SWIFTBAR_PLUGIN).write_text("#!/bin/sh\necho theirs\n")
-        with contextlib.ExitStack() as st:
-            for p in self.swiftbar_env(legacy, home):
-                st.enter_context(p)
-            run = st.enter_context(mock.patch.object(install.subprocess, "run"))
-            install.install_swiftbar()
-        self.assertEqual(run.call_args_list, [])                          # SwiftBar not repointed or restarted
-        self.assertTrue(install._ours_plugin(legacy / install.SWIFTBAR_PLUGIN))
-        self.assertEqual((home / "SwiftBar" / install.SWIFTBAR_PLUGIN).read_text(), "#!/bin/sh\necho theirs\n")
-
-    def test_swiftbar_write_failure_keeps_old_setup(self):
-        home = pathlib.Path(tempfile.mkdtemp())
-        legacy = home / ".tagteam" / "swiftbar"
-        legacy.mkdir(parents=True)
-        (legacy / install.SWIFTBAR_PLUGIN).write_text(install.swiftbar_plugin())
-        with contextlib.ExitStack() as st:
-            for p in self.swiftbar_env(legacy, home):
-                st.enter_context(p)
-            run = st.enter_context(mock.patch.object(install.subprocess, "run"))
-            st.enter_context(mock.patch.object(pathlib.Path, "write_text", side_effect=OSError("disk full")))
-            with self.assertRaises(OSError):
-                install.install_swiftbar()
-        self.assertEqual(run.call_args_list, [])
-        self.assertTrue(install._ours_plugin(legacy / install.SWIFTBAR_PLUGIN))
-
-    def test_swiftbar_users_hidden_folder_is_left_alone(self):
-        home = pathlib.Path(tempfile.mkdtemp())
-        theirs = home / ".config" / "swiftbar"
-        with contextlib.ExitStack() as st:
-            for p in self.swiftbar_env(theirs, home):
-                st.enter_context(p)
-            run = st.enter_context(mock.patch.object(install.subprocess, "run"))
-            install.install_swiftbar()
-        self.assertEqual(run.call_args_list, [])
-        self.assertFalse(theirs.exists())
-        self.assertFalse((home / "SwiftBar").exists())
-
-    def test_launcher_built_owned_and_removed(self):
-        apps = pathlib.Path(tempfile.mkdtemp())
-        launcher = apps / "tagteam.app"
-        real_run = subprocess.run
-
-        def run(argv, **kw):                     # build the bundle for real; skip mdimport side effects
-            return real_run(argv, **kw) if argv[0] == "osacompile" else mock.Mock(returncode=0)
-        with mock.patch.object(install, "LAUNCHER", launcher), mock.patch("builtins.print"), \
-                mock.patch.object(install, "_swiftbar_dir", return_value=None), \
-                mock.patch.object(install.subprocess, "run", side_effect=run):
-            install.install_launcher()
-            self.assertTrue((launcher / "Contents" / "MacOS").is_dir())
-            self.assertTrue((launcher / install.LAUNCHER_MARK).exists())
-            install.install_launcher()                                    # idempotent rebuild
-            install.uninstall()
-            self.assertFalse(launcher.exists())
-            (launcher / "Contents").mkdir(parents=True)                   # someone else's tagteam.app
-            install.install_launcher()
-            install.uninstall()
-            self.assertTrue((launcher / "Contents").exists())
-            self.assertFalse((launcher / install.LAUNCHER_MARK).exists())
-
-    def test_upgrade_from_old_wrapper_keeps_original_command(self):
-        install.STATUSLINE_ORIG.write_text("ponytail")
-        old = {"type": "command", "command": f"sh '{state.ROOT / 'bin' / 'tagteam-statusline'}'"}
-        first, _, after = self.roundtrip(old)
-        self.assertEqual(first["refreshInterval"], 2)
-        self.assertEqual(after, {"type": "command", "command": "ponytail"})
 
 
 if __name__ == "__main__":

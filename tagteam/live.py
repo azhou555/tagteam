@@ -1,4 +1,5 @@
-"""Live review state for the status line and `tagteam watch`. Imports only `state` so a 2s tick stays cheap.
+"""Live review state for the Claude status line, `tagteam watch`, `tagteam status` and the SwiftBar menu.
+Imports only `state` so a 2s tick stays cheap.
 
 active/<run_id>.json   one per running review; its owner holds active/<run_id>.lock for its whole life
 runs.jsonl             one line per finished review (a "review" = a run, not a reviewer call)
@@ -92,10 +93,12 @@ def record_run(run, now=None):
     with state.locked("runs"):
         state.append_jsonl(state.path("runs.jsonl"), run)
         s = _load_status(now)
-        s["today"] += 1
+        s["today"] += bool(run.get("reviewers"))      # a notice or a revert is not a review
         s["sessions"] = {k: v for k, v in s["sessions"].items() if v["ts"] >= now - SESSION_TTL}
         s["sessions"][f"{run['author']}:{run['session_id']}"] = {
             k: run[k] for k in ("ts", "action", "blocking", "advisory", "reviewers", "failed", "round")}
+        s["sessions"][f"{run['author']}:{run['session_id']}"].update(
+            {k: run[k] for k in ("prior", "confirm", "reason", "max_rounds") if k in run})
         state.write_json(state.path("status.json"), s)
 
 
@@ -142,6 +145,10 @@ KINDS = {
                "hex": "#3A9E6F,#B5EAD7"},
     "blocked": {"icon": "✗", "label": "Changes requested", "ansi": 217, "sf": "xmark.octagon.fill",
                 "hex": "#C8554F,#FFB3B3"},
+    "resolved": {"icon": "✓", "label": "Issues resolved", "ansi": 158, "sf": "checkmark.seal.fill",
+                 "hex": "#3A9E6F,#B5EAD7"},
+    "unresolved": {"icon": "⚠", "label": "Unresolved", "ansi": 216, "sf": "exclamationmark.triangle.fill",
+                   "hex": "#C46A3A,#FFC9A8"},
     "unreviewed": {"icon": "⚠", "label": "Not reviewed", "ansi": 229, "sf": "exclamationmark.circle.fill",
                    "hex": "#B08A1E,#FFF1A8"},
     "failed": {"icon": "⚠", "label": "Review failed", "ansi": 229, "sf": "exclamationmark.circle.fill",
@@ -149,18 +156,34 @@ KINDS = {
 }
 
 
+REASONS = {"no reviewers configured": "no reviewers configured; run tagteam install"}
+
+
 def outcome(run):
-    """(kind, detail) for a finished run, in plain words."""
-    if not run["reviewers"]:
-        return "unreviewed", "no reviewer had quota available"
-    if set(run["failed"]) >= set(run["reviewers"]):
-        return "failed", "every reviewer errored or timed out"
+    """(kind, detail) for a finished run, in plain words. `prior` is how many issues were open going in."""
+    prior, m = run.get("prior") or 0, run.get("max_rounds")
+    reason = run.get("reason")
+    if reason == "reverted":
+        return "resolved", "changes reverted"
+    owed = f" · {_plural(prior, 'earlier issue')} not re-checked" if prior else ""
+    if reason:
+        return "unreviewed", REASONS.get(reason, reason) + owed
+    n = run["blocking"]
+    if run.get("confirm") and n:                     # may be a re-issued block with no reviewer spawned
+        return "unresolved", f"{_plural(n, 'issue')} still open after {_plural(m, 'fix round')}"
+    if not run["reviewers"] and run["action"] != "block":      # a re-issued block spawned no one, but it is a verdict
+        return "unreviewed", "no reviewer had quota available" + owed
+    if run["reviewers"] and set(run["failed"]) >= set(run["reviewers"]):
+        return "failed", "every reviewer errored or timed out" + owed
+    where = f" (round {run['round']}/{m})" if m else ""
     if run["action"] == "block":
-        n = run["blocking"]
-        return "blocked", f"{n} issue{'s' if n != 1 else ''} sent back to fix"
+        return "blocked", (f"{_plural(n, 'issue')} to fix{where}" if not prior else
+                           f"{_plural(n, 'issue')} still open after fixes{where}")
+    notes = f", {_plural(run['advisory'], 'minor note')}" if run["advisory"] else ""
+    if prior:
+        return "resolved", f"all {prior} fixed and re-checked{notes}"
     if run["advisory"]:
-        n = run["advisory"]
-        return "passed", f"no blocking issues, {n} minor note{'s' if n != 1 else ''}"
+        return "passed", f"no blocking issues{notes}"
     return "passed", "no issues found"
 
 
@@ -246,7 +269,46 @@ def segment(agent, session_id, now=None, color=False):
 
 def _today_and_week(now):
     week = state.read_jsonl(state.path("runs.jsonl"), now - 7 * 86400)
-    return [r for r in week if _day(r["ts"] + r["duration"]) == _day(now)], week   # by finish day, like status.json
+    return [r for r in week if r.get("reviewers") and _day(r["ts"] + r["duration"]) == _day(now)], week   # by finish day
+
+
+def _num(d, key):
+    v = d.get(key) if isinstance(d, dict) else None
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _usages(run):
+    u = run.get("usage")
+    return [x for x in u.values() if isinstance(x, dict)] if isinstance(u, dict) else []
+
+
+def _week(now):
+    """Last 7 days of runs in which a reviewer was actually asked; others spent nothing."""
+    return [r for r in state.read_jsonl(state.path("runs.jsonl"), now - 7 * 86400) if r.get("reviewers")]
+
+
+def week_spend(now=None, week=None):
+    """(reviews, cost_usd, unreported) over the last 7 days. A review reported cost if any reviewer gave cost_usd."""
+    week = _week(now or time.time()) if week is None else week
+    costs = [[c for u in _usages(r) if (c := _num(u, "cost_usd")) is not None] for r in week]
+    return len(week), sum(sum(c) for c in costs), sum(not c for c in costs)
+
+
+def spend_line(reviews, cost, unreported, premium):
+    line = f"This week: {_plural(reviews, 'review')} · "
+    if unreported == reviews:
+        line += "cost not reported"
+    else:
+        line += f"~${cost:.2f} reported" + (f" · {unreported} didn't report cost" if unreported else "")
+    return line + (f" · {_plural(premium, 'premium request')}" if premium else "")
+
+
+def week_lines(now=None):
+    """The weekly spend line and, under it, reviews per reviewer."""
+    week = _week(now or time.time())
+    premium = sum(n for r in week for u in _usages(r) if (n := _num(u, "premium_requests")) is not None)
+    return [spend_line(*week_spend(week=week), premium)] + (
+        [f"by reviewer: {_counts(week, 'reviewers')}"] if any(r["reviewers"] for r in week) else [])
 
 
 def _counts(runs, key):
@@ -275,6 +337,7 @@ def render_watch(now=None, recent=5, color=False):
     for key, label in (("author", "by author"), ("reviewers", "by reviewer")):
         if today:
             lines.append(f"  {label:12} {_counts(today, key)}")
+    lines.append("\n" + "\n".join(week_lines(now)))
     lines.append(f"\nLast {recent}:")
     for r in week[-recent:][::-1]:
         kind = outcome(r)[0]
@@ -338,7 +401,9 @@ def render_swiftbar(now=None, recent=8):
     if today:
         lines.append(_sb(f"by author:  {_counts(today, 'author')}", font="Menlo", size=12))
         lines.append(_sb(f"by reviewer:  {_counts(today, 'reviewers')}", font="Menlo", size=12))
-    lines += ["---", _sb("Recent reviews (click to open the run)", size=11, color="gray")]
+    lines += [_sb(week_lines(now)[0], size=11, color="gray"),
+              *[_sb(t, font="Menlo", size=12) for t in week_lines(now)[1:]],
+              "---", _sb("Recent reviews (click to open the run)", size=11, color="gray")]
     for r in week[-recent:][::-1]:
         kind_r = outcome(r)[0]
         run_dir = state.path("runs", r["run_id"], "x").parent
@@ -351,20 +416,27 @@ def render_swiftbar(now=None, recent=8):
         lines.append(_sb(f"⚠ {_plural(len(s['errors']), 'hook error')} in 24h: reviews were skipped. Open log",
                          color=KINDS["blocked"]["hex"], bash="/usr/bin/open", param1="-t",
                          param2=f'"{state.path("tagteam.log")}"', terminal="false"))
-    lines.append(_sb("Open live view (tagteam watch)", bash=f'"{sys.executable}"',
-                     param1=f'"{state.ROOT / "bin" / "tagteam"}"', param2="watch", terminal="true"))
+    from . import install
+    exe, *args = install.entry_argv()
+    params = {f"param{i}": f'"{a}"' for i, a in enumerate([*args, "watch"], 1)}
+    lines.append(_sb("Open live view (tagteam watch)", bash=f'"{exe}"', **params, terminal="true"))
     lines.append(_sb("Refresh", refresh="true"))
     return "\n".join(lines)
 
 
+def statusline_segment(raw):
+    data = json.loads(raw or "{}")
+    return segment("claude", data.get("session_id", ""), color=not os.environ.get("NO_COLOR"))
+
+
 def main(argv):
-    """Entry for the status line (stdin: Claude's status JSON) and SwiftBar (`swiftbar`). Never fails loudly."""
+    """`swiftbar` renders the menu bar item; otherwise print the status segment for Claude's status JSON on stdin.
+    Never fails loudly."""
     try:
         if argv[:1] == ["swiftbar"]:
             print(render_swiftbar())
             return
-        data = json.loads(sys.stdin.read() or "{}")
-        print(segment("claude", data.get("session_id", ""), color=not os.environ.get("NO_COLOR")))
+        print(statusline_segment(sys.stdin.read()))
     except Exception:
         if argv[:1] == ["swiftbar"]:
             print("tagteam ⚠\n---\nfailed to render; see ~/.tagteam/state/tagteam.log")

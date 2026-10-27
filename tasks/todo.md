@@ -135,3 +135,22 @@ Verify:
       because a running SwiftBar can be stuck with no items and `open` on it only says "already open".
 - [x] Visual check: user confirmed the menu bar item (2026-10-26). Before that, verified by item geometry from
       CGWindowList (no screenshot permission): a 79px Control Center item appears per display when SwiftBar loads.
+
+## Phase 8: Packaging for teams (2026-10-26)
+Spec: `docs/superpowers/specs/2026-10-26-packaging-design.md`.
+- [x] Installable package and `tagteam` console script; hooks, status line and menu bar call the installed executable
+- [x] Harness registry (claude, codex, copilot, agy); `--check`-gated migration of old checkout-style hooks
+- [x] New config shape with a legacy shim; a repo file can only tighten; `tagteam config`
+- [x] Reviewer consent: `reviewers.use` via `tagteam install` (`--reviewers`, `--yes`, prompt); no list, no reviews
+- [x] Loop limits: 30 reviews/hour, digest memory, session lock, failure breaker
+- [x] Per-reviewer worktree sandboxes and write detection; weekly spend lines
+- [x] `tagteam doctor` (`--probe`, `--clear`, Codex trust); issue follow-through statuses (resolved / unresolved)
+- [x] README rewritten for new users; DESIGN.md links the spec
+- [x] `scripts/clean_install_test.sh` (temp HOME, `uv tool install`, install, doctor, uninstall byte-identical);
+      `TAGTEAM_NO_MACOS_EXTRAS=1` makes install/uninstall skip SwiftBar, launcher and status line
+- [ ] Linux container run of the clean-install script (Docker daemon was not running)
+- [ ] After the branch is approved: migrate the author's machine (`uv tool install -e .`, `tagteam install`,
+      confirm reviewers, `tagteam doctor`, one live Claude turn; check menu bar and status line)
+- [x] Existing user config with no `routing.mode` gets `mode = "quota"` on `tagteam install`; fresh installs stay `ordered`
+- [x] `install` wires only detected agents by default (`--agents` overrides); skipped ones are named
+- Follow-ups: an authors prompt in `install` (today only `--authors`); `--menubar` flag; Kiro, Cursor, OpenCode, Pi harnesses.

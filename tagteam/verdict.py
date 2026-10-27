@@ -29,7 +29,7 @@ def decide(results, cfg, round_no):
     threshold = RANK[rv["block_at"]]
     blocking = [f for f in merged if RANK[f["severity"]] <= threshold and f["confidence"] >= rv["min_confidence"]]
     advisory = [f for f in merged if f not in blocking]
-    action = "block" if blocking and round_no <= rv["max_rounds"] else "allow"
+    action = "block" if blocking and round_no <= cfg["limits"]["max_rounds_per_turn"] else "allow"
     return action, blocking, advisory
 
 

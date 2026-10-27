@@ -1,32 +1,18 @@
-"""Paths, config loading, locked JSON state, logging."""
+"""Paths, locked JSON state, logging."""
 import contextlib
 import fcntl
 import json
 import os
 import pathlib
 import time
-import tomllib
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
 HOME = pathlib.Path(os.environ.get("TAGTEAM_HOME", pathlib.Path.home() / ".tagteam"))
 STATE = HOME / "state"
 
 
-def _merge(base, over):
-    for k, v in over.items():
-        if isinstance(v, dict) and isinstance(base.get(k), dict):
-            _merge(base[k], v)
-        else:
-            base[k] = v
-    return base
-
-
-def load_config(repo=None):
-    cfg = tomllib.loads((ROOT / "config.default.toml").read_text())
-    for p in [HOME / "config.toml", pathlib.Path(repo) / ".tagteam.toml" if repo else None]:
-        if p and p.is_file():
-            _merge(cfg, tomllib.loads(p.read_text()))
-    return cfg
+def extras_off():
+    """TAGTEAM_NO_MACOS_EXTRAS=1 (clean-install runs): install and uninstall leave SwiftBar, the launcher and the status line alone."""
+    return os.environ.get("TAGTEAM_NO_MACOS_EXTRAS", "").lower() in ("1", "true", "yes")
 
 
 def path(*parts):
@@ -47,6 +33,15 @@ def read_json(p, default=None):
         return json.loads(pathlib.Path(p).read_text())
     except (OSError, ValueError):
         return default
+
+
+def read_dict(p):
+    """{} if `p` doesn't exist, its JSON object if it parses, else None. Safety lists read None as "everyone"."""
+    p = pathlib.Path(p)
+    if not p.exists():
+        return {}
+    d = read_json(p)
+    return d if isinstance(d, dict) else None
 
 
 def write_json(p, data):

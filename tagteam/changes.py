@@ -22,6 +22,15 @@ def repo_root(cwd):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def in_repo(path, repo):
+    """True if `path` is `repo` or inside it. Symlinks resolve on both sides: git reports the real
+    top-level while agents report paths through whatever cwd they were started in."""
+    if not repo:
+        return False
+    p, r = os.path.realpath(path), os.path.realpath(repo)
+    return p == r or p.startswith(r + os.sep)
+
+
 def snapshot(repo):
     """Tree id of the full working state (tracked + untracked, minus ignored), user index untouched.
 
@@ -32,7 +41,7 @@ def snapshot(repo):
         real = git(repo, "rev-parse", "--git-path", "index").strip()
         real = real if os.path.isabs(real) else os.path.join(repo, real)
         if os.path.exists(real):
-            shutil.copyfile(real, idx)
+            shutil.copy2(real, idx)             # keep its mtime: git re-hashes entries as new as the index ("racy git")
         env = {"GIT_INDEX_FILE": idx}
         git(repo, "-c", "core.safecrlf=false", "add", "-A", env=env)      # a safecrlf abort would skip the review
         return git(repo, "write-tree", env=env).strip()

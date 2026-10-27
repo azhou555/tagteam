@@ -1,11 +1,4 @@
 #!/bin/sh
-# Claude Code status line wrapper: caches the stdin JSON (it carries rate_limits) for tagteam's
-# quota reader, runs the user's original status line command unchanged, then adds tagteam's line.
-# $1: python interpreter (set by `tagteam install`).
-in=$(cat)
-q="${TAGTEAM_HOME:-$HOME/.tagteam}/state/quota"
-mkdir -p "$q" && printf '%s' "$in" > "$q/claude.json.$$" && mv "$q/claude.json.$$" "$q/claude.json"
-orig="${TAGTEAM_HOME:-$HOME/.tagteam}/statusline.orig"
-[ -s "$orig" ] && out=$(printf '%s' "$in" | sh -c "$(cat "$orig")") && [ -n "$out" ] && printf '%s\n' "$out"
-printf '%s' "$in" | PYTHONPATH="$(dirname "$0")/.." "${1:-python3}" -m tagteam.live 2>/dev/null
-exit 0
+# Dev shim kept for old installs: the status line now lives in `tagteam statusline`.
+# Old installs pass their Python interpreter as $1; the shebang's python3 may be too old.
+exec "${1:-python3}" "$(dirname "$0")/tagteam" statusline

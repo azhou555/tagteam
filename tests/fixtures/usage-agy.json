@@ -1,0 +1,8 @@
+{
+ "stdout": "{\"conversation_id\": \"00000000-0000-0000-0000-000000000000\", \"status\": \"SUCCESS\", \"response\": \"{}\", \"duration_seconds\": 38.630435, \"num_turns\": 1, \"structured_output\": {\"verdict\": \"approve\", \"summary\": \"ok\", \"findings\": []}, \"usage\": {\"input_tokens\": 66497, \"output_tokens\": 3609, \"thinking_tokens\": 3342, \"cache_read_tokens\": 0, \"total_tokens\": 70106}}",
+ "files": {},
+ "expected": {
+  "input_tokens": 66497,
+  "output_tokens": 3609
+ }
+}

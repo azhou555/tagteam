@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tagteam"
+version = "0.2.0"
+description = "Cross-agent review hooks for coding agents"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+tagteam = "tagteam.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tagteam"]
+include = ["tagteam/**/*.py", "tagteam/data/**"]

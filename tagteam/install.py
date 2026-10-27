@@ -1,25 +1,16 @@
-"""Merge-only install into each agent's hook config. Every entry we add carries TAG so
-uninstall (and re-install) touches exactly ours; Orca's and other entries are left alone."""
-import json
+"""Install: each harness merges its hook config (every entry carries TAG so uninstall and re-install touch
+exactly ours; Orca's and other entries are left alone); this module adds the menu bar item and launcher."""
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
 import time
 
-from . import state
+from . import config, harnesses, resources, state
 
-TAG = "tagteam-hook-form=1"
 H = pathlib.Path.home()
-CLAUDE = H / ".claude" / "settings.json"
-CODEX = H / ".codex" / "hooks.json"
-COPILOT = H / ".copilot" / "hooks" / "tagteam.json"
-AGY = H / ".gemini" / "config" / "hooks.json"
-STATUSLINE_ORIG = state.HOME / "statusline.orig"
-STATUSLINE_ORIG_REFRESH = state.HOME / "statusline.orig-refresh"   # user's refreshInterval before ours, or empty
-REFRESH_S = 2                                                       # ticks the status line during a blocking review
-TOUCH_MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash"
 SWIFTBAR_APP = pathlib.Path("/Applications/SwiftBar.app")
 SWIFTBAR_DOMAIN = "com.ameba.SwiftBar"
 SWIFTBAR_DIR = H / "SwiftBar"                                       # used only if SwiftBar has no folder yet
@@ -30,84 +21,93 @@ LAUNCHER_MARK = "Contents/Resources/tagteam-launcher"               # ownership 
 SWIFTBAR_MARK = "# Written by `tagteam install`; removed by `tagteam uninstall`."
 
 
-def cmd(agent, phase):
-    return f": {TAG}; '{sys.executable}' '{state.ROOT / 'bin' / 'tagteam'}' hook {agent} {phase}"
+def entry_argv():
+    """argv that runs this tagteam: the installed executable, else this script, else `python -m tagteam`."""
+    found = shutil.which("tagteam")
+    if found:
+        return [os.path.abspath(found)]
+    me = os.path.realpath(sys.argv[0])
+    if os.path.isfile(me) and os.access(me, os.X_OK):
+        return [me]
+    return [sys.executable, "-m", "tagteam"]                        # never point hooks at an unexecutable path
 
 
-def _ours(entry):
-    return TAG in json.dumps(entry)
+def entry():
+    """The same, as a shell command prefix."""
+    return shlex.join(entry_argv())
 
 
-def _load(p):
-    return json.loads(p.read_text()) if p.exists() else {}
+def check_agent(name):
+    """Run the real hook parser on the bundled Stop payload in a child; 0 means this install can parse it."""
+    payload = resources.path(f"fixtures/{name}-stop.json").read_text()
+    try:
+        r = subprocess.run([*entry_argv(), "hook", name, "turn-end", "--check"], input=payload,
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"  {e}", file=sys.stderr)
+        return 1
+    if r.returncode:
+        print(f"  {r.stderr.strip()}", file=sys.stderr)
+    return r.returncode
 
 
-def _save(p, data, dry_run):
-    text = json.dumps(data, indent=2) + "\n"
-    if dry_run:
-        print(f"--- {p} (dry run)\n{text}")
-        return
-    p.parent.mkdir(parents=True, exist_ok=True)
-    if p.exists():
-        shutil.copyfile(p, p.with_name(p.name + f".tagteam-bak-{time.strftime('%Y%m%d%H%M%S')}"))
-    tmp = p.with_name(p.name + ".tagteam-tmp")
-    tmp.write_text(text)
-    json.loads(tmp.read_text())                     # re-validate before replacing
-    tmp.replace(p)
-    print(f"updated {p}")
+def ask_consent(detected, preselected):
+    """Numbered prompt on stdin; returns the picked agents in the order typed. Nothing typed means none."""
+    print("These agents can review your changes. Each one you pick receives your diffs. "
+          "Pick reviewers in order (e.g. 2,1), or press Enter for none:")
+    for i, name in enumerate(detected, 1):
+        print(f"  {i}. [{'x' if name in preselected else ' '}] {name}")
+    if preselected:
+        print("  ([x] = enabled in your old config; type their numbers to keep them)")
+    while True:
+        line = sys.stdin.readline()
+        if not line.strip():
+            return []
+        try:
+            nums = [int(t) for t in line.replace(",", " ").split()]
+            if not all(1 <= n <= len(detected) for n in nums):
+                raise ValueError
+        except ValueError:
+            print(f"Enter numbers 1-{len(detected)} separated by commas, or press Enter for none:")
+            continue
+        return list(dict.fromkeys(detected[n - 1] for n in nums))
 
 
-def _strip(hooks):
-    for event in list(hooks):
-        if isinstance(hooks[event], list):
-            hooks[event] = [e for e in hooks[event] if not _ours(e)]
-            if not hooks[event]:
-                del hooks[event]
-
-
-def claude_shaped(agent, stop_timeout):
-    def group(phase, timeout, matcher=None):
-        g = {"hooks": [{"type": "command", "command": cmd(agent, phase), "timeout": timeout}]}
-        return {"matcher": matcher, **g} if matcher else g
-    events = {
-        "UserPromptSubmit": group("turn-start", 30),
-        "PostToolUse": group("touch", 30, TOUCH_MATCHER if agent == "claude" else None),
-        "Stop": group("turn-end", stop_timeout),
-    }
-    if agent == "claude":
-        events["PreToolUse"] = group("plan-gate", stop_timeout, "ExitPlanMode")
-    return events
+def set_consent(reviewers, authors, yes, dry_run=False):
+    """Save who may review (`reviewers.use`) and whose turns are reviewed. Never derived from detection:
+    the list comes from --reviewers or an answer at the prompt, and --yes alone saves none."""
+    found = [n for n in harnesses.detected() if harnesses.get(n).reviewer]
+    if reviewers is None and not yes and found:
+        old = config.load().get("reviewers", {})
+        reviewers = ask_consent(found, [n for n in found if old.get(n, {}).get("enabled") is True])
+    if reviewers:
+        saved = {"reviewers": ("reviewers", "use", reviewers)}
+    else:
+        saved = {}
+        print("no reviewer list saved: nothing is reviewed until you run "
+              "`tagteam install --reviewers codex,claude` (names in your preferred order)")
+    if authors is not None:
+        saved["authors"] = ("authors", "review", authors)
+    for table, key, items in saved.values():
+        print(f"{'would save' if dry_run else 'saved'} {table}.{key} = {', '.join(items)}")
+        if not dry_run:
+            config.save_user(table, key, items)
 
 
 def install(agents, dry_run=False):
-    cfg = state.load_config()
+    if config.migrate_routing(dry_run):
+        print(f"{'would keep' if dry_run else 'kept'} quota routing for your existing config (routing.mode = \"quota\")")
+    cfg = config.load(note_legacy=True)
     stop_timeout = cfg["review"]["deadline_s"] + 60
-    for agent, p in (("claude", CLAUDE), ("codex", CODEX)):
-        if agent not in agents:
-            continue
-        data = _load(p)
-        hooks = data.setdefault("hooks", {})
-        _strip(hooks)
-        for event, entry in claude_shaped(agent, stop_timeout).items():
-            hooks.setdefault(event, []).append(entry)
-        if agent == "claude":
-            _wrap_statusline(data, dry_run)
-        _save(p, data, dry_run)
-    if "copilot" in agents:
-        def h(phase, t):
-            return [{"type": "command", "bash": cmd("copilot", phase), "timeoutSec": t}]
-        _save(COPILOT, {"version": 1, "hooks": {"userPromptSubmitted": h("turn-start", 30),
-                                                "postToolUse": h("touch", 30),
-                                                "agentStop": h("turn-end", stop_timeout)}}, dry_run)
-    if "agy" in agents:
-        data = _load(AGY)
-        data["tagteam"] = {
-            "PreInvocation": [{"type": "command", "command": cmd("agy", "turn-start"), "timeout": 30}],
-            "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": cmd("agy", "touch"),
-                                                        "timeout": 30}]}],
-            "Stop": [{"type": "command", "command": cmd("agy", "turn-end"), "timeout": stop_timeout}],
-        }
-        _save(AGY, data, dry_run)
+    entry_cmd = entry()
+    for name, h in harnesses.ALL.items():
+        if name in agents and h.author:
+            rc = check_agent(name)
+            if rc:
+                print(f"{name}: kept existing hooks (check failed with exit {rc}; "
+                      f"`{entry_cmd} hook {name} turn-end --check` shows why)")
+                continue
+            h.author.install(entry_cmd, stop_timeout, dry_run)
     install_swiftbar(dry_run)
     if not dry_run:
         from . import live
@@ -119,22 +119,8 @@ def install(agents, dry_run=False):
               "new hooks until you trust them).")
 
 
-def _wrap_statusline(data, dry_run):
-    """Idempotent: re-running over an existing wrapper still upgrades its command and refreshInterval."""
-    sl = data.get("statusLine") or {}
-    wrapper = f"sh '{state.ROOT / 'bin' / 'tagteam-statusline'}' '{sys.executable}'"
-    if not dry_run:
-        STATUSLINE_ORIG.parent.mkdir(parents=True, exist_ok=True)
-        if "tagteam-statusline" not in sl.get("command", ""):
-            STATUSLINE_ORIG.write_text(sl.get("command", ""))
-        if not STATUSLINE_ORIG_REFRESH.exists():     # first install with this field: what's there now is the user's
-            STATUSLINE_ORIG_REFRESH.write_text(str(sl.get("refreshInterval", "")))
-    refresh = min(sl["refreshInterval"], REFRESH_S) if "refreshInterval" in sl else REFRESH_S
-    data["statusLine"] = {**sl, "type": "command", "command": wrapper, "refreshInterval": refresh}
-
-
 def _swiftbar_dir():
-    if not shutil.which("defaults"):                                # not macOS: no SwiftBar
+    if state.extras_off() or not shutil.which("defaults"):                # not macOS: no SwiftBar
         return None
     r = subprocess.run(["defaults", "read", SWIFTBAR_DOMAIN, "PluginDirectory"], capture_output=True, text=True)
     return pathlib.Path(os.path.expanduser(r.stdout.strip())) if r.returncode == 0 and r.stdout.strip() else None
@@ -148,7 +134,7 @@ def swiftbar_plugin():
             "# <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>\n"
             "# <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>\n"
             f"{SWIFTBAR_MARK}\n"
-            f"{env}PYTHONPATH='{state.ROOT}' exec '{sys.executable}' -m tagteam.live swiftbar\n")
+            f"{env}exec {entry()} swiftbar\n")
 
 
 def _ours_plugin(p):
@@ -164,8 +150,11 @@ def install_swiftbar(dry_run=False):
     Order matters: the plugin is written before SwiftBar is repointed or the legacy copy is removed, so a
     failure leaves the previous setup working.
     """
+    if state.extras_off():
+        print("menu bar: skipped (TAGTEAM_NO_MACOS_EXTRAS is set)")
+        return
     if not SWIFTBAR_APP.exists():
-        print("SwiftBar not installed; skipping menu bar item (brew install --cask swiftbar, then re-run install)")
+        print("menu bar: skipped. SwiftBar isn't installed (macOS only: brew install --cask swiftbar, then re-run install)")
         return
     current = _swiftbar_dir()
     legacy = current == SWIFTBAR_OLD_DIR
@@ -214,34 +203,13 @@ def install_launcher():
 
 
 def uninstall():
-    for p in (CLAUDE, CODEX):
-        if p.exists():
-            data = _load(p)
-            _strip(data.get("hooks", {}))
-            if p == CLAUDE and "tagteam-statusline" in (data.get("statusLine") or {}).get("command", ""):
-                orig = STATUSLINE_ORIG.read_text() if STATUSLINE_ORIG.exists() else ""
-                refresh = STATUSLINE_ORIG_REFRESH.read_text() if STATUSLINE_ORIG_REFRESH.exists() else ""
-                if orig:
-                    data["statusLine"]["command"] = orig
-                    if refresh:
-                        data["statusLine"]["refreshInterval"] = int(refresh)
-                    else:
-                        data["statusLine"].pop("refreshInterval", None)
-                else:
-                    data.pop("statusLine")
-                STATUSLINE_ORIG_REFRESH.unlink(missing_ok=True)
-            _save(p, data, False)
-    if COPILOT.exists():
-        COPILOT.unlink()
-        print(f"removed {COPILOT}")
-    if AGY.exists():
-        data = _load(AGY)
-        if data.pop("tagteam", None) is not None:
-            _save(AGY, data, False)
+    for h in harnesses.ALL.values():
+        if h.author:
+            h.author.uninstall()
     d = _swiftbar_dir()
     if d and _ours_plugin(d / SWIFTBAR_PLUGIN):
         (d / SWIFTBAR_PLUGIN).unlink()
         print(f"removed {d / SWIFTBAR_PLUGIN}")
-    if (LAUNCHER / LAUNCHER_MARK).exists():
+    if not state.extras_off() and (LAUNCHER / LAUNCHER_MARK).exists():
         shutil.rmtree(LAUNCHER)
         print(f"removed {LAUNCHER}")
