@@ -42,7 +42,7 @@ def save_trust_snapshot():
     """Codex keys approvals by hook position, so rewriting a hook leaves its old approval in place but stale.
     Remember which approvals existed at install so `hook_trust` can tell them from ones given after."""
     try:
-        records = _records()
+        records = _records() if CONFIG.exists() else {}      # no Codex config yet: nothing was approved before
         snap = {k: h for k in _our_keys() if (h := _hash(records, k))}
         snapshot_path().parent.mkdir(parents=True, exist_ok=True)
         snapshot_path().write_text(json.dumps(snap, indent=2) + "\n")

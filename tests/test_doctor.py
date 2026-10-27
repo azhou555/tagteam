@@ -226,9 +226,11 @@ class CodexTrust(unittest.TestCase):
         self.assertEqual(set(json.loads(self.snap.read_text())), set(codex_h._our_keys()))
 
     def test_idempotent_reinstall_keeps_a_valid_approval(self):
-        self.records({})
+        self.assertFalse(self.cfg.exists())                                          # a fresh Codex: no config yet
         with contextlib.redirect_stdout(io.StringIO()):
             codex_h.install("/bin/tagteam", 100, dry_run=False)
+            self.assertEqual(codex_h.hook_trust(), None)                              # no record: Codex can't say
+            self.assertEqual(json.loads(self.snap.read_text()), {})
             self.records({k: "sha256:approved" for k in codex_h._our_keys()})        # user approves in /hooks
             self.assertEqual(codex_h.hook_trust(), "trusted")
             codex_h.install("/bin/tagteam", 100, dry_run=False)                       # same hooks again
