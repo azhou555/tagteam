@@ -91,6 +91,24 @@ class Changes(unittest.TestCase):
         self.assertEqual([(a["path"], a["status"]) for a in arts], [("win.h", "added")])
 
 
+    def test_snapshot_sees_same_size_rewrite_in_the_index_second(self):
+        """Racy git: a same-size rewrite in the second the index was written looks clean to a stat check,
+        unless the temp index keeps the real index's mtime so git knows to re-hash the file."""
+        repo = make_repo()
+        sh(repo, "git", "config", "core.trustctime", "false")        # utime and the rewrite both move ctime
+        sh(repo, "git", "config", "core.checkStat", "minimal")
+        f, index, second = os.path.join(repo, "a.py"), os.path.join(repo, ".git", "index"), int(time.time()) - 100
+        os.utime(f, (second, second))
+        sh(repo, "git", "update-index", "--refresh")                  # the index now records mtime `second`
+        os.utime(index, (second, second))
+        with open(f, "r+") as fh:
+            fh.write("y = 2\n")                                       # same size as "x = 1\n"
+        os.utime(f, (second, second))
+        tree = changes.snapshot(repo)
+        want = subprocess.run(["git", "hash-object", "a.py"], cwd=repo, capture_output=True, text=True).stdout.strip()
+        got = subprocess.run(["git", "ls-tree", tree, "a.py"], cwd=repo, capture_output=True, text=True).stdout.split()
+        self.assertEqual(got[2], want)
+
 class Classify(unittest.TestCase):
     def test_kinds(self):
         k = lambda p: classify.kind(p, CFG)  # noqa: E731
