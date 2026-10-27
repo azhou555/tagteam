@@ -161,3 +161,28 @@ Spec: `docs/superpowers/specs/2026-10-26-packaging-design.md`.
 - [x] Existing user config with no `routing.mode` gets `mode = "quota"` on `tagteam install`; fresh installs stay `ordered`
 - [x] `install` wires only detected agents by default (`--agents` overrides); skipped ones are named
 - Follow-ups: an authors prompt in `install` (today only `--authors`); `--menubar` flag; Kiro, Cursor, OpenCode, Pi harnesses.
+
+## Phase 9: Status reflects the real review state (2026-10-27)
+Problem: a session showed `✗ Changes requested` for hours. Its round-3 confirm review was killed mid-run (no
+verdict, no record, `finally` never ran), and `turn_start` dropped the open issues on the next prompt, so no later
+turn re-checked them.
+
+Data shape: the session file's `prior` is the one record of open issues. A cycle is closed by an allow
+(open issues `[]`) or a confirm round (the last word; it stores `[]` too). Anything else, including a killed
+run, leaves `prior` set.
+- [x] Carry: `turn_start` keeps the previous turn's `prior`; carried issues are re-checked on any change, ignoring
+      `min_changed_lines`; a no-change turn reviews nothing. Undoing a carried turn doesn't resolve its issues.
+- [x] Only a real verdict closes the cycle: an allow, or a confirm round a reviewer actually answered. `review()`
+      returns `None` for open issues when no reviewer gave a verdict (all failed, none available, state error).
+- [x] Interrupted: a reader that finds a dead owner claims the record (one winner) and records
+      `⚠ Review interrupted`; `record_run` sweeps first so it never lands after a later run.
+- [x] A turn started mid-review inherits that review's open issues.
+- [x] `[hooks] on_review` (user config only): detached `sh -c`, run JSON on stdin, `TAGTEAM_OUTCOME`,
+      `TAGTEAM_SUMMARY`, `TAGTEAM_DEPTH=1`; never blocks or fails the hook; backfill never fires it.
+- [x] 239 tests pass; each feature's core line mutation-checked.
+- [x] Live (2026-10-27, headless Claude, throwaway repo): round 1 blocked 2 issues; round-2 hook SIGKILLed; status
+      line showed `⚠ Review interrupted · 2 earlier issues not re-checked`; next turn's 1-line edit was reviewed
+      with the carried issues and showed `✓ Issues resolved: all 2 fixed and re-checked`. on_review received all
+      four runs with correct outcome/summary.
+- Follow-up: change snapshots pick up any untracked nested git repo as a gitlink (seen with `.claude/worktrees/`,
+  now gitignored here). Skip nested repos in `changes.snapshot` for every user.
