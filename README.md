@@ -84,7 +84,7 @@ the notice at the end of the turn, in `tagteam watch` and `tagteam status`, and 
 | `✗ Changes requested` | rose | Issues were sent back (`N issues to fix (round 1/2)`); the agent must fix them or say why not |
 | `✓ Issues resolved` | mint | An earlier block was settled: `all N fixed and re-checked`, or `changes reverted` |
 | `⚠ Unresolved` | apricot | The last re-check still found issues after the fix rounds (`N issues still open after 2 fix rounds`); the turn is allowed |
-| `⚠ Not reviewed` | yellow | No reviewer was available, no reviewers are configured, the review limit was reached, or tagteam hit a state error |
+| `⚠ Not reviewed` | yellow | No reviewer was available, no reviewers are configured, the review limit was reached, the repo was too slow to sandbox, or tagteam hit a state error |
 | `⚠ Review failed` | yellow | Every reviewer errored or timed out |
 
 Requested changes stay visible until a later review settles them, so you can tell whether issues were
@@ -131,7 +131,7 @@ Defaults work with no config beyond the reviewer list. Put your changes in `~/.t
 | `review.large_lines` | `150` | A code change this big counts as large |
 | `review.block_at` | `major` | Lowest severity that blocks (`blocker`, `major`, `minor`) |
 | `review.min_confidence` | `0.6` | Findings below this confidence are dropped |
-| `review.deadline_s` | `240` | Time limit per reviewer, in seconds |
+| `review.deadline_s` | `240` | Time budget for a review, in seconds; time spent preparing the checkouts comes out of it |
 | `review.max_diff_chars` | `60000` | Total diff text sent to reviewers |
 | `review.ignore` | lockfiles, build output, minified files | Paths never sent for review |
 | `reviewers.<agent>.model` | claude `sonnet`; others the CLI default | Model each reviewer runs |
@@ -190,6 +190,7 @@ defaults:
 | Reviews per hour | `limits.max_reviews_per_hour = 30` | Across all sessions and agents; past it you see `review limit reached (30 per hour)` and turns are allowed unreviewed. A crashed run still counts |
 | No repeat reviews | always | A diff already approved is not reviewed again; a diff already blocked gets the same block re-issued without spending a review |
 | One review at a time | always | A second trigger in the same session while a review runs is skipped, not queued |
+| Hook time budget | `review.deadline_s = 240` | Reviewers get what is left of `deadline_s` after setup (snapshots, checkouts). If setup alone takes over `min(60, deadline_s / 2)` seconds, the turn is allowed with `⚠ Not reviewed: repo too slow to sandbox, see tagteam.log` |
 | Failure breaker | `limits.cooldown_min = 15` | A reviewer that errors twice in a row is paused for 15 minutes; if all are paused, the turn is allowed with `⚠ Not reviewed`. `tagteam doctor` shows paused reviewers and `tagteam doctor --clear` resumes them |
 
 If tagteam's own state files can't be read or written, it skips the review and says

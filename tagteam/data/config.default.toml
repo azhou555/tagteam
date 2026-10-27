@@ -11,7 +11,7 @@ min_changed_lines = 5
 [review]
 per_change = { small = 1, large = 2, high_risk = 2, docs = 2 }   # reviewers per change; docs = design + plan
 large_lines = 150           # a code change this big counts as "large"
-deadline_s = 240            # per-reviewer wall clock; Stop hook timeout is set above this
+deadline_s = 240            # review wall clock, setup included; Stop hook timeout is set above this
 block_at = "major"          # blocker | major | minor
 min_confidence = 0.6
 max_diff_chars = 60000      # total diff text sent to reviewers
