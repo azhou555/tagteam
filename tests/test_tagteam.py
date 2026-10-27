@@ -8,9 +8,10 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 from unittest import mock
 
-from tests.helpers import CFG, FULL, ROOT, HookRig, art, finding, fx, make_repo, sh, use_toml  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
+from tests.helpers import CFG, FULL, ROOT, HookRig, art, finding, fx, make_repo, sh, use_toml, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
 from tagteam import adapters, changes, classify, core, harnesses, install, live, router, runner, state, verdict  # noqa: E402
 from tagteam.harnesses import agy as agy_h, base as harness_base, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
 
@@ -595,6 +596,75 @@ class Live(unittest.TestCase):
         r = subprocess.run([sys.executable, "-m", "tagteam.live"], input="not json", capture_output=True,
                            text=True, cwd=ROOT)
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+
+
+class OnReview(unittest.TestCase):
+    RUN = {"ts": 1.0, "run_id": "r", "author": "claude", "session_id": "s", "tag": "turn", "round": 1, "max_rounds": 2,
+           "reviewers": ["copilot"], "action": "block", "blocking": 1, "advisory": 0, "failed": [], "duration": 3.0}
+
+    def setUp(self):
+        quiet = warnings.catch_warnings()                # the detached command is never waited on, by design
+        quiet.__enter__()
+        warnings.simplefilter("ignore", ResourceWarning)
+        self.addCleanup(quiet.__exit__, None, None, None)
+
+    def on_review(self, cmd):
+        write_user_config(f"[hooks]\non_review = {json.dumps(cmd)}\n")
+
+    def logged(self):
+        return [r for r in state.read_jsonl(state.path("tagteam.log")) if r["msg"] == "on_review command failed"]
+
+    def test_command_gets_the_run_on_stdin_and_outcome_in_env(self):
+        out = pathlib.Path(tempfile.mkdtemp())
+        self.on_review(f"cat > {out}/run.json; env | grep ^TAGTEAM_ | sort > {out}/env.tmp; mv {out}/env.tmp {out}/env")
+        live.record_run(dict(self.RUN))
+        for _ in range(100):
+            if (out / "env").exists():
+                break
+            time.sleep(0.05)
+        summary = "✗ Changes requested: 1 issue to fix (round 1/2)"
+        self.assertEqual(json.loads((out / "run.json").read_text()), {**self.RUN, "outcome": "blocked", "summary": summary})
+        env = (out / "env").read_text().splitlines()
+        self.assertEqual([e for e in env if not e.startswith("TAGTEAM_HOME=")],
+                         ["TAGTEAM_DEPTH=1", "TAGTEAM_OUTCOME=blocked", f"TAGTEAM_SUMMARY={summary}"])
+
+    def test_nothing_runs_when_unset_or_backfilling(self):
+        with mock.patch("subprocess.Popen") as popen:
+            live.record_run(dict(self.RUN))
+            self.on_review("true")
+            with mock.patch.object(state, "STATE", pathlib.Path(tempfile.mkdtemp())):
+                state.write_json(state.path("runs", "20200101T120000-aaaa", "request.json"), {"author": "claude"})
+                state.write_json(state.path("runs", "20200101T120000-aaaa", "verdict.json"), {"action": "allow"})
+                self.assertEqual(live.backfill(), 1)
+            popen.assert_not_called()
+            live.record_run(dict(self.RUN))
+            popen.assert_called_once()
+
+    def test_an_interrupted_review_runs_it_too(self):
+        now = time.time()
+        rec = {"run_id": "dead", "author": "claude", "session_id": "s", "tag": "turn", "round": 1, "max_rounds": 2,
+               "reviewers": ["copilot"], "started": now, "expires": now + 300}
+        code = ("import os, signal, sys; sys.path.insert(0, sys.argv[1]); from tagteam import live; "
+                "cm = live.tracking(eval(sys.argv[2])); cm.__enter__(); os.kill(os.getpid(), signal.SIGKILL)")
+        subprocess.run([sys.executable, "-c", code, str(ROOT), repr(rec)])
+        self.on_review("true")
+        with mock.patch("subprocess.Popen") as popen:
+            live.active()
+        self.assertEqual(popen.call_args.kwargs["env"]["TAGTEAM_OUTCOME"], "interrupted")
+
+    def test_a_broken_command_or_config_never_fails_the_record(self):
+        self.on_review("exit 3")
+        live.record_run(dict(self.RUN))
+        r, w = os.pipe()
+        os.close(r)
+        with mock.patch("subprocess.Popen", return_value=mock.Mock(stdin=os.fdopen(w, "wb"))):
+            live.record_run(dict(self.RUN, run_id="r1"))         # exited without reading stdin: not a failure
+        with mock.patch("subprocess.Popen", side_effect=OSError("no sh")):
+            live.record_run(dict(self.RUN, run_id="r2"))
+        write_user_config("[hooks]\non_review = 5\n")
+        live.record_run(dict(self.RUN, run_id="r3"))
+        self.assertEqual([r["run_id"] for r in state.read_jsonl(state.path("runs.jsonl"))], ["r", "r1", "r2", "r3"])
+        self.assertEqual([e["error"].split("(")[0] for e in self.logged()], ["OSError", "ConfigError"])
 
 
 class Encode(unittest.TestCase):

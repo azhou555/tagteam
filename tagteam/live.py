@@ -1,5 +1,5 @@
 """Live review state for the Claude status line, `tagteam watch`, `tagteam status` and the SwiftBar menu.
-Imports only `state` so a 2s tick stays cheap.
+Imports only `state` up front (config only when a run is recorded) so a 2s tick stays cheap.
 
 active/<run_id>.json   one per running review; its owner holds active/<run_id>.lock for its whole life
 runs.jsonl             one line per finished review (a "review" = a run, not a reviewer call)
@@ -75,10 +75,12 @@ def active(now=None):
             pass
         else:
             if rec and not alive:
-                _roll({**{k: rec[k] for k in ("run_id", "author", "session_id", "tag", "round", "max_rounds")},
-                            "ts": rec["started"], "prior": rec.get("prior", 0),
-                            "reviewers": list(rec["reviewers"]), "action": "allow", "blocking": 0, "advisory": 0,
-                            "failed": [], "duration": round(now - rec["started"], 1), "reason": "interrupted"})
+                run = {**{k: rec[k] for k in ("run_id", "author", "session_id", "tag", "round", "max_rounds")},
+                       "ts": rec["started"], "prior": rec.get("prior", 0),
+                       "reviewers": list(rec["reviewers"]), "action": "allow", "blocking": 0, "advisory": 0,
+                       "failed": [], "duration": round(now - rec["started"], 1), "reason": "interrupted"}
+                _roll(run)
+                _on_review(run)
         if not alive:                                # a live owner still holds it, and may rewrite its record
             with contextlib.suppress(OSError):
                 lock_path.unlink()
@@ -99,10 +101,29 @@ def _load_status(now):
 
 
 def record_run(run, now=None):
-    """Append a finished run and roll it into status.json. A review killed earlier is recorded first, so it
-    never lands after, and shows over, a later run."""
+    """Append a finished run, roll it into status.json, and hand it to the user's `hooks.on_review` command.
+    A review killed earlier is recorded first, so it never lands after, and shows over, a later run."""
     active()
     _roll(run, now)
+    _on_review(run)
+
+
+def _on_review(run):
+    """Start `hooks.on_review` detached with the run as JSON on stdin. Never waits on it, never raises."""
+    import subprocess
+    from . import config
+    try:
+        cmd = config.load()["hooks"]["on_review"]
+        if not cmd:
+            return
+        kind = outcome(run)[0]
+        env = {**os.environ, "TAGTEAM_OUTCOME": kind, "TAGTEAM_SUMMARY": summary(run), "TAGTEAM_DEPTH": "1"}
+        p = subprocess.Popen(["sh", "-c", cmd], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, env=env)
+        with contextlib.suppress(BrokenPipeError), p.stdin:     # a command may exit without reading it
+            p.stdin.write(json.dumps({**run, "outcome": kind, "summary": summary(run)}).encode())
+    except Exception as e:                           # a notification must never cost the hook its verdict
+        state.log("on_review command failed", error=repr(e))
 
 
 def _roll(run, now=None):
@@ -142,7 +163,7 @@ def backfill():
                      "advisory": len(d.get("advisory", [])), "failed": d.get("failed", []),
                      "duration": max(calls.get(v.parent.name, [0]))})
     for run in runs:
-        record_run(run, now=run["ts"])
+        _roll(run, now=run["ts"])                    # history: no on_review
     return len(runs)
 
 

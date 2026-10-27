@@ -26,6 +26,9 @@ max_rounds_per_turn = 2     # blocking rounds per turn before we always allow
 cooldown_min = 15
 max_reviews_per_hour = 30   # review runs across all sessions and agents; a runaway-loop stop
 
+[hooks]
+on_review = ""              # shell command run after each review, the run as JSON on stdin; user config only
+
 [classify]
 plan = ["tasks/*", "*todo.md", "*plan*.md", "*PLAN*.md", "docs/plans/*", "*/.claude/plans/*"]
 design = ["*design*.md", "*DESIGN*.md", "docs/*.md", "*/adr/*", "RFC*", "*.puml", "*.mmd", "*spec*.md", "*SPEC*.md"]
