@@ -16,6 +16,7 @@ SWIFTBAR_DOMAIN = "com.ameba.SwiftBar"
 SWIFTBAR_DIR = H / "SwiftBar"                                       # used only if SwiftBar has no folder yet
 SWIFTBAR_OLD_DIR = state.HOME / "swiftbar"                          # earlier default; SwiftBar skips hidden dirs
 SWIFTBAR_PLUGIN = "tagteam.2s.sh"                                   # SwiftBar reads the refresh interval from the name
+SWIFTBAR_ENABLE = "swiftbar://enableplugin?name=tagteam"           # undoes a "Disable Plugin" SwiftBar remembers
 LAUNCHER = H / "Applications" / "tagteam.app"                       # Spotlight: type "tagteam" to open the menu bar item
 LAUNCHER_MARK = "Contents/Resources/tagteam-launcher"               # ownership marker inside the bundle
 SWIFTBAR_MARK = "# Written by `tagteam install`; removed by `tagteam uninstall`."
@@ -133,6 +134,7 @@ def swiftbar_plugin():
             "# <swiftbar.hideAbout>true</swiftbar.hideAbout>\n"
             "# <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>\n"
             "# <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>\n"
+            "# <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>\n"
             f"{SWIFTBAR_MARK}\n"
             f"{env}exec {entry()} swiftbar\n")
 
@@ -180,6 +182,7 @@ def install_swiftbar(dry_run=False):
         subprocess.run(["pkill", "-x", "SwiftBar"], check=False)    # SwiftBar reads its folder only at launch
         time.sleep(1)
     subprocess.run(["open", "-g", "-a", str(SWIFTBAR_APP)], check=False)
+    subprocess.run(["open", "-g", SWIFTBAR_ENABLE], check=False)
     subprocess.run(["open", "-g", "swiftbar://refreshallplugins"], check=False)
     print(f"menu bar: wrote {plugin}")
     install_launcher()
@@ -191,8 +194,9 @@ def install_launcher():
         print(f"launcher: skipped. {LAUNCHER} exists and isn't tagteam's")
         return
     # Always a clean restart: a running SwiftBar can be stuck with no items, and `open` on a running one only
-    # says it's already open.
-    script = (f'do shell script "pkill -x SwiftBar; sleep 1; open -g -a \'{SWIFTBAR_APP}\'"\n'
+    # says it's already open. Then re-enable the plugin: SwiftBar keeps a disabled plugin hidden across restarts.
+    script = (f'do shell script "pkill -x SwiftBar; sleep 1; open -g -a \'{SWIFTBAR_APP}\'; '
+              f'open -g \'{SWIFTBAR_ENABLE}\'"\n'
               'display notification "Look for the sage two-person icon in the menu bar." with title "tagteam"')
     shutil.rmtree(LAUNCHER, ignore_errors=True)
     LAUNCHER.parent.mkdir(parents=True, exist_ok=True)

@@ -66,6 +66,8 @@ class Install(unittest.TestCase):
             with mock.patch.object(install.subprocess, "run") as run:
                 install.install_swiftbar()
             self.assertEqual(run.call_args_list[0].args[0][:3], ["open", "-g", "-a"])   # folder kept: no restart
+            self.assertIn(["open", "-g", install.SWIFTBAR_ENABLE], [c.args[0] for c in run.call_args_list])
+            self.assertIn("<swiftbar.hideDisablePlugin>true", plugin.read_text())
             self.assertTrue(os.access(plugin, os.X_OK))
             out = subprocess.run([str(plugin)], capture_output=True, text=True).stdout
             self.assertRegex(out.splitlines()[0], r"^:person\.2\.fill: :[a-z.]+: ")
@@ -180,6 +182,8 @@ class Install(unittest.TestCase):
             install.install_launcher()
             self.assertTrue((launcher / "Contents" / "MacOS").is_dir())
             self.assertTrue((launcher / install.LAUNCHER_MARK).exists())
+            script = real_run(["osadecompile", str(launcher)], capture_output=True, text=True).stdout
+            self.assertIn(f"open -g '{install.SWIFTBAR_ENABLE}'", script)
             install.install_launcher()                                    # idempotent rebuild
             install.uninstall()
             self.assertFalse(launcher.exists())
