@@ -83,6 +83,20 @@ class Install(unittest.TestCase):
         with mock.patch.object(install.shutil, "which", return_value=None):
             self.assertIsNone(install._swiftbar_dir())                   # no `defaults`: SwiftBar is a no-op
 
+    def test_no_macos_extras_leaves_menu_bar_launcher_and_status_line_alone(self):
+        self.settings.write_text(json.dumps({"statusLine": {"type": "command", "command": "ponytail"}}))
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"TAGTEAM_NO_MACOS_EXTRAS": "1"}), contextlib.redirect_stdout(out), \
+                mock.patch.object(install, "SWIFTBAR_APP", pathlib.Path(tempfile.mkdtemp())), \
+                mock.patch.object(install, "install_launcher") as launcher, \
+                mock.patch.object(install.subprocess, "run") as run:
+            install.install(["claude"])
+            install.uninstall()
+        self.assertIn("menu bar: skipped", out.getvalue())
+        launcher.assert_not_called()
+        run.assert_not_called()
+        self.assertEqual(json.loads(self.settings.read_text())["statusLine"]["command"], "ponytail")
+
     def test_swiftbar_folder_set_when_unset_or_hidden_legacy(self):
         app, home = pathlib.Path(tempfile.mkdtemp()), pathlib.Path(tempfile.mkdtemp())
         legacy = home / ".tagteam" / "swiftbar"

@@ -5,6 +5,10 @@ before the turn ends. Works the same whether the author is Claude Code, Codex,
 Copilot CLI, or Antigravity (`agy`). Review work is sharded across the three
 non-author agents rather than broadcast to all of them.
 
+This is the original design (2026-10-25). Packaging, the config shape, reviewer consent and the loop limits
+changed later: see [docs/superpowers/specs/2026-10-26-packaging-design.md](docs/superpowers/specs/2026-10-26-packaging-design.md).
+Where the two differ, the spec wins.
+
 ## 0. Verified environment (2026-10-25)
 
 | Agent | Version | Hook config | Events we need | Headless reviewer call |
@@ -58,14 +62,14 @@ per agent. The adapter only translates: agent stdin → `HookEvent`, and `Verdic
 the agent's expected stdout and exit code. All logic lives in the core.
 
 ```
-~/.tagteam/
-  config.toml                 # agents, routing, budgets, ignore globs
-  bin/tagteam                 # `hook <agent> <phase>` | `review <run-id>` | `status` | `install` | `uninstall`
-  tagteam/core/               # change detection, classify, router, runner, verdict
-  tagteam/adapters/           # claude.py codex.py copilot.py agy.py  (~50 lines each)
-  prompts/{code,design,plan}.md + lenses/{correctness,design,tests}.md
-  schema/{hook_event,review_request,findings}.schema.json
-  state/<repo-hash>/          # ledger.jsonl, router.json, runs/<run-id>/{request,<reviewer>.json,verdict}.json
+~/.tagteam/                   # user data only (override with TAGTEAM_HOME)
+  config.toml                 # your overrides: reviewers.use, models, limits, routing
+  state/                      # runs.jsonl, per-session state, reservations, runs/<run-id>/, tagteam.log
+
+tagteam repo/                 # the installed package (`tagteam` console script, `uv tool install`)
+  tagteam/                    # cli, core, router, runner, sandbox, limits, live, doctor, install, config
+  tagteam/harnesses/          # one module per agent (claude codex copilot agy): hooks + headless reviewer
+  tagteam/data/               # config.default.toml, rubrics.toml, findings schema, hook fixtures
 ```
 
 ## 2. Invariants (non-negotiable)
