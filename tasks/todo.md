@@ -33,7 +33,8 @@ Spec: `../DESIGN.md`. Each phase ends in something verifiable.
 - [x] Claude author → Copilot blocked → Claude rebutted (prompt demanded exact content) → allowed
 - [x] Copilot author → agy blocked → Copilot fixed the bug
 - [~] agy author → hooks fire and Copilot reviews, but Copilot approved the bug twice (model variance on a 1-reviewer small change)
-- [ ] Codex author: needs the user to approve hooks via `/hooks` first
+- [x] Codex author → Copilot blocked 2 planted bugs → Codex fixed both → agy allowed (2026-10-27). When the prompt
+      demanded the code verbatim, Codex rebutted instead and the confirm round accepted it, as with Claude.
 - [ ] Claude plan gate (ExitPlanMode) live test: not possible headless; verify in an interactive plan-mode session
 - [x] Recursion: reviewer runs never start nested reviews (unit + depth-guard test; all live reviewer runs show no nested runs)
 - [x] Loop cap (unit tests)
