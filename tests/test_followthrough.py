@@ -106,6 +106,59 @@ class FollowThrough(HookRig, unittest.TestCase):
         self.assertEqual(self.stop(), {})
         self.assertEqual(len(self.calls), 2)
 
+    def small_fix(self, first="b = 0"):
+        pathlib.Path(self.repo, "feature.py").write_text(f"{first}\n" + f"a = {self.n}\n" * 19)
+
+    def session(self):
+        return state.read_json(state.path("sessions", "claude-sess1.json"))
+
+    def test_open_issues_carry_into_the_next_prompt(self):
+        self.start()
+        self.stop(issues(2))
+        self.start()
+        self.small_fix()
+        out = self.stop(change=False)
+        self.assertIn("copilot reviewed 2 changed lines", out["systemMessage"])   # under min_changed_lines
+        self.assertIn("alpha breaks when input is empty", self.last_prompt())
+        self.assertIn("✓ Issues resolved: all 2 fixed and re-checked", self.seg())
+        self.start()
+        self.small_fix("c = 0")
+        self.stop(change=False)
+        self.assertEqual(len(self.calls), 2)                 # resolved: nothing carries
+
+    def test_undoing_a_carried_turn_does_not_resolve_its_issues(self):
+        self.start()
+        self.stop(issues(1))
+        self.start()
+        self.small_fix()
+        self.stop(issues(1), change=False)
+        self.n = 0
+        self.edit()                                          # back to the file as the turn found it
+        out = self.stop(change=False)
+        self.assertEqual(len(self.calls), 3)
+        self.assertNotIn("reverted", str(out) + self.seg())
+        self.assertIn("✓ Issues resolved: all 1 fixed and re-checked", self.seg())
+
+    def test_confirm_round_closes_the_cycle(self):
+        self.start()
+        for _ in range(3):
+            self.stop(issues(1))
+        self.assertIn("⚠ Unresolved: 1 issue still open after 2 fix rounds", self.seg())
+        self.assertEqual(self.session()["prior"], [])
+        self.start()
+        self.small_fix()
+        self.stop(change=False)
+        self.assertEqual(len(self.calls), 3)
+
+    def test_carried_issues_without_a_change_spawn_nothing(self):
+        self.start()
+        self.stop(issues(1))
+        self.start()
+        self.assertEqual(self.stop(change=False, message="Not a bug"), {})
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("✗ Changes requested: 1 issue to fix (round 1/2)", self.seg())
+        self.assertEqual(len(self.session()["prior"]), 1)
+
     def test_rebuttal_without_changes_is_rechecked(self):
         self.start()
         self.stop(issues(1))

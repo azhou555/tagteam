@@ -18,11 +18,12 @@ def turn_start(ev, cfg):
     repo = changes.repo_root(ev.cwd)
     snap = changes.snapshot(repo) if repo else None
     with state.locked(_session_file(ev).stem):
+        prior = (state.read_json(_session_file(ev)) or {}).get("prior") or []   # open until a verdict closes them
         state.write_json(_session_file(ev), {
             "turn_id": ev.turn_id or uuid.uuid4().hex[:12], "started": time.time(), "cwd": ev.cwd,
             "repo": repo, "baseline": snap, "turn_baseline": snap,    # baseline advances each round; turn_baseline never
             "refs": changes.refs(repo) if repo else {},
-            "prompt": ev.prompt, "round": 0, "touched": [], "reviewed_digests": {}, "prior": [],
+            "prompt": ev.prompt, "round": 0, "touched": [], "reviewed_digests": {}, "prior": prior, "carried": bool(prior),
             "plan_rounds": 0, "plan_prior": [], "outside_touched": [], "reverted_prior": [],
         })
     return None
@@ -315,8 +316,8 @@ def _turn_end(ev, cfg, lock):
         outside = changes.outside_changes(s.get("outside_touched", []), {}, ignore)
         if repo and s.get("turn_baseline") and head:
             whole = changes.diff_trees(repo, s["turn_baseline"], head, ignore) + outside
-            if not whole and not changes.ref_activity(repo, s.get("refs", {}), changes.refs(repo)):
-                return _reverted(ev, cfg, s, sf, round_no, head)
+            if not whole and not s.get("carried") and not changes.ref_activity(repo, s.get("refs", {}), changes.refs(repo)):
+                return _reverted(ev, cfg, s, sf, round_no, head)   # carried issues: undoing this turn fixes nothing
         elif outside:
             whole = outside
     rebuttal = changed == 0 and bool(prior)
@@ -325,8 +326,8 @@ def _turn_end(ev, cfg, lock):
             state.log("rebuttal not re-checked (nothing to diff)", author=ev.agent, session=ev.session_id)
             return None
         artifacts, changed = whole, sum(a["lines_changed"] for a in whole)
-    # Round 1 skips trivial edits; later rounds re-check any fix, however small.
-    elif changed == 0 or (s["round"] == 0 and changed < cfg["triggers"]["min_changed_lines"]):
+    # Round 1 skips trivial edits; later rounds and carried issues re-check any fix, however small.
+    elif changed == 0 or (s["round"] == 0 and not prior and changed < cfg["triggers"]["min_changed_lines"]):
         return None
     if not wanted(ev, cfg, artifacts):
         return None
@@ -336,7 +337,7 @@ def _turn_end(ev, cfg, lock):
 
     def advance(cur):
         cur["round"] = round_no
-        cur["prior"], cur["reverted_prior"] = open_issues, []
+        cur["prior"], cur["reverted_prior"] = [] if confirm else open_issues, []    # the confirm round is the last word
         if head:
             cur["baseline"] = head                   # next round reviews only the fix delta
         for a in artifacts:
