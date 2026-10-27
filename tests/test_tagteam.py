@@ -259,13 +259,16 @@ class EndToEnd(HookRig, unittest.TestCase):
             out = self.run_hook("claude", "x", payload)
         return out, new_turn, state.read_json(sf)
 
-    def test_turn_end_leaves_a_turn_started_mid_review_alone(self):
+    def test_turn_started_mid_review_keeps_its_state_and_inherits_the_open_issues(self):
         self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
         pathlib.Path(self.repo, "feature.py").write_text("def f(x):\n    return x[0]\n" * 4)
         out, new_turn, after = self.review_racing_a_new_turn(self.claude("Stop", last_assistant_message="done"))
         self.assertEqual(out["decision"], "block")                       # the verdict still reaches the author
-        self.assertEqual(after, new_turn)
-        self.assertEqual((after["prompt"], after["round"], after["prior"]), ("next request", 0, []))
+        rest = lambda d: {k: v for k, v in d.items() if k not in ("prior", "carried")}
+        self.assertEqual(rest(after), rest(new_turn))
+        self.assertEqual((after["prompt"], after["round"]), ("next request", 0))
+        self.assertEqual(([(f["file"], f["claim"]) for f in after["prior"]], after["carried"]),
+                         ([("feature.py", "off by one in loop")], True))
         logged = [r for r in state.read_jsonl(state.path("tagteam.log"))
                   if r["msg"] == "new turn started during review; session state not updated"]
         self.assertEqual(len(logged), 1)

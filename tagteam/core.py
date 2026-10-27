@@ -275,9 +275,9 @@ def wanted(ev, cfg, artifacts):
     return bool({a["kind"] for a in classify.annotate(artifacts, cfg)} & set(cfg["triggers"]["kinds"]))
 
 
-def _write_back(sf, turn_id, update):
+def _write_back(sf, turn_id, update, open_issues=None):
     """update(session) and save it, unless a new turn has started since the review began: its fresh session
-    state wins, and the verdict reaches the author anyway."""
+    state wins, and the verdict reaches the author anyway. `open_issues`, when given, still carry into it."""
     with state.locked(sf.stem):
         cur = state.read_json(sf)
         if not cur:
@@ -285,6 +285,9 @@ def _write_back(sf, turn_id, update):
         if cur.get("turn_id") != turn_id:
             state.log("new turn started during review; session state not updated", session=sf.stem,
                       reviewed_turn=turn_id, current_turn=cur.get("turn_id"))
+            if open_issues is not None:
+                cur["prior"], cur["carried"] = open_issues, bool(open_issues) or cur.get("carried", False)
+                state.write_json(sf, cur)
             return
         update(cur)
         state.write_json(sf, cur)
@@ -344,7 +347,7 @@ def _turn_end(ev, cfg, lock):
             if os.path.isabs(a["path"]):
                 cur["reviewed_digests"][a["path"]] = changes.file_digest(a["path"])
         cur["touched"] = []
-    _write_back(sf, s.get("turn_id"), advance)
+    _write_back(sf, s.get("turn_id"), advance, [] if confirm else open_issues)
     state.log("review", run=str(run_dir), action=action, author=ev.agent, round=round_no)
     return {"action": action, "message": msg}
 
