@@ -62,8 +62,9 @@ Two follow-ups:
 - Run `tagteam doctor` (see [Doctor](#doctor)) to confirm everything is wired.
 
 After that, work normally. A review runs when a turn ends with at least 5 changed lines (any change in later
-rounds). Findings arrive as a message starting with `[tagteam]`. Reviewers also see the turn's git activity
-(new commits, rewritten history, pushes), but git activity alone never starts a review.
+rounds, or while earlier issues are still open). Findings arrive as a message starting with `[tagteam]`.
+Reviewers also see the turn's git activity (new commits, rewritten history, pushes), but git activity alone
+never starts a review.
 
 Skip reviews with `TAGTEAM=off claude` (one session) or `touch <repo>/.tagteam-off` (one repo).
 
@@ -86,9 +87,14 @@ the notice at the end of the turn, in `tagteam watch` and `tagteam status`, and 
 | `⚠ Unresolved` | apricot | The last re-check still found issues after the fix rounds (`N issues still open after 2 fix rounds`); the turn is allowed |
 | `⚠ Not reviewed` | yellow | No reviewer was available, no reviewers are configured, the review limit was reached, the repo was too slow to sandbox, or tagteam hit a state error |
 | `⚠ Review failed` | yellow | Every reviewer errored or timed out |
+| `⚠ Review interrupted` | yellow | The review stopped before reviewers finished (`stopped before reviewers finished`), for example because its hook process was killed; open issues stay open |
 
 Requested changes stay visible until a later review settles them, so you can tell whether issues were
 fixed. If the follow-up review could not run, the notice adds `· N earlier issues not re-checked`.
+Open issues carry over to the next prompt in the same session. A review that finds no blocking issues,
+undoing the changes that raised them, or the last confirm review (`⚠ Unresolved`) closes them. Until then,
+any change in a later turn is reviewed against them, however small. A failed, skipped or interrupted review
+leaves them open.
 The author can also answer with a rebuttal and no edits; that is re-reviewed too.
 
 Each line also shows how long ago it happened, today's review count, and `⚠ N hook errors (24h)` when hooks
@@ -139,6 +145,20 @@ Defaults work with no config beyond the reviewer list. Put your changes in `~/.t
 | `limits.*` | see [Limits](#limits) | Loop stops |
 | `routing.mode` | `ordered` | `ordered` takes the first available agents from `reviewers.use`; `quota` is for personal plans (below) |
 | `classify.plan`, `.design`, `.risk` | glob lists | Which paths count as plans, design docs, or high-risk code |
+| `hooks.on_review` | `""` (off) | Shell command run after each review (below) |
+
+**Review notifications.** Set `hooks.on_review` to a shell command and tagteam starts it, detached, each
+time a review is recorded, including skipped and interrupted ones. The command gets the run as JSON on
+stdin, with two extra fields: `outcome` (`passed`, `blocked`, `resolved`, `unresolved`, `unreviewed`,
+`failed`, `interrupted`) and `summary` (the status-line text). The same two values are in the environment as
+`TAGTEAM_OUTCOME` and `TAGTEAM_SUMMARY`, and `TAGTEAM_DEPTH` is set, so an agent the command starts is not
+reviewed. tagteam never waits for the command, and a failure is only logged. Only `~/.tagteam/config.toml`
+can set it. For example, a macOS notification:
+
+```toml
+[hooks]
+on_review = 'osascript -e "display notification \"$TAGTEAM_SUMMARY\" with title \"tagteam\""'
+```
 
 **Quota mode.** If you are on personal plans and want to stretch their usage limits, set
 `routing.mode = "quota"`. Reviewer choice within `reviewers.use` then follows each agent's remaining
@@ -171,7 +191,8 @@ defaults:
 Every other key in a repo file is ignored, and so is a value that moves the other way. That includes
 `review.ignore` (adding patterns would hide code from review; your own list still applies),
 `review.deadline_s`, `review.max_diff_chars`, `classify.plan`, `classify.design`, `limits.cooldown_min`,
-`[reviewers]`, models, and `[routing]`: which vendors see your code is your choice, not a cloned repo's.
+`[reviewers]`, models, `[routing]` and `[hooks]`: which vendors see your code, and what runs on your
+machine, is your choice, not a cloned repo's.
 Each ignored key is listed in `tagteam.log` under `repo config ignored`.
 
 `.tagteam.toml` can't turn reviews off, but two switches outside it do. A `<repo>/.tagteam-off` file turns
