@@ -118,7 +118,7 @@ def run(probe, clear):
             print(f"resumed paused reviewers: {', '.join(was_paused)}")
     ok = True
     try:
-        cfg = config.load()
+        cfg = config.load(note_legacy=True)
     except config.ConfigError as e:
         print(f"config error: {e}")
         cfg, ok = None, False

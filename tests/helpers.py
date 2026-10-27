@@ -24,6 +24,7 @@ def _clean_run(self, result=None):
     cooldowns never leak between tests or modules."""
     shutil.rmtree(pathlib.Path(TMP_HOME) / "state", ignore_errors=True)
     (pathlib.Path(TMP_HOME) / "config.toml").unlink(missing_ok=True)
+    config._legacy_noted = False
     return _run(self, result)
 
 

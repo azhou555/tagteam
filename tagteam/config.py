@@ -1,6 +1,7 @@
 """Config: bundled defaults < ~/.tagteam/config.toml < <repo>/.tagteam.toml (repo may only add scrutiny: REPO_RULES).
 
-Old-shape files keep loading through a shim that maps their keys and logs one deprecation line.
+Old-shape files keep loading through a shim that maps their keys. `install`, `doctor` and `config` log the old
+keys once per process (`note_legacy`); hooks never do.
 """
 import copy
 import json
@@ -20,6 +21,9 @@ LEGACY_QUOTA = ("primary_use", "tier_penalty", "unknown_headroom")
 
 class ConfigError(Exception):
     pass
+
+
+_legacy_noted = False
 
 
 def _merge(base, over):
@@ -179,31 +183,37 @@ def _read(p, label, defaults):
             raise ValueError(f"{bad} must be a finite number")
     except (OSError, ValueError, AttributeError, TypeError) as e:
         raise ConfigError(f"{p}: {e}") from e
-    if legacy:
-        state.log("deprecated config keys", file=str(p), source=label, keys=legacy)
-    return new
+    return new, [{"file": str(p), "source": label, "keys": legacy}] if legacy else []
 
 
-def load_with_sources(repo=None):
+def load_with_sources(repo=None, note_legacy=False):
+    global _legacy_noted
     cfg = tomllib.loads(resources.text("config.default.toml"))
     sources = dict.fromkeys(flat(cfg), "default")
+    legacy = []
     user = state.HOME / "config.toml"
     if user.is_file():
-        over = _read(user, "user", cfg)
+        over, found = _read(user, "user", cfg)
+        legacy += found
         _merge(cfg, over)
         sources.update(dict.fromkeys(flat(over), "user"))
     rf = repo and (pathlib.Path(repo) / ".tagteam.toml")
     if rf and rf.is_file():
-        over, dropped = _conservative(cfg, _read(rf, "repo", cfg))
+        over, found = _read(rf, "repo", cfg)
+        legacy += found
+        over, dropped = _conservative(cfg, over)
         if dropped:
             state.log("repo config ignored", file=str(rf), keys=sorted(dropped))
         _merge(cfg, over)
         sources.update(dict.fromkeys(flat(over), "repo"))
+    if note_legacy and legacy and not _legacy_noted:
+        _legacy_noted = True
+        state.log("deprecated config keys", files=legacy)
     return cfg, sources
 
 
-def load(repo=None):
-    return load_with_sources(repo)[0]
+def load(repo=None, note_legacy=False):
+    return load_with_sources(repo, note_legacy)[0]
 
 
 def save_user(table, key, items):

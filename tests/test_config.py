@@ -33,6 +33,7 @@ class Load(ConfigCase):
         self.user('[review]\nmax_rounds = 3\n[routing]\nsmall = 2\nlarge_lines = 99\ncooldown_min = 7\n'
                   'primary_use = "never"\n[agents.codex]\nmodel = "x"\ntier = "reviewer"\n')
         cfg = config.load()
+        self.assertNotIn("deprecated config keys", self.log_msgs())      # hooks load this way: they never log it
         self.assertEqual(cfg["limits"]["max_rounds_per_turn"], 3)
         self.assertEqual(cfg["review"]["per_change"]["small"], 2)
         self.assertEqual(cfg["review"]["per_change"]["large"], 2)       # untouched default survives
@@ -41,7 +42,16 @@ class Load(ConfigCase):
         self.assertEqual(cfg["reviewers"]["codex"]["model"], "x")
         self.assertEqual(cfg["routing"]["quota"]["primary_use"], "never")
         self.assertEqual(cfg["routing"]["quota"]["agents"]["codex"]["tier"], "reviewer")
-        self.assertEqual(self.log_msgs().count("deprecated config keys"), 1)
+        config.load(note_legacy=True)
+        config.load(note_legacy=True)
+        self.assertEqual(self.log_msgs().count("deprecated config keys"), 1)    # once per process
+
+    def test_config_command_notes_legacy_keys(self):
+        self.user('[review]\nmax_rounds = 3\n')
+        with mock.patch("sys.stdout", new=io.StringIO()):
+            cli.show_config()
+        logged = [r for r in state.read_jsonl(state.path("tagteam.log")) if r["msg"] == "deprecated config keys"]
+        self.assertEqual([f["keys"] for f in logged[0]["files"]], [["review.max_rounds"]])
 
     def test_new_keys_win_over_legacy(self):
         self.user('[review]\nmax_rounds = 3\n[limits]\nmax_rounds_per_turn = 5\n')

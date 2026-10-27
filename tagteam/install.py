@@ -97,7 +97,7 @@ def set_consent(reviewers, authors, yes, dry_run=False):
 def install(agents, dry_run=False):
     if config.migrate_routing(dry_run):
         print(f"{'would keep' if dry_run else 'kept'} quota routing for your existing config (routing.mode = \"quota\")")
-    cfg = config.load()
+    cfg = config.load(note_legacy=True)
     stop_timeout = cfg["review"]["deadline_s"] + 60
     entry_cmd = entry()
     for name, h in harnesses.ALL.items():

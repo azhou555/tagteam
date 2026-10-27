@@ -119,7 +119,7 @@ def status(days):
 
 def show_config():
     try:
-        cfg, sources = config.load_with_sources(core.changes.repo_root(os.getcwd()))
+        cfg, sources = config.load_with_sources(core.changes.repo_root(os.getcwd()), note_legacy=True)
     except config.ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return 1
