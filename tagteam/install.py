@@ -88,19 +88,25 @@ def _key(fd):
     return PICK_KEYS.get(ch)
 
 
-def _pick(detected, preselected, notes):
-    """Arrow keys move, space selects, enter saves. A pick's number is its place in the review order."""
+def _pick(detected, preselected, notes, ordered=True):
+    """Arrow keys move, space selects, enter saves. Reviewers (`ordered`): a pick's number is its place in the
+    review order. Authors: a pick is just marked."""
     import termios
     import tty
     fd, out = sys.stdin.fileno(), sys.stdout
     cursor, chosen, c = 0, [detected.index(n) for n in preselected], _paint()
-    print(c.bold("Pick the agents that may review your changes.") + " Each one you pick "
-          + c.bold(c.fg(ATTENTION, "receives your diffs")) + ".\n"
-          + c.dim("↑/↓ move · space select · enter save. Numbers are the review order; pick none to save nothing."))
+    if ordered:
+        print(c.bold("Pick the agents that may review your changes.") + " Each one you pick "
+              + c.bold(c.fg(ATTENTION, "receives your diffs")) + ".\n"
+              + c.dim("↑/↓ move · space select · enter save. Numbers are the review order; "
+                      "pick none to save nothing."))
+    else:
+        print("\n" + c.bold("Pick the agents whose turns get reviewed.") + " An unpicked agent works unreviewed.\n"
+              + c.dim("↑/↓ move · space select · enter save."))
 
     def row(i, name):
         mark = c.brand("›") if i == cursor else " "
-        num = c.bold(c.fg(GOOD, str(chosen.index(i) + 1))) if i in chosen else " "
+        num = " " if i not in chosen else c.bold(c.fg(GOOD, str(chosen.index(i) + 1) if ordered else "x"))
         return f"\x1b[2K{mark} [{num}] {c.agent(name, f'{name:8}')}{c.dim(notes.get(name, ''))}\n"
 
     def draw(first):
@@ -176,6 +182,20 @@ def choose_reviewers(reviewers, yes):
     return None
 
 
+def choose_authors(authors, yes, agents):
+    """The author list to save as `authors.review`, or None to keep it. Asked only on a terminal (a script passes
+    --authors). Agents this install doesn't wire keep their setting."""
+    if authors is not None or yes or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return authors
+    wired = [n for n in harnesses.ALL if n in agents and harnesses.get(n).author]
+    current = config.load()["authors"]["review"]
+    if not wired:
+        return None
+    picked = _pick(wired, [n for n in wired if n in current], {}, ordered=False)
+    new = [n for n in harnesses.ALL if n in picked or (n in current and n not in wired)]
+    return None if set(new) == set(current) else new
+
+
 def save_consent(reviewers, authors, dry_run=False):
     """Save who may review (`reviewers.use`; None leaves it) and whose turns are reviewed (`authors.review`)."""
     saved, c = {}, _paint()
@@ -236,9 +256,10 @@ def agent_lines(c=None):
         yield f"  {c.agent(name, f'{name:8}')}installed · {sign_in} · {hooks}"
 
 
-def plan(agents):
+def plan(agents, menubar=True):
     """Everything install would change, worked out without writing: each agent's hook check, every hook file
-    rendered (name -> (path, old text, new text)), whether the routing migration applies, and the menu bar line."""
+    rendered (name -> (path, old text, new text)), whether the routing migration applies, and the menu bar line
+    (None: --no-menubar)."""
     routing = config.migrate_routing(dry_run=True)
     cfg = config.load(note_legacy=True)
     stop_timeout = 2 * cfg["review"]["deadline_s"] + 60     # a wait for a background review, then our own
@@ -253,7 +274,7 @@ def plan(agents):
                 continue
             files[name] = h.author.install(entry_cmd, stop_timeout, True)
     return {"entry": entry_cmd, "stop_timeout": stop_timeout, "files": files, "routing": routing,
-            "menubar": menubar_plan()}
+            "menubar": menubar_plan() if menubar else None}
 
 
 def _same(old, new):
@@ -298,10 +319,14 @@ def summary(p, reviewers, authors, c=None):
                     if reviewers is not None and reviewers != current
                     else c.dim("reviewers.use stays ") + _names(current, c) if current
                     else c.fg(ATTENTION, "reviewers.use not set: nothing is reviewed until you pick reviewers"))
-    if authors is not None:
-        settings.append(c.fg(CHANGE, "authors.review = ") + (_names(authors, c) or "(none)"))
+    current = config.load()["authors"]["review"]
+    settings.append(c.fg(CHANGE, "authors.review = ")
+                    + (_names(authors, c) or c.fg(ATTENTION, "(none): nothing is reviewed"))
+                    if authors is not None and authors != current
+                    else c.dim("authors.review stays ") + (_names(current, c) or c.fg(ATTENTION, "(none)")))
     rows += [(_tilde(state.HOME / "config.toml") if i == 0 else "", s) for i, s in enumerate(settings)]
-    rows.append(("menu bar", change(p["menubar"])))
+    rows.append(("menu bar", change(p["menubar"] or "skipped (--no-menubar): SwiftBar and the launcher are left "
+                                                    "as they are")))
     w = max(len(label) for label, _ in rows) + 3
     return ("\n" + c.bold("tagteam install will:") + "\n" + "".join(f"  {label:{w}}{text}\n" for label, text in rows)
             + c.dim("Each file is copied beside itself as <name>.tagteam-bak-<time> before it changes."))
@@ -332,7 +357,8 @@ def apply(p):
         if not _same(old, new):                           # an up-to-date file keeps its bytes and gets no backup
             harnesses.get(name).author.install(p["entry"], p["stop_timeout"], False)
     try:
-        install_swiftbar()
+        if p["menubar"] is not None:
+            install_swiftbar()
     except (OSError, subprocess.CalledProcessError) as e:
         print(_paint().fg(ATTENTION, f"menu bar: failed ({e}).") + " Hooks are in place, so reviews still run; "
               "re-run install to retry.")
@@ -368,7 +394,7 @@ def next_steps(p):
     doctor.run(False, False)
 
 
-def run(agents, reviewers, authors, yes, dry_run):
+def run(agents, reviewers, authors, yes, dry_run, menubar=True):
     """`tagteam install`: say what tagteam is, choose reviewers, show the plan, confirm, apply, say what's next.
     Nothing is written before the confirm. Returns the exit code."""
     c = _paint()
@@ -382,7 +408,8 @@ def run(agents, reviewers, authors, yes, dry_run):
         return 1
     try:
         use = choose_reviewers(reviewers, yes)
-        p = plan(agents)
+        authors = choose_authors(authors, yes, agents)
+        p = plan(agents, menubar)
         print(summary(p, use, authors, c))
         if dry_run:
             print("\n" + (diffs(p, c) or c.dim("no hook file changes")) + "\n\n" + c.bold("(dry run: nothing was written)"))

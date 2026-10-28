@@ -37,7 +37,9 @@ you confirm:
 
 1. **Consent.** It lists the agents that could review, each with the model it reviews with, and says that
    each one **receives your diffs**. You pick which may review and in what order (↑/↓, space, enter). Your
-   saved list is preselected; picking none saves none.
+   saved list is preselected; picking none saves none. Then you pick **whose turns get reviewed** (every
+   agent, unless you've changed it); an agent you leave out works unreviewed. This second picker shows only
+   on a terminal; scripts use `--authors`.
 2. **Summary.** One line per file: tagteam's hooks added, updated or already up to date, the Claude status
    line taken over (your own command still runs), the config keys it will save, and the menu bar item.
    `Apply? [Y/n]`. `--dry-run` prints the same summary plus a diff of each file, and stops.
@@ -64,6 +66,7 @@ Non-interactive installs (scripts, CI images) give the consent on the command li
 tagteam install --yes --reviewers codex,claude        # in preference order
 tagteam install --yes                                 # no prompt or confirm; keeps your saved reviewer list
 tagteam install --authors claude,codex                # limit whose turns get reviewed
+tagteam install --no-menubar                          # leave SwiftBar and the Spotlight launcher alone
 ```
 
 Two follow-ups:
@@ -168,7 +171,8 @@ two-person icon, a status icon, and today's review count (or the elapsed time wh
 dropdown lists running reviews, open issues grouped as Blocking and Not blocking, counts, and recent
 reviews with each one's kind; click one to open its run folder. If SwiftBar
 has no plugin folder yet, `install` uses `~/SwiftBar`. `install` also adds `~/Applications/tagteam.app`, so
-typing "tagteam" in Spotlight brings the item back. Without SwiftBar, or on Linux, the menu bar is skipped.
+typing "tagteam" in Spotlight brings the item back. Without SwiftBar, or on Linux, the menu bar is skipped;
+`--no-menubar` skips it too and leaves an existing item as it is.
 
 Run artifacts (the request, each reviewer's raw output, the verdict) are in `~/.tagteam/state/runs/<id>/`.
 Errors go to `~/.tagteam/state/tagteam.log`. Set `TAGTEAM_HOME` to keep tagteam's data somewhere else.

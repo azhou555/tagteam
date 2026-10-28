@@ -283,6 +283,11 @@ class Install(unittest.TestCase):
         self.assertTrue(any("codex: kept existing hooks (check failed" in str(c.args[0]) for c in pr.call_args_list))
 
 
+class Tty(io.StringIO):
+    def isatty(self):
+        return True
+
+
 class Guided(unittest.TestCase):
     """`tagteam install` as a user runs it: intro, choose, summary, confirm, apply, next steps."""
     USER_HOOK = {"hooks": [{"type": "command", "command": "my-own-hook"}]}
@@ -299,10 +304,10 @@ class Guided(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def run_install(self, answers="", reviewers=("codex",), yes=False, dry_run=False):
-        out = io.StringIO()
-        with mock.patch("sys.stdin", io.StringIO(answers)), contextlib.redirect_stdout(out):
-            rc = install.run(["claude"], None if reviewers is None else list(reviewers), None, yes, dry_run)
+    def run_install(self, answers="", reviewers=("codex",), yes=False, dry_run=False, menubar=True, tty=False):
+        out = (Tty if tty else io.StringIO)()
+        with mock.patch("sys.stdin", (Tty if tty else io.StringIO)(answers)), contextlib.redirect_stdout(out):
+            rc = install.run(["claude"], None if reviewers is None else list(reviewers), None, yes, dry_run, menubar)
         return rc, out.getvalue()
 
     def assert_nothing_written(self):
@@ -387,6 +392,54 @@ class Guided(unittest.TestCase):
         self.assertIn("/opt/bin/tagteam hook claude", self.settings.read_text())
         self.assertIn("menu bar: failed (disk full). Hooks are in place", shown)
 
+    def test_no_menubar_leaves_the_menu_bar_alone(self):
+        with mock.patch.object(install, "install_swiftbar") as bar:
+            rc, shown = self.run_install(yes=True, menubar=False)
+        self.assertEqual(rc, 0)
+        bar.assert_not_called()
+        self.assertIn("/opt/bin/tagteam hook claude", self.settings.read_text())
+        self.assertIn("skipped (--no-menubar): SwiftBar and the launcher are left as they are", shown)
+
+    def test_summary_says_whose_turns_are_reviewed(self):
+        shown = self.run_install(dry_run=True)[1]
+        self.assertIn("authors.review stays claude, codex, copilot, agy", shown)
+        same = install.summary({"files": {}, "routing": False, "menubar": "x"}, None, ["claude", "codex", "copilot", "agy"])
+        self.assertIn("authors.review stays", same)                  # --authors with the saved list changes nothing
+
+    def pick_authors(self, picked, current=None, agents=("claude", "codex")):
+        if current is not None:
+            write_user_config(f"[authors]\nreview = {json.dumps(current)}\n")
+        with mock.patch("sys.stdin.isatty", return_value=True), mock.patch("sys.stdout.isatty", return_value=True), \
+                mock.patch.object(install, "_pick", return_value=picked) as pick:
+            got = install.choose_authors(None, False, list(agents))
+        return got, pick.call_args.args if pick.called else None
+
+    def test_authors_picker(self):
+        got, shown = self.pick_authors(["claude", "codex"])
+        self.assertIsNone(got)                                       # unchanged: nothing to save
+        self.assertEqual(shown, (["claude", "codex"], ["claude", "codex"], {}))
+        got, _ = self.pick_authors(["claude"])
+        self.assertEqual(got, ["claude", "copilot", "agy"])          # agents not wired now keep their setting
+        got, shown = self.pick_authors(["codex"], current=["claude", "agy"])
+        self.assertEqual(shown[1], ["claude"])                       # preselects the saved list
+        self.assertEqual(got, ["codex", "agy"])
+        got, _ = self.pick_authors([], current=["claude"])
+        self.assertEqual(got, [])
+
+    def test_install_saves_the_authors_picked(self):
+        with mock.patch.object(install, "_pick", return_value=[]), mock.patch.object(install, "install_swiftbar"):
+            rc, shown = self.run_install("y\n", tty=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(config.load()["authors"]["review"], ["codex", "copilot", "agy"])   # claude unpicked
+        self.assertIn("authors.review = codex, copilot, agy", re.sub(r"\x1b\[[0-9;]*m", "", shown))
+
+    def test_authors_picker_only_on_a_terminal_and_without_flags(self):
+        with mock.patch.object(install, "_pick", side_effect=AssertionError("prompted")):
+            self.assertIsNone(install.choose_authors(None, False, ["claude"]))      # stdin is not a terminal
+            with mock.patch("sys.stdin.isatty", return_value=True), mock.patch("sys.stdout.isatty", return_value=True):
+                self.assertIsNone(install.choose_authors(None, True, ["claude"]))
+                self.assertEqual(install.choose_authors(["codex"], False, ["claude"]), ["codex"])
+
     def test_a_hook_write_failure_names_the_backups_and_exits_1(self):
         def failing_save(p, data, dry_run, real=harnesses.base.save):
             if not dry_run:
@@ -426,16 +479,17 @@ class Consent(unittest.TestCase):
             state = install.pick_step(3, *state, key)
         self.assertEqual(state, (2, [2, 0]))       # down wraps 2 -> 0, up wraps 0 -> 2; re-picking moves to the end
 
-    def test_picker_on_a_real_terminal(self):
+    def pty_pick(self, args, keys):
+        """The picker's whole output on a real terminal, after typing `keys`."""
         pid, fd = pty.fork()
         if pid == 0:                                         # child: the picker on the pty
             try:
-                print(install._pick(["codex", "copilot", "agy"], ["copilot"], {"codex": "model x"}), flush=True)
+                print(install._pick(*args), flush=True)
             finally:
                 os._exit(0)
-        for keys in (" ", "\x1b[B\x1b[B", " ", "\n"):        # pick codex, move to agy, pick it, save
+        for k in keys:
             time.sleep(0.3)
-            os.write(fd, keys.encode())
+            os.write(fd, k.encode())
         out = b""
         while True:
             try:
@@ -446,11 +500,23 @@ class Consent(unittest.TestCase):
                 break
             out += chunk
         os.waitpid(pid, 0)
-        text = out.decode().replace("\x1b[2K", "").replace("\x1b[?25l", "").replace("\x1b[?25h", "")
+        return out.decode().replace("\x1b[2K", "").replace("\x1b[?25l", "").replace("\x1b[?25h", "")
+
+    def test_picker_on_a_real_terminal(self):
+        text = self.pty_pick((["codex", "copilot", "agy"], ["copilot"], {"codex": "model x"}),
+                             (" ", "\x1b[B\x1b[B", " ", "\n"))      # pick codex, move to agy, pick it, save
         self.assertIn("\x1b[38;5;151mcodex   \x1b[0m", text)                  # a terminal gets each agent's color
         text = re.sub(r"\x1b\[[0-9;]*m", "", text)
         self.assertIn("› [2] codex   model x", text)
         self.assertEqual(text.strip().splitlines()[-1].strip(), "['copilot', 'codex', 'agy']")
+
+    def test_authors_picker_marks_instead_of_numbering(self):
+        text = re.sub(r"\x1b\[[0-9;]*m", "", self.pty_pick((["claude", "codex"], ["claude", "codex"], {}, False),
+                                                           ("\x1b[B", " ", "\n")))   # unpick codex, save
+        self.assertIn("whose turns get reviewed", text)
+        self.assertIn("› [x] codex", text)
+        self.assertNotIn("[1]", text)
+        self.assertEqual(text.strip().splitlines()[-1].strip(), "['claude']")
 
     def test_install_preselects_the_current_list(self):
         write_user_config('[reviewers]\nuse = ["copilot", "kiro"]\n')
@@ -541,7 +607,7 @@ class Consent(unittest.TestCase):
         with mock.patch.object(install, "run", return_value=0) as run, contextlib.redirect_stdout(io.StringIO()), \
                 mock.patch.object(harnesses, "detected", return_value=["claude", "codex"]), self.assertRaises(SystemExit):
             cli.main(["install", "--reviewers", "codex,copilot", "--authors", "claude", "--yes"])
-        run.assert_called_once_with(["claude", "codex"], ["codex", "copilot"], ["claude"], True, False)
+        run.assert_called_once_with(["claude", "codex"], ["codex", "copilot"], ["claude"], True, False, True)
         with mock.patch.object(install, "run") as run, contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit):
             cli.main(["install", "--reviewers", "kiro"])
@@ -549,6 +615,9 @@ class Consent(unittest.TestCase):
         with mock.patch.object(install, "run", return_value=0) as run, self.assertRaises(SystemExit):
             cli.main(["install", "--yes", "--agents", "copilot"])
         self.assertEqual(run.call_args.args[0], ["copilot"])
+        with mock.patch.object(install, "run", return_value=0) as run, self.assertRaises(SystemExit):
+            cli.main(["install", "--yes", "--no-menubar"])
+        self.assertIs(run.call_args.args[5], False)
 
     def test_bare_command_and_help_say_what_tagteam_is(self):
         out = io.StringIO()

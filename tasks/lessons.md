@@ -16,3 +16,11 @@
   baseline means the run itself is wrong: stop and find out why before running anything else.
 - Encoded: tests/__init__.py raises if `tagteam.state` was imported before the tests, so the wrong command
   fails before any test writes.
+
+## A mutation check must show it ran the tests before its result counts
+- What happened (2026-10-28): I put two test names in `T="a b"` and ran `python3 -m unittest $T` in zsh.
+  zsh doesn't word-split unquoted variables, so unittest got one bogus name and every run, the unmutated
+  baseline included, reported `FAILED (errors=1)`. I first read that as "every mutation caught".
+- Rule: run the unmutated baseline first and require OK; a mutation counts as caught only if it turns that OK
+  into a *failure* (not an import/loader error), and the test count matches the baseline. Pass test names
+  literally, not through a shell variable.

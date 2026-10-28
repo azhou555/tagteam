@@ -165,6 +165,8 @@ def main(argv=None):
     i.add_argument("--agents", help="agents to wire hooks for (default: the ones installed on this machine)")
     i.add_argument("--reviewers", help="agents that may review your changes, in order; saves reviewers.use")
     i.add_argument("--authors", help="agents whose turns get reviewed; saves authors.review")
+    i.add_argument("--menubar", action=argparse.BooleanOptionalAction, default=True,
+                   help="add the macOS menu bar item and Spotlight launcher (default); --no-menubar leaves them alone")
     i.add_argument("--yes", action="store_true", help="don't prompt or ask to confirm; without --reviewers the saved list is kept")
     d = sub.add_parser("doctor", help="check each agent's hooks and reviewer status; read-only")
     d.add_argument("--probe", action="store_true", help="also run one tiny real review per listed reviewer (costs money)")
@@ -201,7 +203,7 @@ def main(argv=None):
             p.error(f"unknown agent: {', '.join(bad)} (choose from {', '.join(harnesses.ALL)})")
         try:
             agents = a.agents.split(",") if a.agents else harnesses.detected()
-            rc = install.run(agents, names["reviewers"], names["authors"], a.yes, a.dry_run)
+            rc = install.run(agents, names["reviewers"], names["authors"], a.yes, a.dry_run, a.menubar)
         except config.ConfigError as e:
             sys.exit(f"config error: {e}")
         sys.exit(rc)

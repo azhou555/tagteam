@@ -35,7 +35,8 @@ Spec: `../DESIGN.md`. Each phase ends in something verifiable.
 - [~] agy author → hooks fire and Copilot reviews, but Copilot approved the bug twice (model variance on a 1-reviewer small change)
 - [x] Codex author → Copilot blocked 2 planted bugs → Codex fixed both → agy allowed (2026-10-27). When the prompt
       demanded the code verbatim, Codex rebutted instead and the confirm round accepted it, as with Claude.
-- [ ] Claude plan gate (ExitPlanMode) live test: not possible headless; verify in an interactive plan-mode session
+- [x] Claude plan gate (ExitPlanMode) live test (2026-10-28, interactive session): agy + copilot requested 3
+      changes to the plan (round 1/2); the revised plan was re-checked and all 3 resolved (round 2).
 - [x] Recursion: reviewer runs never start nested reviews (unit + depth-guard test; all live reviewer runs show no nested runs)
 - [x] Loop cap (unit tests)
 
@@ -160,7 +161,7 @@ Spec: `docs/superpowers/specs/2026-10-26-packaging-design.md`.
       run it with `</dev/null`.
 - [x] Existing user config with no `routing.mode` gets `mode = "quota"` on `tagteam install`; fresh installs stay `ordered`
 - [x] `install` wires only detected agents by default (`--agents` overrides); skipped ones are named
-- Follow-ups: an authors prompt in `install` (today only `--authors`); `--menubar` flag; Kiro, Cursor, OpenCode, Pi harnesses.
+- Follow-ups: ~~an authors prompt in `install`; `--menubar` flag~~ (Phase 13); Kiro, Cursor, OpenCode, Pi harnesses.
 
 ## Phase 9: Status reflects the real review state (2026-10-27)
 Problem: a session showed `✗ Changes requested` for hours. Its round-3 confirm review was killed mid-run (no
@@ -321,3 +322,13 @@ apply now skips them. Incident during this phase: see lessons.md (a mis-invoked 
       `sfcolorN`, in name order. Lines keep their outcome color.
 - [x] Tests: colored watch = plain watch with the escapes stripped; each name colored in the recent row; menu
       row dots map to the right agents (both checked against mutations). 287 OK.
+
+## Phase 13: Install follow-ups: authors picker and `--menubar` (2026-10-28)
+
+- [x] Authors picker after the reviewer picker, terminal only (`--authors` and `--yes` skip it; scripts use the flag).
+      Lists the agents being wired, preselects `authors.review`; agents not wired now keep their setting. No order.
+- [x] `--menubar` / `--no-menubar` (default on): off leaves SwiftBar and the launcher untouched; the summary says so.
+- [x] Summary always shows whose turns are reviewed (`authors.review stays …` when unchanged).
+- [x] Tests: picker on a pty without numbers; keep/unchanged/none cases; `--no-menubar` writes no plugin; CLI flag.
+      Mutation-checked: keeping unwired agents, `--no-menubar` skipping SwiftBar, the picker wired into `run`,
+      marks instead of numbers, unchanged = nothing saved, `--yes` skipping it, the summary's "stays". 293 OK.
