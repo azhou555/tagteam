@@ -103,6 +103,9 @@ blocking = { small = false, large = true, high_risk = true, docs = true }   # th
   next prompt, Claude Code and Codex get the open suggestions as context labelled "not blocking; fix when
   convenient". Copilot and agy can't take added context at that point, so there the suggestions show only
   in the status line and the menu bar.
+  Codex has no status line tagteam can use, so there the turn ends with `the result shows at your next
+  prompt (live: tagteam watch)`, and your next prompt shows the result once as `↳ Hook · [tagteam] …`
+  (a blocker instead stops the next turn, as above).
 
 Three rules decide each issue's kind, in this order: a `blocker` always blocks, in any tier (a background
 review's blocker blocks the next Stop as round 1, even if that turn changed nothing); an issue that was

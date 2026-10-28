@@ -24,3 +24,5 @@
 - Rule: run the unmutated baseline first and require OK; a mutation counts as caught only if it turns that OK
   into a *failure* (not an import/loader error), and the test count matches the baseline. Pass test names
   literally, not through a shell variable.
+- Also (2026-10-28): mutate a scratch copy (`git worktree add` or `cp -r`), never the working tree. tagteam's own
+  Stop hook reviewed the tree mid-run, saw a deliberately broken line, and raised a false blocker.

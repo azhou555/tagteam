@@ -332,3 +332,17 @@ apply now skips them. Incident during this phase: see lessons.md (a mis-invoked 
 - [x] Tests: picker on a pty without numbers; keep/unchanged/none cases; `--no-menubar` writes no plugin; CLI flag.
       Mutation-checked: keeping unwired agents, `--no-menubar` skipping SwiftBar, the picker wired into `run`,
       marks instead of numbers, unchanged = nothing saved, `--yes` skipping it, the summary's "stays". 293 OK.
+
+## Phase 14: Background review results in Codex (2026-10-28)
+
+Codex's status line takes only built-in items, so a background review's result never reached the Codex
+terminal, and its turn-end notice pointed at a status line Codex doesn't have.
+- [x] `Author.has_status_line` (Claude only). Other agents' turn-end notice: "the result shows at your next prompt
+      (live: tagteam watch)".
+- [x] A finished background review on an agent without a status line stores its one-line result in the session;
+      the next UserPromptSubmit shows it once as a `systemMessage` (Codex renders it as `↳ Hook · …`; checked in
+      codex-rs `hooks/src/events/user_prompt_submit.rs`). With open suggestions, the same output carries both the
+      model context and the notice. Blockers get no notice: they block the next Stop. Claude is unchanged.
+- [x] Tests: once-only, suggestions carry both fields, blocker gets none, Claude gets none, Codex text. All seven
+      mutations caught. 296 OK.
+- [ ] Live check in the Codex TUI: a small change, then the next prompt shows the result.

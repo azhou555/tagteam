@@ -23,6 +23,7 @@ class Author:
     can_notice: bool
     has_plan_gate: bool
     can_add_context: bool      # turn-start output reaches the model (UserPromptSubmit additionalContext)
+    has_status_line: bool = False   # shows tagteam's live status; others get a background result at the next prompt
 
 
 @dataclasses.dataclass(frozen=True)
@@ -65,14 +66,17 @@ def encode(phase, verdict, notice, block_decision="block", context=False):
     """verdict: None (no-op) or {"action": "block" | "allow" | "context", "message": str}.
 
     An allow message is a notice for the user; only harnesses with `notice` have a field to show it. A context
-    message is for the model at turn start; only harnesses with `context` take it.
+    message is for the model at turn start; only harnesses with `context` take it. A context verdict's optional
+    "notice" goes to the user alongside it.
     """
     if not verdict:
         return "{}"
     msg = verdict["message"]
     if verdict["action"] == "context":
-        return json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
-                                                  "additionalContext": msg}}) if context else "{}"
+        out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": msg}} if context else {}
+        if verdict.get("notice") and notice:
+            out["systemMessage"] = verdict["notice"]
+        return json.dumps(out) if out else "{}"
     if verdict["action"] != "block":
         return json.dumps({"systemMessage": msg}) if msg and notice else "{}"
     if phase == "plan-gate":

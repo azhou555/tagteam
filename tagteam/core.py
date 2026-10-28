@@ -13,6 +13,13 @@ from . import changes, classify, limits, live, quota, router, runner, sandbox, s
 from .adapters import MARKER, HookEvent
 
 BACKGROUND = f"{MARKER} ⟳ Reviewing in the background; results appear in the status line"
+BACKGROUND_NEXT = f"{MARKER} ⟳ Reviewing in the background; the result shows at your next prompt (live: tagteam " \
+                  "watch)"
+
+
+def _has_status_line(agent):
+    from . import harnesses
+    return harnesses.get(agent).author.has_status_line
 
 
 def _session_file(ev):
@@ -27,6 +34,7 @@ def turn_start(ev, cfg):
     with state.locked(_session_file(ev).stem):
         prev = state.read_json(_session_file(ev)) or {}
         prior = prev.get("prior") or []              # open until a verdict closes them
+        notice = prev.get("notice")                  # a background result not shown yet; the new session drops it
         unreviewed = prev.get("repo") == repo and prev.get("pending_baseline")   # a turn not reviewed: cover it too
         base, touched = (prev["pending_baseline"], prev.get("pending_touched", [])) if unreviewed else (snap, [])
         state.write_json(_session_file(ev), {
@@ -39,10 +47,10 @@ def turn_start(ev, cfg):
         })
     advise = verdict.gated(prior, "advise")
     if advise:
-        return {"action": "context", "message": "\n".join(
+        return {"action": "context", "notice": notice, "message": "\n".join(
             [f"{MARKER} Open suggestions from an earlier cross-review, not blocking; fix when convenient:"]
             + verdict.items(advise))}
-    return None
+    return {"action": "allow", "message": notice} if notice else None
 
 
 def touch(ev, cfg):
@@ -396,7 +404,7 @@ def _turn_end(ev, cfg, lock, fd):
     mode = _mode(cfg, artifacts, prior)
     if (mode == "advise" and s.get("repo") and head and lock == limits.HELD and cfg["reviewers"].get("use")
             and _start_background(ev, cfg, s, artifacts, head, rebuttal, fd)):
-        return {"action": "allow", "message": BACKGROUND}
+        return {"action": "allow", "message": BACKGROUND if _has_status_line(ev.agent) else BACKGROUND_NEXT}
     action, msg, run_dir, open_issues = review(ev, cfg, s, artifacts, round_no, "turn", lock, confirm, rebuttal, started,
                                                mode)
     if run_dir is None and action == "allow" and not open_issues:   # no round spent: diff already passed, or a state-error notice
@@ -465,11 +473,19 @@ def background(path, alarm=False):
         signal.alarm(int(cfg["review"]["deadline_s"]) + 120)
     action, msg, run_dir, open_issues = review(ev, cfg, s, job["artifacts"], 1, "turn", limits.HELD,
                                                rebuttal=job["rebuttal"], mode="advise", pinned=tuple(job["pinned"]))
-    if open_issues is None or (run_dir is None and not msg):   # no verdict, or this diff was already reviewed
+    verdict_in = open_issues is not None and (run_dir is not None or msg)   # not: no verdict, or already reviewed
+    notice = msg if msg and action != "block" and not _has_status_line(ev.agent) else None   # a blocker blocks instead
+    if not (verdict_in or notice):
         return
-    settle = _carry(open_issues, msg if action == "block" else None)   # a blocker blocks the next Stop
+
+    def settle(cur):
+        if verdict_in:
+            _carry(open_issues, msg if action == "block" else None)(cur)   # a blocker blocks the next Stop
+        if notice:
+            cur["notice"] = notice                   # no status line: shown once, at the next prompt
     _write_back(_session_file(ev), s.get("turn_id"), settle, settle)
-    state.log("background review", run=str(run_dir), action=action, author=ev.agent)
+    if verdict_in:
+        state.log("background review", run=str(run_dir), action=action, author=ev.agent)
 
 
 def _owed(ev, cfg, s, sf):

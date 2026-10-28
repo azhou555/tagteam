@@ -137,16 +137,20 @@ class Background(HookRig, unittest.TestCase):
     def tearDown(self):
         self.unrig()
 
-    def start(self, prompt="add feature"):
-        return self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt=prompt))
+    def event(self, agent, name, **kw):
+        codex = {"transcript_path": "/Users/u/.codex/sessions/x.jsonl"} if agent == "codex" else {}
+        return self.run_hook(agent, "x", self.claude(name, **kw, **codex))
 
-    def stop(self, *findings, lines=20, change=True, runner_fn=None, name="feature.py"):
+    def start(self, prompt="add feature", agent="claude"):
+        return self.event(agent, "UserPromptSubmit", prompt=prompt)
+
+    def stop(self, *findings, lines=20, change=True, runner_fn=None, name="feature.py", agent="claude"):
         if change:
             self.n += 1
             pathlib.Path(self.repo, name).write_text(f"a = {self.n}\n" * lines)
         fake = runner_fn or self.fake_run_all({"copilot": {"verdict": "approve", "summary": "", "findings": list(findings)}})
         with mock.patch.object(runner, "run_all", fake):
-            return self.run_hook("claude", "x", self.claude("Stop", last_assistant_message="done"))
+            return self.event(agent, "Stop", last_assistant_message="done")
 
     def session(self):
         return state.read_json(state.path("sessions", "claude-sess1.json"))
@@ -166,6 +170,29 @@ class Background(HookRig, unittest.TestCase):
         run = state.read_jsonl(state.path("runs.jsonl"))[-1]
         self.assertEqual((run["mode"], run["action"], run["blocking"], run["suggestions"]), ("advise", "allow", 0, 1))
         self.assertEqual((self.session()["round"], self.session()["owed"]), (0, None))   # no round spent
+
+    def test_without_a_status_line_the_result_shows_once_at_the_next_prompt(self):
+        self.start(agent="codex")
+        self.assertEqual(self.stop(agent="codex"), {"systemMessage": core.BACKGROUND_NEXT})
+        shown = self.start(agent="codex")
+        self.assertEqual(list(shown), ["systemMessage"])
+        self.assertTrue(shown["systemMessage"].startswith("[tagteam] ✓ Review passed: no issues found · copilot reviewed"))
+        self.assertEqual(self.start(agent="codex"), {})                      # once
+        self.start(agent="codex")
+        self.stop(BUG, agent="codex")
+        shown = self.start(agent="codex")                                     # suggestions: the model and the user
+        self.assertIn("Open suggestions from an earlier cross-review", shown["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("● Suggestions: 1 issue, not blocking", shown["systemMessage"])
+
+    def test_a_background_blocker_blocks_the_next_stop_instead_of_a_notice(self):
+        self.start(agent="codex")
+        self.stop({**BUG, "severity": "blocker"}, agent="codex")
+        self.assertNotIn("systemMessage", self.start(agent="codex"))
+
+    def test_claude_keeps_the_status_line_and_gets_no_prompt_notice(self):
+        self.start()
+        self.stop()
+        self.assertEqual(self.start(), {})
 
     def test_a_suggestion_is_rechecked_only_by_a_review_of_its_own_file(self):
         self.start()
