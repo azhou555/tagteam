@@ -3,6 +3,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -369,10 +370,12 @@ class Surfaces(unittest.TestCase):
         with self.running(mode="advise", background=True):
             self.assertIn("tagteam ⟳ Reviewing in background · copilot … 0s", live.segment("claude", "s"))
             self.assertIn("  ⟳ Reviewing in background  claude  copilot … 0s", live.render_watch())
-            self.assertIn("⟳ Reviewing in background · claude → copilot | color=", live.render_swiftbar())
+            self.assertIn("⟳ Reviewing in background · :circle.fill: claude → :circle.fill: copilot | color=",
+                          live.render_swiftbar())
         with self.running():
             self.assertIn("tagteam ⟳ Reviewing changes, round 1/2 · copilot … 0s", live.segment("claude", "s"))
-            self.assertIn("⟳ Reviewing changes, round 1/2 · claude → copilot | color=", live.render_swiftbar())
+            self.assertIn("⟳ Reviewing changes, round 1/2 · :circle.fill: claude → :circle.fill: copilot | color=",
+                          live.render_swiftbar())
 
     def test_findings(self):
         self.assertEqual(live.summary(self.run_rec()), "● Suggestions: 2 issues, not blocking")
@@ -386,6 +389,18 @@ class Surfaces(unittest.TestCase):
         self.assertIn("● Suggestions: 2 issues, not blocking  (not blocking, 3s)", live.render_watch())
         self.assertIn("● Suggestions: 2 issues, not blocking · not blocking | color=#3B7DC4,#B3D4FF", live.render_swiftbar())
         self.assertIn("sfcolor2=#3B7DC4,#B3D4FF", live.render_swiftbar().splitlines()[0])
+
+    def test_each_agent_has_its_color(self):
+        live.record_run({**self.run_rec(), "reviewers": ["codex", "copilot"]})
+        plain, colored = live.render_watch(), live.render_watch(color=True)
+        self.assertEqual(re.sub(r"\x1b\[[0-9;]*m", "", colored), plain)     # colors don't shift the columns
+        recent = next(ln for ln in colored.splitlines() if " -> " in ln)
+        for name in ("claude", "codex", "copilot"):
+            self.assertIn(f"\x1b[38;5;{live.AGENTS[name]['ansi']}m{name}", recent)
+        row = next(ln for ln in live.render_swiftbar().splitlines() if "→" in ln)
+        self.assertIn(":circle.fill: claude → :circle.fill: codex, :circle.fill: copilot: ", row)
+        dots = enumerate(["claude", "codex", "copilot"], 1)
+        self.assertIn(" ".join(f"sfcolor{i}={live.AGENTS[n]['hex']}" for i, n in dots), row)
 
     def test_menu_bar_groups_open_issues(self):
         state.write_json(state.path("sessions", "claude-s.json"), {"prior": [

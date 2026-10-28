@@ -311,3 +311,13 @@ the real run wrote only the menu bar plugin and launcher; doctor healthy (Codex 
 hooks, as before this phase). Found live: install rewrote and backed up files it reported as up to date;
 apply now skips them. Incident during this phase: see lessons.md (a mis-invoked test run wrote to the real
 ~/.tagteam; repaired, quarantined in ~/.tagteam/state-test-pollution-20261028/).
+
+## Phase 12: Agent colors in `watch` and the menu bar (2026-10-28)
+
+- [x] One palette: `live.AGENTS` gives each agent an ANSI code and a SwiftBar light/dark hex pair.
+- [x] `watch`: author and reviewer names in their agent's color (running rows, progress, counts, recent runs);
+      `Paint.agents` pads by the uncolored width so columns don't shift.
+- [x] Menu bar: SwiftBar colors a line's text as one, so each name gets a `:circle.fill:` dot colored through
+      `sfcolorN`, in name order. Lines keep their outcome color.
+- [x] Tests: colored watch = plain watch with the escapes stripped; each name colored in the recent row; menu
+      row dots map to the right agents (both checked against mutations). 287 OK.

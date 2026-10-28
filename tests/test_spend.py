@@ -66,8 +66,8 @@ class Spend(unittest.TestCase):
         line = "This week: 13 reviews · ~$1.84 reported · 12 didn't report cost · 6 premium requests"
         self.assertIn(line, live.render_watch())
         self.assertIn(line, live.render_swiftbar())
-        for out in (live.render_watch(), live.render_swiftbar()):
-            self.assertIn("by reviewer: agy 13", out)
+        self.assertIn("by reviewer: agy 13", live.render_watch())
+        self.assertIn("by reviewer: :circle.fill: agy 13", live.render_swiftbar())
 
     def test_line_formats(self):
         self.assertEqual(live.spend_line(14, 1.84, 3, 0), "This week: 14 reviews · ~$1.84 reported · 3 didn't report cost")
@@ -84,7 +84,7 @@ class Spend(unittest.TestCase):
         live.record_run(run(reviewers=["codex", "agy"]))
         live.record_run(run(reviewers=["codex"]))
         self.assertIn("by reviewer: codex 2  agy 1", live.render_watch())
-        self.assertIn("by reviewer: codex 2  agy 1", live.render_swiftbar())
+        self.assertIn("by reviewer: :circle.fill: codex 2  :circle.fill: agy 1", live.render_swiftbar())
 
     def test_bad_usage_never_breaks_review_or_display(self):
         cop = harnesses.get("copilot").reviewer

@@ -179,7 +179,11 @@ def note_error(now=None):
 # Pastel palette. ansi: 256-color code for terminals. hex: SwiftBar "light-mode,dark-mode" (deeper shade on a
 # light menu bar, where pastels wash out).
 BRAND = {"ansi": 108, "hex": "#5E8C61,#A3C9A8", "sf": "person.2.fill"}            # sage
-AGENTS = {"claude": 215, "codex": 151, "copilot": 183, "agy": 111}                  # orange, mint, lavender, blue
+AGENTS = {"claude": {"ansi": 215, "hex": "#C8692E,#FFB87A"},                         # orange
+          "codex": {"ansi": 151, "hex": "#3E9670,#AEE6C4"},                          # mint
+          "copilot": {"ansi": 183, "hex": "#8A5CC2,#D9B8FF"},                        # lavender
+          "agy": {"ansi": 111, "hex": "#3F72C4,#8FB8FF"}}                            # blue
+DOT = ":circle.fill:"                                # SwiftBar colors a whole line's text, so an agent gets a dot
 KINDS = {
     "running": {"icon": "⟳", "label": "Reviewing", "ansi": 223, "sf": "arrow.triangle.2.circlepath",
                 "hex": "#C27C2C,#FFD8A8"},
@@ -274,7 +278,12 @@ class Paint:
 
     def agent(self, name, text=None):
         """An agent's name (or `text`, e.g. the name padded) in that agent's color."""
-        return self.fg(AGENTS.get(name, BRAND["ansi"]), name if text is None else text)
+        return self.fg(AGENTS.get(name, BRAND)["ansi"], name if text is None else text)
+
+    def agents(self, names, width=0):
+        """Comma-joined agent names, each in its color, padded to `width` as if uncolored; "-" for none."""
+        plain = ",".join(names) or "-"
+        return (",".join(self.agent(n) for n in names) or "-") + " " * (width - len(plain))
 
     def kind(self, kind, text):
         return self.fg(KINDS[kind]["ansi"], text)
@@ -287,10 +296,11 @@ def _progress(rec, now, paint=Paint(False)):
     parts = []
     for r, st in rec["reviewers"].items():
         if st["state"] == "running":
-            parts.append(f"{r} {paint.kind('running', '…')} {_dur(now - rec['started'])}")
+            parts.append(f"{paint.agent(r)} {paint.kind('running', '…')} {_dur(now - rec['started'])}")
         else:
             ok = st["state"] == "done"
-            parts.append(f"{r} {paint.kind('passed' if ok else 'blocked', '✓' if ok else '✗')} {_dur(st.get('secs'))}")
+            parts.append(f"{paint.agent(r)} {paint.kind('passed' if ok else 'blocked', '✓' if ok else '✗')} "
+                         f"{_dur(st.get('secs'))}")
     return " · ".join(parts)
 
 
@@ -383,20 +393,25 @@ def spend_line(reviews, cost, unreported, premium):
     return line + (f" · {_plural(premium, 'premium request')}" if premium else "")
 
 
-def week_lines(now=None):
+def week_lines(now=None, name=str):
     """The weekly spend line and, under it, reviews per reviewer."""
     week = _week(now or time.time())
     premium = sum(n for r in week for u in _usages(r) if (n := _num(u, "premium_requests")) is not None)
     return [spend_line(*week_spend(week=week), premium)] + (
-        [f"by reviewer: {_counts(week, 'reviewers')}"] if any(r["reviewers"] for r in week) else [])
+        [f"by reviewer: {_counts(week, 'reviewers', name)}"] if any(r["reviewers"] for r in week) else [])
 
 
-def _counts(runs, key):
+def _tally(runs, key):
+    """[(name, count)], most first."""
     counts = {}
     for r in runs:
         for k in (r[key] if isinstance(r[key], list) else [r[key]]):
             counts[k] = counts.get(k, 0) + 1
-    return "  ".join(f"{k} {n}" for k, n in sorted(counts.items(), key=lambda kv: -kv[1]))
+    return sorted(counts.items(), key=lambda kv: -kv[1])
+
+
+def _counts(runs, key, name=str):
+    return "  ".join(f"{name(k)} {n}" for k, n in _tally(runs, key))
 
 
 def _when(ts, now):
@@ -410,18 +425,19 @@ def render_watch(now=None, recent=5, color=False):
     lines = [f"tagteam watch  {time.strftime('%H:%M:%S', time.localtime(now))}", ""]
     running = active(now)
     lines.append(f"Running ({len(running)}):")
-    lines += [f"  {paint.kind('running', _doing(r))}  {r['author']:7} {_progress(r, now, paint)}"
+    lines += [f"  {paint.kind('running', _doing(r))}  {paint.agents([r['author']], 7)} {_progress(r, now, paint)}"
               for r in running] or ["  none"]
     today, week = _today_and_week(now)
     lines.append(f"\nReviews today: {len(today)}")
     for key, label in (("author", "by author"), ("reviewers", "by reviewer")):
         if today:
-            lines.append(f"  {label:12} {_counts(today, key)}")
-    lines.append("\n" + "\n".join(week_lines(now)))
+            lines.append(f"  {label:12} {_counts(today, key, paint.agent)}")
+    lines.append("\n" + "\n".join(week_lines(now, paint.agent)))
     lines.append(f"\nLast {recent}:")
     for r in week[-recent:][::-1]:
         kind = outcome(r)[0]
-        lines.append(f"  {_when(r['ts'], now):9}  {r['author']:7} -> {','.join(r['reviewers']) or '-':14} "
+        lines.append(f"  {_when(r['ts'], now):9}  {paint.agents([r['author']], 7)} -> "
+                     f"{paint.agents(r['reviewers'], 14)} "
                      f"{paint.kind(kind, summary(r))}  ({_mode(r)}, {_dur(r['duration'])})")
     if not week:
         lines.append("  none")
@@ -449,6 +465,15 @@ def _sb(text, **params):
     return text + (" | " + " ".join(f"{k}={v}" for k, v in params.items()) if params else "")
 
 
+def _dot(name):
+    return f"{DOT} {name}"
+
+
+def _sb_agents(text, names, **params):
+    """_sb for a line whose `names` each follow a DOT, in order: every dot takes its agent's color."""
+    return _sb(text, **params, **{f"sfcolor{i}": AGENTS.get(n, BRAND)["hex"] for i, n in enumerate(names[:10], 1)})
+
+
 def render_swiftbar(now=None, recent=8):
     """SwiftBar plugin output: a menu bar icon + today's count, and a dropdown that mirrors `watch`."""
     now = now or time.time()
@@ -473,7 +498,8 @@ def render_swiftbar(now=None, recent=8):
     if running:
         lines.append(_sb("Running", size=11, color="gray"))
         for r in running:
-            lines.append(_sb(f"{_doing(r)} · {r['author']} → {', '.join(r['reviewers'])}", color=KINDS["running"]["hex"]))
+            lines.append(_sb_agents(f"{_doing(r)} · {_dot(r['author'])} → {', '.join(map(_dot, r['reviewers']))}",
+                                    [r["author"], *r["reviewers"]], color=KINDS["running"]["hex"]))
             lines.append(_sb(f"    {_progress(r, now)}", font="Menlo", size=12))
         lines.append("---")
     issues = open_issues(now)
@@ -487,17 +513,21 @@ def render_swiftbar(now=None, recent=8):
         lines.append("---")
     lines.append(_sb(f"Reviews today: {len(today)}", size=11, color="gray"))
     if today:
-        lines.append(_sb(f"by author:  {_counts(today, 'author')}", font="Menlo", size=12))
-        lines.append(_sb(f"by reviewer:  {_counts(today, 'reviewers')}", font="Menlo", size=12))
-    lines += [_sb(week_lines(now)[0], size=11, color="gray"),
-              *[_sb(t, font="Menlo", size=12) for t in week_lines(now)[1:]],
+        for key, label in (("author", "by author"), ("reviewers", "by reviewer")):
+            lines.append(_sb_agents(f"{label}:  {_counts(today, key, _dot)}", [k for k, _ in _tally(today, key)],
+                                    font="Menlo", size=12))
+    head, *by = week_lines(now, _dot)
+    lines += [_sb(head, size=11, color="gray"),
+              *[_sb_agents(t, [k for k, _ in _tally(week, "reviewers")], font="Menlo", size=12) for t in by],
               "---", _sb("Recent reviews (click to open the run)", size=11, color="gray")]
     for r in week[-recent:][::-1]:
         kind_r = outcome(r)[0]
         run_dir = state.path("runs", r["run_id"], "x").parent
-        lines.append(_sb(f"{_when(r['ts'], now):9}  {r['author']} → {', '.join(r['reviewers']) or '—'}: {summary(r)}"
-                         f" · {_mode(r)}",
-                         color=KINDS[kind_r]["hex"], bash="/usr/bin/open", param1=f'"{run_dir}"', terminal="false"))
+        who = f"{_dot(r['author'])} → {', '.join(map(_dot, r['reviewers'])) or '—'}"
+        lines.append(_sb_agents(f"{_when(r['ts'], now):9}  {who}: {summary(r)} · {_mode(r)}",
+                                [r["author"], *r["reviewers"]],
+                                color=KINDS[kind_r]["hex"], bash="/usr/bin/open", param1=f'"{run_dir}"',
+                                terminal="false"))
     if not week:
         lines.append(_sb("none yet", color="gray"))
     lines.append("---")

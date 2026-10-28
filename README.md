@@ -147,7 +147,8 @@ leaves them open.
 The author can also answer with a rebuttal and no edits; that is re-reviewed too.
 
 Each line also shows how long ago it happened, today's review count, and `⚠ N hook errors (24h)` when hooks
-failed (reviews were skipped). Set `NO_COLOR=1` for plain text.
+failed (reviews were skipped). In `tagteam watch` each agent's name is in its install color, and in the
+menu bar each name has a dot in that color. Set `NO_COLOR=1` for plain text.
 
 Commands:
 
