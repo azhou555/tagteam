@@ -101,6 +101,12 @@ def completion(run, lines_changed):
 
 STATE_ERROR = limits.STATE_ERROR
 SLOW_SETUP = "repo too slow to sandbox, see tagteam.log"
+NO_SANDBOX = "no sandbox for a background review, see tagteam.log"
+
+
+def _git_activity(s):
+    repo = s.get("repo")
+    return changes.ref_activity(repo, s["refs"], changes.refs(repo)) if repo and "refs" in s else []
 
 
 def _clock():
@@ -112,24 +118,28 @@ def _run_record(ev, cfg, s, run_tag, round_no, confirm, **kw):
     run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:4]
     return {"ts": time.time(), "run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
             "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "prior": len(s.get("prior") or []),
-            "confirm": confirm, "reviewers": [], "action": "allow", "blocking": 0, "advisory": 0, "failed": [],
-            "duration": 0.0, **kw}
+            "confirm": confirm, "mode": "block", "reviewers": [], "action": "allow", "blocking": 0, "suggestions": 0,
+            "advisory": 0, "failed": [], "duration": 0.0, **kw}
 
 
-def review(ev, cfg, s, artifacts, round_no, run_tag, lock, confirm=False, rebuttal=False, started=None):
+def review(ev, cfg, s, artifacts, round_no, run_tag, lock, confirm=False, rebuttal=False, started=None, mode="block",
+           pinned=None):
     """Guard, route, run, decide. The caller holds the session lock (`lock` says how that went). Returns
     (action, message, run_dir, open_issues); message is the block reason or, on allow, a one-line completion
-    notice. open_issues are the findings still open afterwards, or None when no reviewer gave a verdict.
+    notice. open_issues are the findings still open afterwards (each with its gate), or None when no reviewer
+    gave a verdict. `mode` is the gate of a new non-blocker finding. `pinned` = (tree, git_activity) taken at turn
+    end marks a background review: the author works on meanwhile, so the live repo is not this review's.
     run_dir None means no run was spawned: a block is a re-issued one, an allow with open issues is a re-issued
     block on the confirm round, an allow with a message and none is a state-error notice, and an allow without a message is a silent skip. `confirm` marks the review after the last fix
     round, which can never block. `rebuttal` marks a re-review of an unchanged diff against the author's reply.
     `started` is the `_clock()` reading when the hook began work; setup since then comes out of the deadline."""
     if lock != limits.HELD:
         state.log("session lock failed, not reviewing", author=ev.agent, session=ev.session_id)
-        run = _run_record(ev, cfg, s, run_tag, round_no, confirm, reason=STATE_ERROR)
+        run = _run_record(ev, cfg, s, run_tag, round_no, confirm, reason=STATE_ERROR, mode=mode)
         live.record_run(run)
         return "allow", completion(run, 0), None, None
-    return _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, _clock() if started is None else started)
+    return _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, _clock() if started is None else started,
+                   mode, pinned)
 
 
 def _session_guard(ev, handler, *args):
@@ -141,7 +151,7 @@ def _session_guard(ev, handler, *args):
         return handler(*args, lock)
 
 
-def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started):
+def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started, mode, pinned):
     now = time.time()
     rv = cfg["review"]
     groups = {}
@@ -154,8 +164,9 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         state.log("same diff already reviewed; not reviewing again", author=ev.agent, action=seen["action"], round=round_no)
         if seen["action"] == "block":                # no reviewer spawned, but the status must show this round
             final = confirm                          # the last word can't block: record what is still open
-            run = _run_record(ev, cfg, s, run_tag, round_no, confirm, action="allow" if final else "block",
-                              blocking=len(seen["blocking"]))
+            run = _run_record(ev, cfg, s, run_tag, round_no, confirm, action="allow" if final else "block", mode=mode,
+                              blocking=len(verdict.gated(seen["blocking"])),
+                              suggestions=len(verdict.gated(seen["blocking"], "advise")))
             live.record_run(run)
             if final:
                 return "allow", completion(run, 0), None, seen["blocking"]
@@ -174,7 +185,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         state.log("router planned unlisted reviewers; dropped", reviewers=stray)
         plan = {r: ts for r, ts in plan.items() if r in listed}
         reason = reason or (None if plan else "no listed reviewer is available")
-    run = _run_record(ev, cfg, s, run_tag, round_no, confirm, ts=now)
+    run = _run_record(ev, cfg, s, run_tag, round_no, confirm, ts=now, mode=mode)
     run_id = run["run_id"]
     refused = plan and limits.reserve(run_id, f"{ev.agent}:{ev.session_id}", now, cfg)
     if refused:
@@ -196,16 +207,21 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         live.record_run(run)
         return "allow", completion(run, lines_changed), run_dir, None
     repo = s.get("repo")
-    git_activity = changes.ref_activity(repo, s["refs"], changes.refs(repo)) if repo and "refs" in s else []
-    outside = sorted({p for p in s.get("touched", []) if os.path.isabs(p)} | {a["path"] for a in artifacts if os.path.isabs(a["path"])})
-    outside = [p for p in outside if not changes.in_repo(p, repo)]
-    before = changes.snapshot(repo) if repo else None
-    watch = sandbox.Watch(repo, before, outside)
+    if pinned:                                       # only shared git config/hooks are still the reviewers' to break
+        before, git_activity = pinned
+        watch = sandbox.Watch(repo, None)
+    else:
+        git_activity = _git_activity(s)
+        outside = sorted({p for p in s.get("touched", []) if os.path.isabs(p)} | {a["path"] for a in artifacts if os.path.isabs(a["path"])})
+        before = changes.snapshot(repo) if repo else None
+        watch = sandbox.Watch(repo, before, [p for p in outside if not changes.in_repo(p, repo)])
     with sandbox.checkouts(repo, before, list(plan), repo or ev.cwd, max(7200, 2 * rv["deadline_s"])) as works:   # one disposable tree each
         setup = _clock() - started                   # snapshots, stale sweep, worktree adds: all inside the hook timeout
-        if setup > min(60, rv["deadline_s"] / 2):
-            state.log("repo too slow to sandbox; not reviewing", run_id=run_id, setup_s=round(setup, 1))
-            run.update(reviewers=[], reason=SLOW_SETUP)
+        skip = (SLOW_SETUP if setup > min(60, rv["deadline_s"] / 2) else
+                NO_SANDBOX if pinned and any(works[r] == (repo or ev.cwd) for r in plan) else None)
+        if skip:
+            state.log("not reviewing", run_id=run_id, reason=skip, setup_s=round(setup, 1))
+            run.update(reviewers=[], reason=skip)
             live.record_run(run)
             return "allow", completion(run, lines_changed), run_dir, None
         deadline = rv["deadline_s"] - setup
@@ -217,7 +233,8 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
             jobs = {r: swap_root(p, repo, works[r]) for r, p in jobs.items()}
         with live.tracking({"run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
                             "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "reviewers": list(plan),
-                            "prior": run["prior"], "started": now, "expires": now + deadline + 60}) as update:
+                            "prior": run["prior"], "mode": mode, "background": bool(pinned), "started": now,
+                            "expires": now + deadline + 60}) as update:
             outcomes = runner.run_all(jobs, cfg, works, run_dir, deadline, on_done=update)
         guilty = {r: "wrote in its sandbox" for r in plan if works[r] != (repo or ev.cwd) and sandbox.dirty(works[r], before)}
     seen = watch.after()
@@ -226,7 +243,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         guilty = {r: "git config/hooks changed" for r in plan}
     elif in_place and (seen["repo"]["tree"] or seen["outside"]):   # no sandbox to prove who wrote: postcondition decides
         guilty = {r: "real tree or touched files changed with no sandbox" for r in plan}
-    changed = seen["repo"]["tree"] + seen["repo"]["refs"] + seen["outside"]
+    changed = [] if pinned else seen["repo"]["tree"] + seen["repo"]["refs"] + seen["outside"]
     if guilty:
         state.log("REVIEWER WROTE OUTSIDE READ-ONLY; disabled", run_id=run_id, reviewers=list(guilty),
                   why=guilty, git=seen["git"], outside=seen["outside"], tree=seen["repo"]["tree"][:50],
@@ -253,17 +270,18 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         if res and works[r] != (repo or ev.cwd):
             _unsandbox(res, works[r])
     failed = [r for r, res in results.items() if res is None]
-    action, blocking, advisory = verdict.decide(results, cfg, round_no)
-    msg = verdict.message(plan, blocking, advisory, round_no, cfg["limits"]["max_rounds_per_turn"], failed)
+    action, issues, advisory = verdict.decide(results, cfg, round_no, mode, s.get("prior") or [])
+    msg = verdict.message(plan, issues, advisory, round_no, cfg["limits"]["max_rounds_per_turn"], failed)
     if len(failed) < len(results):                   # a run with no verdict must not suppress a retry
-        limits.remember(key, dig, action, blocking, msg, s.get("turn_id"))
-    state.write_json(run_dir / "verdict.json", {"action": action, "blocking": blocking, "advisory": advisory,
-                                                "failed": failed, "message": msg})
+        limits.remember(key, dig, action, issues, msg, s.get("turn_id"))
+    blocking, suggestions = verdict.gated(issues), verdict.gated(issues, "advise")
+    state.write_json(run_dir / "verdict.json", {"action": action, "blocking": blocking, "suggestions": suggestions,
+                                                "advisory": advisory, "failed": failed, "message": msg})
     run["usage"] = {r: meta["usage"] for r, (meta, _) in outcomes.items() if meta.get("usage")}
-    run.update(action=action, blocking=len(blocking), advisory=len(advisory), failed=failed,
-               duration=round(time.time() - now, 1))
+    run.update(action=action, blocking=len(blocking), suggestions=len(suggestions), advisory=len(advisory),
+               failed=failed, duration=round(time.time() - now, 1))
     live.record_run(run)
-    open_issues = blocking if len(failed) < len(results) else None
+    open_issues = issues if len(failed) < len(results) else None
     return action, (msg if action == "block" else completion(run, lines_changed)) + warn, run_dir, open_issues
 
 

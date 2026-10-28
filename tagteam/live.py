@@ -76,8 +76,8 @@ def active(now=None):
         else:
             if rec and not alive:
                 run = {**{k: rec[k] for k in ("run_id", "author", "session_id", "tag", "round", "max_rounds")},
-                       "ts": rec["started"], "prior": rec.get("prior", 0),
-                       "reviewers": list(rec["reviewers"]), "action": "allow", "blocking": 0, "advisory": 0,
+                       "ts": rec["started"], "prior": rec.get("prior", 0), "mode": rec.get("mode", "block"),
+                       "reviewers": list(rec["reviewers"]), "action": "allow", "blocking": 0, "suggestions": 0, "advisory": 0,
                        "failed": [], "duration": round(now - rec["started"], 1), "reason": "interrupted"}
                 _roll(run)
                 _on_review(run)
@@ -117,7 +117,8 @@ def _on_review(run):
         if not cmd:
             return
         kind = outcome(run)[0]
-        env = {**os.environ, "TAGTEAM_OUTCOME": kind, "TAGTEAM_SUMMARY": summary(run), "TAGTEAM_DEPTH": "1"}
+        env = {**os.environ, "TAGTEAM_OUTCOME": kind, "TAGTEAM_SUMMARY": summary(run),
+               "TAGTEAM_MODE": run.get("mode", "block"), "TAGTEAM_DEPTH": "1"}
         p = subprocess.Popen(["sh", "-c", cmd], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True, env=env)
         with contextlib.suppress(BrokenPipeError), p.stdin:     # a command may exit without reading it
@@ -138,7 +139,7 @@ def _roll(run, now=None):
         s["sessions"][f"{run['author']}:{run['session_id']}"] = {
             k: run[k] for k in ("ts", "action", "blocking", "advisory", "reviewers", "failed", "round")}
         s["sessions"][f"{run['author']}:{run['session_id']}"].update(
-            {k: run[k] for k in ("prior", "confirm", "reason", "max_rounds") if k in run})
+            {k: run[k] for k in ("prior", "confirm", "reason", "max_rounds", "mode", "suggestions") if k in run})
         state.write_json(state.path("status.json"), s)
 
 
@@ -185,6 +186,8 @@ KINDS = {
                "hex": "#3A9E6F,#B5EAD7"},
     "blocked": {"icon": "✗", "label": "Changes requested", "ansi": 217, "sf": "xmark.octagon.fill",
                 "hex": "#C8554F,#FFB3B3"},
+    "suggestions": {"icon": "●", "label": "Suggestions", "ansi": 153, "sf": "lightbulb.fill",
+                    "hex": "#3B7DC4,#B3D4FF"},
     "resolved": {"icon": "✓", "label": "Issues resolved", "ansi": 158, "sf": "checkmark.seal.fill",
                  "hex": "#3A9E6F,#B5EAD7"},
     "unresolved": {"icon": "⚠", "label": "Unresolved", "ansi": 216, "sf": "exclamationmark.triangle.fill",
@@ -224,6 +227,8 @@ def outcome(run):
         return "blocked", (f"{_plural(n, 'issue')} to fix{where}" if not prior else
                            f"{_plural(n, 'issue')} still open after fixes{where}")
     notes = f", {_plural(run['advisory'], 'minor note')}" if run["advisory"] else ""
+    if run.get("suggestions"):
+        return "suggestions", f"{_plural(run['suggestions'], 'issue')}, not blocking{notes}"
     if prior:
         return "resolved", f"all {prior} fixed and re-checked{notes}"
     if run["advisory"]:

@@ -644,7 +644,7 @@ class OnReview(unittest.TestCase):
         self.assertEqual(json.loads((out / "run.json").read_text()), {**self.RUN, "outcome": "blocked", "summary": summary})
         env = (out / "env").read_text().splitlines()
         self.assertEqual([e for e in env if not e.startswith("TAGTEAM_HOME=")],
-                         ["TAGTEAM_DEPTH=1", "TAGTEAM_OUTCOME=blocked", f"TAGTEAM_SUMMARY={summary}"])
+                         ["TAGTEAM_DEPTH=1", "TAGTEAM_MODE=block", "TAGTEAM_OUTCOME=blocked", f"TAGTEAM_SUMMARY={summary}"])
 
     def test_nothing_runs_when_unset_or_backfilling(self):
         with mock.patch("subprocess.Popen") as popen:
