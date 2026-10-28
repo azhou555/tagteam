@@ -205,34 +205,34 @@ the blocking set; `advise` ones are shown as suggestions. So a re-checked sugges
 reviewer now rates it a blocker, in which case it is upgraded to `block`. A new distinct issue in a blocking review
 still blocks.
 
-- [ ] Config: `review.blocking = { small = false, large = true, high_risk = true, docs = true }`. A repo
+- [x] Config: `review.blocking = { small = false, large = true, high_risk = true, docs = true }`. A repo
       `.tagteam.toml` may only switch a tier to true (adds scrutiny). The plan gate is always the blocking kind;
       the existing round limit and confirm round still apply to it, as they do to every blocking review.
-- [ ] Non-blocking turn end: snapshot, start the review as a detached process (own session, like `on_review`),
+- [x] Non-blocking turn end: snapshot, start the review as a detached process (own session, like `on_review`),
       return allow immediately with a notice ("Reviewing in the background; results appear in the status line").
       Its deadline no longer has to fit the Stop hook timeout.
-- [ ] The background review writes its findings to `prior` through `_write_back` (finishing after a new turn has
+- [x] The background review writes its findings to `prior` through `_write_back` (finishing after a new turn has
       started becomes the normal path; test it fully). It uses none of the turn's blocking rounds. If it left
       any `block`-gated issue (a blocker), the next Stop blocks with it as round 1, even when that turn changed
       nothing, and the usual round limit and confirm round follow.
-- [ ] Session lock: the background review holds the session lock for its whole run, as reviews do today, and
+- [x] Session lock: the background review holds the session lock for its whole run, as reviews do today, and
       writes back under it, so two reviews of one session never overlap. It has its own deadline, so it can't
       hold the lock forever; a killed one releases the flock and is recorded as `Review interrupted`.
       The next Stop waits for the lock (up to `deadline_s`) instead of skipping, then reviews its own turn.
       If the lock is still held at the deadline, it starts no review: it records `⚠ Not reviewed: earlier review
       still running` and keeps its turn's baseline as `pending_baseline`; the next `turn_start` uses that as the
       baseline, so the following review covers both turns' changes.
-- [ ] Delivery to the agent: turn start adds open non-blocking issues to the prompt as context, labelled "not
+- [x] Delivery to the agent: turn start adds open non-blocking issues to the prompt as context, labelled "not
       blocking; fix when convenient". Verify per harness which turn-start hooks accept added context (Claude does;
       Codex, Copilot and agy are unchecked). Where a harness can't, the issues still show in the status surfaces.
-- [ ] Awareness for users, distinct on every surface (status line, menu bar, `tagteam watch`, `tagteam status`):
+- [x] Awareness for users, distinct on every surface (status line, menu bar, `tagteam watch`, `tagteam status`):
       - running: `⟳ Reviewing in background` vs `⟳ Reviewing` (agent waiting)
       - findings: `✗ Changes requested` (blocking, red) vs a new `● Suggestions: N issues, not blocking` (blue)
       - the menu bar lists open issues grouped as Blocking / Not blocking; each run row shows its mode
       - the block message and the injected context both say which kind they are
       - `on_review` gets `TAGTEAM_MODE`
-- [ ] README: the two kinds, the defaults, how to change them.
-- [ ] Tests: tier lookup; repo file can't lower a tier; a small change returns allow at once and its findings
+- [x] README: the two kinds, the defaults, how to change them.
+- [x] Tests: tier lookup; repo file can't lower a tier; a small change returns allow at once and its findings
       land in `prior` with `gate=advise`; a carried advise issue re-checked at major stays `advise` and doesn't
       block, while the same issue re-checked as a blocker is upgraded to `block` and blocks; the next Stop waits for a running
       background review; at the lock deadline it records `Not reviewed` and the next review covers both turns;
@@ -240,6 +240,23 @@ still blocks.
       `Review interrupted`; surface strings per kind.
 - [ ] Live: headless Claude in a throwaway repo. A small buggy edit ends the turn at once, the status line shows
       background then `● Suggestions`, the next prompt gets the issues as context. A large change still blocks.
+- Context injection per harness (checked 2026-10-27): Claude, UserPromptSubmit `additionalContext` (yes). Codex,
+  yes: codex-rs `hooks/src/engine/output_parser.rs` `parse_user_prompt_submit` reads
+  `hookSpecificOutput.additionalContext`, and the `user-prompt-submit.command.output` schema has `hookEventName`
+  const `UserPromptSubmit`. Copilot, no: the GitHub hooks reference says config-file `userPromptSubmitted` hooks
+  "have their output dropped". agy, no: nothing documents PreInvocation output. `Author.can_add_context` records it.
+- Choices the plan left open: a review stays blocking while any open issue is block-gated, so a blocker's small
+  fix is re-checked in the foreground, not in the background. A background review runs only with a repo, a
+  snapshot and a `reviewers.use` list, else in the foreground (still advise-gated); if its reviewers would run
+  in place (no sandbox) it records `⚠ Not reviewed: no sandbox for a background review`. The plan gate also waits
+  for the lock (up to `deadline_s`); on timeout it is skipped as before. Reviewer counts now come from
+  `per_change[tier]`, where `high_risk` wins over `docs`/`large`: a user with `large > high_risk` gets
+  `high_risk` reviewers for a risky large change (it was the max of the two). Stop hook timeout is now
+  `2 * deadline_s + 60`; run `tagteam install` before the live test.
+- 265 tests pass. Mutation-checked: repo rule for `blocking`, tier precedence, the three gate rules and the
+  block-gated action, lock wait, pending baseline, `pass_fds` handoff, owed delivery, blocker carried as owed,
+  mismatch carry, blocking-cycle mode, pinned tree, background `changed` suppression, no-sandbox skip, the
+  `reviewers.use` guard, context injection (core and Codex encode), and each surface string.
 
 Decided: a blocker-severity finding blocks in any tier (gate rule 1). The severity label has to mean something,
 and a line count can't vouch for a change being safe.
