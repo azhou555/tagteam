@@ -278,27 +278,35 @@ leaves hooks with no reviewers; it never says what tagteam is; `--dry-run` dumps
 Shape: **look → choose → confirm → apply → next steps.** Nothing is written before the confirm.
 Decided with three subagent reviews (new user, maintainer, code fact-check): first cut only.
 
-- [ ] Intro: what tagteam is, the version, "your diffs go only to the reviewers you pick", one line per agent
+- [x] Intro: what tagteam is, the version, "your diffs go only to the reviewers you pick", one line per agent
       (installed · credentials found / sign-in unknown · tagteam hooks yes/no). Sign-in can only be "found" or
       "unknown": `signed_in_if` never returns False, and Claude on macOS keeps credentials in the keychain.
-- [ ] Stop before any prompt if fewer than two agents are installed, with the fix.
-- [ ] Reviewer picker: one note per agent (model/effort from config, credentials found or unknown).
-- [ ] `plan(agents)`: run the parse checks and render every hook file without writing (harness `install`
+- [x] Stop before any prompt if fewer than two agents are installed, with the fix.
+- [x] Reviewer picker: one note per agent (model/effort from config, credentials found or unknown).
+- [x] `plan(agents)`: run the parse checks and render every hook file without writing (harness `install`
       returns `(path, old, new)` from `base.save` in a dry run). One summary: per file "add/update tagteam's
       hooks", "route your status line through tagteam" when statusLine changes, config keys, the menu bar line.
-- [ ] `Apply? [Y/n]` (skipped with `--yes`); `--dry-run` prints the summary plus a unified diff per file and
+- [x] `Apply? [Y/n]` (skipped with `--yes`); `--dry-run` prints the summary plus a unified diff per file and
       stops. Ctrl-C before apply says nothing changed.
-- [ ] Apply order: routing migration, hooks, config, then menu bar. Each file is already atomic (`base.save`
+- [x] Apply order: routing migration, hooks, config, then menu bar. Each file is already atomic (`base.save`
       writes a temp file, re-parses, replaces) and backed up; the "updated" line names the backup. A failure
       names the file and the backups and exits 1; re-running converges (only tagteam's entries are replaced).
       A menu bar failure is reported and leaves hooks and config in place. No multi-file rollback (decided:
       it would also have to undo the status line originals and Codex trust snapshot; a re-run fixes it).
-- [ ] Next steps: Codex /hooks approval when Codex was wired, a concrete first test, `tagteam doctor` output,
+- [x] Next steps: Codex /hooks approval when Codex was wired, a concrete first test, `tagteam doctor` output,
       where the config lives.
-- [ ] `tagteam --help` and bare `tagteam` describe the package and the common commands.
-- [ ] Tests: summary and diff in a dry run write nothing; declining the confirm writes nothing; the picker
+- [x] `tagteam --help` and bare `tagteam` describe the package and the common commands.
+- [x] Tests: summary and diff in a dry run write nothing; declining the confirm writes nothing; the picker
       shows notes; precheck stops with one agent; a menu bar failure keeps the hooks; help text.
-- [ ] Live: dry run and a real re-run on this machine; clean-install script in a temp HOME.
+- [x] Live: dry run and a real re-run on this machine; clean-install script in a temp HOME.
 
 Deferred: authors picker (default stays every wired agent), review-style presets (`config.save_user` writes
 only lists; Light can't mean "nothing blocks"), per-reviewer model prompt, `--menubar` flag.
+
+Results (2026-10-28): 284 tests pass. Mutation-checked: the confirm gate, dry run writing nothing, a menu bar
+failure keeping the hooks, and unchanged files being skipped. Clean-install script ok from a temp HOME.
+Live on this machine: the dry run showed every hook file up to date and `reviewers.use stays agy, copilot`;
+the real run wrote only the menu bar plugin and launcher; doctor healthy (Codex still asks to re-approve
+hooks, as before this phase). Found live: install rewrote and backed up files it reported as up to date;
+apply now skips them. Incident during this phase: see lessons.md (a mis-invoked test run wrote to the real
+~/.tagteam; repaired, quarantined in ~/.tagteam/state-test-pollution-20261028/).

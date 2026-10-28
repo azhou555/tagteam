@@ -341,8 +341,11 @@ class Guided(unittest.TestCase):
         self.assertRegex(shown, r"updated .*settings\.json \(backup: settings\.json\.tagteam-bak-\d{14}\)")
         self.assertIn("Try it: ask claude for a change of 5+ lines. When its turn ends, codex reviews it", shown)
         doctor.run.assert_called_once_with(False, False)
+        after = self.settings.read_bytes()
         rc, shown = self.run_install(yes=True, reviewers=None)                   # a re-run changes nothing
         self.assertIn("already up to date", shown)
+        self.assertNotIn("updated", shown)
+        self.assertEqual(self.settings.read_bytes(), after)
         self.assertIn("reviewers.use stays codex", shown)
 
     def test_one_agent_stops_before_any_prompt(self):

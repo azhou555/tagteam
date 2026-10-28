@@ -234,6 +234,13 @@ def plan(agents):
             "menubar": menubar_plan()}
 
 
+def _same(old, new):
+    try:
+        return json.loads(old) == json.loads(new)
+    except ValueError:
+        return False
+
+
 def describe(old, new):
     """One line for a hook file's change: hooks added or updated, and the Claude status line taken over."""
     try:
@@ -245,6 +252,8 @@ def describe(old, new):
     def rest(d):
         return {k: v for k, v in d.items() if k != "statusLine"} if isinstance(d, dict) else d
     what = []
+    if _same(old, new):
+        return "already up to date"
     if rest(o) != rest(n):
         what.append("create it with tagteam's hooks" if not old else
                     "update tagteam's hooks" if base.TAG in old else "add tagteam's hooks")
@@ -288,8 +297,9 @@ def apply(p):
     A hook failure raises; a menu bar failure is reported and leaves the hooks in place."""
     if p["routing"] and config.migrate_routing():
         print('kept quota routing for your existing config (routing.mode = "quota")')
-    for name in p["files"]:
-        harnesses.get(name).author.install(p["entry"], p["stop_timeout"], False)
+    for name, (path, old, new) in p["files"].items():
+        if not _same(old, new):                           # an up-to-date file keeps its bytes and gets no backup
+            harnesses.get(name).author.install(p["entry"], p["stop_timeout"], False)
     try:
         install_swiftbar()
     except (OSError, subprocess.CalledProcessError) as e:
