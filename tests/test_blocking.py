@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import warnings
 from unittest import mock
 
 from tests.helpers import CFG, REAL_DETACH, ROOT, HookRig, finding, sh, state, use_toml, write_user_config
@@ -126,6 +127,10 @@ class Background(HookRig, unittest.TestCase):
 
     def setUp(self):
         self.rig(use_toml(["copilot"]), small_blocks=False)
+        quiet = warnings.catch_warnings()                # a detached review is never waited on, by design
+        quiet.__enter__()
+        warnings.simplefilter("ignore", ResourceWarning)
+        self.addCleanup(quiet.__exit__, None, None, None)
         self.n = 0
 
     def tearDown(self):
@@ -294,24 +299,24 @@ class Background(HookRig, unittest.TestCase):
         with limits.session_lock("claude", "sess1", wait=10) as (lock, _):
             self.assertEqual(lock, limits.HELD)
 
-    def test_a_real_detached_review(self):
-        """End to end through `python -m tagteam background`, with a stand-in copilot CLI on PATH."""
+    def test_a_real_detached_review_holds_the_session_until_it_writes_back(self):
+        """End to end through `python -m tagteam background`, with a slow stand-in copilot CLI on PATH."""
         bin_dir = tempfile.mkdtemp()
         out = json.dumps({"verdict": "changes_requested", "summary": "", "findings": [BUG]})
-        pathlib.Path(bin_dir, "copilot").write_text(f"#!/bin/sh\ncat <<'EOF'\n{out}\nEOF\n")
+        pathlib.Path(bin_dir, "copilot").write_text(f"#!/bin/sh\nsleep 2\ncat <<'EOF'\n{out}\nEOF\n")
         os.chmod(pathlib.Path(bin_dir, "copilot"), 0o755)
         self.start()
         with mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}), \
                 mock.patch.object(core, "_detach", REAL_DETACH):
             self.assertEqual(self.stop(), {"systemMessage": core.BACKGROUND})
-            end = time.time() + 60
-            while not self.session()["prior"]:
-                self.assertLess(time.time(), end)
-                time.sleep(0.1)
-        self.assertEqual(self.open_issues(), [("the loop skips the last item", "major", "advise")])
-        with limits.session_lock("claude", "sess1", wait=10) as (lock, _):
-            self.assertEqual(lock, limits.HELD)
-        self.assertEqual(state.read_jsonl(state.path("runs.jsonl"))[-1]["reviewers"], ["copilot"])
+            self.start("next")
+            self.assertEqual(self.session()["prior"], [])            # the child is still reviewing
+            self.stop(lines=200)                                      # waits for it, then reviews in the foreground
+        self.assertIn("the loop skips the last item", next(iter(self.calls[-1].values())))
+        runs = state.read_jsonl(state.path("runs.jsonl"))
+        self.assertEqual([(r["mode"], r["reviewers"], r["suggestions"]) for r in runs],
+                         [("advise", ["copilot"], 1), ("block", ["copilot"], 0)])
+        self.assertEqual(self.session()["prior"], [])
 
 
 class Surfaces(unittest.TestCase):
