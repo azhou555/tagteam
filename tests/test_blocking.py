@@ -199,6 +199,18 @@ class Background(HookRig, unittest.TestCase):
                                                            tool_input={"plan": "1. a\n2. b\n"}))
         self.assertEqual((out["hookSpecificOutput"]["permissionDecision"], self.detached), ("deny", []))
 
+    def test_a_running_background_review_neither_delays_nor_skips_the_plan_gate(self):
+        write_user_config(use_toml(["copilot"]))
+        self.start()
+        issue = finding("major", file="(proposed plan)", line=None, claim="step three has no rollback")
+        with limits.session_lock("claude", "sess1") as (lock, _), \
+                mock.patch.object(runner, "run_all", self.fake_run_all({"copilot": {"findings": [issue]}})):
+            t0 = time.monotonic()
+            out = self.run_hook("claude", "x", self.claude("PreToolUse", tool_name="ExitPlanMode",
+                                                           tool_input={"plan": "1. a\n2. b\n"}))
+            waited = time.monotonic() - t0
+        self.assertEqual((lock, out["hookSpecificOutput"]["permissionDecision"], waited < 5), ("held", "deny", True))
+
     def test_a_large_change_still_blocks(self):
         self.start()
         out = self.stop(BUG, lines=200)

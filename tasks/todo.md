@@ -248,8 +248,9 @@ still blocks.
 - Choices the plan left open: a review stays blocking while any open issue is block-gated, so a blocker's small
   fix is re-checked in the foreground, not in the background. A background review runs only with a repo, a
   snapshot and a `reviewers.use` list, else in the foreground (still advise-gated); if its reviewers would run
-  in place (no sandbox) it records `⚠ Not reviewed: no sandbox for a background review`. The plan gate also waits
-  for the lock (up to `deadline_s`); on timeout it is skipped as before. Reviewer counts now come from
+  in place (no sandbox) it records `⚠ Not reviewed: no sandbox for a background review`. The plan gate takes its
+  own session lock lane (`<session>:plan`), so a running background code review never delays or skips a plan;
+  the two write different session fields, each under the state lock. Reviewer counts now come from
   `per_change[tier]`, where `high_risk` wins over `docs`/`large`: a user with `large > high_risk` gets
   `high_risk` reviewers for a risky large change (it was the max of the two). Stop hook timeout is now
   `2 * deadline_s + 60`; run `tagteam install` before the live test.

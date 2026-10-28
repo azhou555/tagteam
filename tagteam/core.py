@@ -159,10 +159,10 @@ def review(ev, cfg, s, artifacts, round_no, run_tag, lock, confirm=False, rebutt
                    mode, pinned)
 
 
-def _session_guard(ev, wait, handler, *args, busy=None):
-    """Run handler(*args, lock, fd) holding this session's lock. A review already running for the session (a
+def _session_guard(ev, wait, handler, *args, busy=None, lane=""):
+    """Run handler(*args, lock, fd) holding this session's lock for `lane`. A review already running in it (a
     background one) is waited for, up to `wait` seconds; then busy() answers instead."""
-    with limits.session_lock(ev.agent, ev.session_id, wait) as (lock, fd):
+    with limits.session_lock(ev.agent, ev.session_id + lane, wait) as (lock, fd):
         if lock == limits.BUSY:
             state.log("earlier review still running for this session; not reviewing", author=ev.agent,
                       session=ev.session_id)
@@ -490,7 +490,7 @@ def _reverted(ev, cfg, s, sf, round_no, head):
 
 def plan_gate(ev, cfg):
     """Review a plan before the user approves it (Claude ExitPlanMode)."""
-    return _session_guard(ev, cfg["review"]["deadline_s"], _plan_gate, ev, cfg)
+    return _session_guard(ev, 0, _plan_gate, ev, cfg, lane=":plan")   # its own lane: a background code review never delays or skips a plan
 
 
 def _plan_gate(ev, cfg, lock, fd):
