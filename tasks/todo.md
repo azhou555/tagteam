@@ -303,7 +303,7 @@ Decided with three subagent reviews (new user, maintainer, code fact-check): fir
 Deferred: authors picker (default stays every wired agent), review-style presets (`config.save_user` writes
 only lists; Light can't mean "nothing blocks"), per-reviewer model prompt, `--menubar` flag.
 
-Results (2026-10-28): 284 tests pass. Mutation-checked: the confirm gate, dry run writing nothing, a menu bar
+Results (2026-10-28): 283 tests pass. Mutation-checked: the confirm gate, dry run writing nothing, a menu bar
 failure keeping the hooks, and unchanged files being skipped. Clean-install script ok from a temp HOME.
 Live on this machine: the dry run showed every hook file up to date and `reviewers.use stays agy, copilot`;
 the real run wrote only the menu bar plugin and launcher; doctor healthy (Codex still asks to re-approve
