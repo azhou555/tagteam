@@ -185,6 +185,15 @@ class Background(HookRig, unittest.TestCase):
         self.stop(lines=19)                                  # fixed: re-checked in the background, nothing left
         self.assertEqual(self.start("after"), {})
 
+    def test_the_plan_gate_always_blocks(self):
+        write_user_config("review.blocking.docs = false\n" + use_toml(["copilot"]))
+        self.start()
+        issue = finding("major", file="(proposed plan)", line=None, claim="step three has no rollback")
+        with mock.patch.object(runner, "run_all", self.fake_run_all({"copilot": {"findings": [issue]}})):
+            out = self.run_hook("claude", "x", self.claude("PreToolUse", tool_name="ExitPlanMode",
+                                                           tool_input={"plan": "1. a\n2. b\n"}))
+        self.assertEqual((out["hookSpecificOutput"]["permissionDecision"], self.detached), ("deny", []))
+
     def test_a_large_change_still_blocks(self):
         self.start()
         out = self.stop(BUG, lines=200)

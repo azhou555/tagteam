@@ -1,8 +1,9 @@
 # tagteam
 
 When a coding agent finishes a turn that changed code, a design doc, or a plan, a *different* agent
-reviews the change, read-only. If the reviewers find a real problem, the author is told to fix it before
-the turn ends. Works with Claude Code, Codex, Copilot CLI, and Antigravity (`agy`). Hooks fail open: if
+reviews the change, read-only. For a large change, a plan or a design, the author waits for the review and
+is told to fix any real problem before the turn ends. A small code change is reviewed in the background
+instead, and its findings come back as suggestions. Works with Claude Code, Codex, Copilot CLI, and Antigravity (`agy`). Hooks fail open: if
 tagteam breaks, your agent is never blocked.
 
 Everything stays on your machine. tagteam calls the agent apps you already have installed and logged in;
@@ -68,6 +69,41 @@ never starts a review.
 
 Skip reviews with `TAGTEAM=off claude` (one session) or `touch <repo>/.tagteam-off` (one repo).
 
+## Blocking and non-blocking reviews
+
+Every change falls into one tier: `high_risk` (a path matched by `classify.risk`), `docs` (a plan or a
+design doc), `large` (a code change of at least `review.large_lines` lines), or `small` (any other code
+change). `review.blocking` says which tiers make the author wait:
+
+```toml
+[review]
+blocking = { small = false, large = true, high_risk = true, docs = true }   # the defaults
+```
+
+- **Blocking review.** The turn ends only after the review. Issues at or above `review.block_at` are sent
+  back to the author (`✗ Changes requested`), who fixes them or says why not, for up to
+  `limits.max_rounds_per_turn` rounds plus a last confirm review.
+- **Non-blocking review.** The turn ends at once with `⟳ Reviewing in the background; results appear in
+  the status line`. The review runs on its own, against the tree the turn ended with, and spends none of the
+  turn's rounds. Its issues become suggestions (`● Suggestions: N issues, not blocking`). At the start of the
+  next prompt, Claude Code and Codex get the open suggestions as context labelled "not blocking; fix when
+  convenient". Copilot and agy can't take added context at that point, so there the suggestions show only
+  in the status line and the menu bar.
+
+Three rules decide each issue's kind, in this order: a `blocker` always blocks, in any tier (a background
+review's blocker blocks the next Stop as round 1, even if that turn changed nothing); an issue that was
+already a suggestion stays one when it is re-checked; anything else takes the kind of the review that found
+it. Once a blocking cycle is open, the reviews that re-check its fixes are blocking too, however small the
+fix. The plan gate (Claude's `ExitPlanMode`) is always blocking.
+
+Only one review of a session runs at a time. If a background review is still running when the next turn
+ends, that turn waits for it, up to `review.deadline_s`. If it is still running then, the turn is not
+reviewed (`⚠ Not reviewed: earlier review still running`), and the next turn's review covers both turns'
+changes.
+
+To make every change blocking, set `blocking = { small = true }` under `[review]` in
+`~/.tagteam/config.toml`. A repo's `.tagteam.toml` may switch a tier to blocking, never back.
+
 ## What you'll see
 
 Reviewers read your change in a **throwaway checkout**, not your working tree, and are run with their own
@@ -80,12 +116,14 @@ the notice at the end of the turn, in `tagteam watch` and `tagteam status`, and 
 
 | Result | Color | Meaning |
 |---|---|---|
-| `⟳ Reviewing changes` | peach | Reviewers are checking this turn now; shows each reviewer's progress |
+| `⟳ Reviewing changes` | peach | Reviewers are checking this turn now and the author is waiting; shows each reviewer's progress |
+| `⟳ Reviewing in background` | peach | A non-blocking review is running; the author has moved on |
 | `✓ Review passed` | mint | The review found nothing that must be fixed |
 | `✗ Changes requested` | rose | Issues were sent back (`N issues to fix (round 1/2)`); the agent must fix them or say why not |
+| `● Suggestions` | blue | Issues that don't block (`N issues, not blocking`); the agent is told at its next prompt |
 | `✓ Issues resolved` | mint | An earlier block was settled: `all N fixed and re-checked`, or `changes reverted` |
 | `⚠ Unresolved` | apricot | The last re-check still found issues after the fix rounds (`N issues still open after 2 fix rounds`); the turn is allowed |
-| `⚠ Not reviewed` | yellow | No reviewer was available, no reviewers are configured, the review limit was reached, the repo was too slow to sandbox, or tagteam hit a state error |
+| `⚠ Not reviewed` | yellow | No reviewer was available, no reviewers are configured, the review limit was reached, an earlier review was still running, the repo was too slow to sandbox, or tagteam hit a state error |
 | `⚠ Review failed` | yellow | Every reviewer errored or timed out |
 | `⚠ Review interrupted` | yellow | The review stopped before reviewers finished (`stopped before reviewers finished`), for example because its hook process was killed; open issues stay open |
 
@@ -115,7 +153,8 @@ restores your original.
 **Menu bar (macOS).** With [SwiftBar](https://github.com/swiftbar/SwiftBar) installed
 (`brew install --cask swiftbar`), `install` adds a menu bar item covering all four agents: a sage
 two-person icon, a status icon, and today's review count (or the elapsed time while a review runs). The
-dropdown lists running reviews, counts, and recent reviews; click one to open its run folder. If SwiftBar
+dropdown lists running reviews, open issues grouped as Blocking and Not blocking, counts, and recent
+reviews with each one's kind; click one to open its run folder. If SwiftBar
 has no plugin folder yet, `install` uses `~/SwiftBar`. `install` also adds `~/Applications/tagteam.app`, so
 typing "tagteam" in Spotlight brings the item back. Without SwiftBar, or on Linux, the menu bar is skipped.
 
@@ -134,6 +173,7 @@ Defaults work with no config beyond the reviewer list. Put your changes in `~/.t
 | `triggers.kinds` | `["code", "plan", "design"]` | Which kinds of change start a review |
 | `triggers.min_changed_lines` | `5` | Smaller code changes are skipped in round 1 |
 | `review.per_change` | `small=1, large=2, high_risk=2, docs=2` | Reviewers per change |
+| `review.blocking` | `small=false`, others `true` | Which tiers make the author wait (see [Blocking and non-blocking reviews](#blocking-and-non-blocking-reviews)) |
 | `review.large_lines` | `150` | A code change this big counts as large |
 | `review.block_at` | `major` | Lowest severity that blocks (`blocker`, `major`, `minor`) |
 | `review.min_confidence` | `0.6` | Findings below this confidence are dropped |
@@ -150,8 +190,9 @@ Defaults work with no config beyond the reviewer list. Put your changes in `~/.t
 **Review notifications.** Set `hooks.on_review` to a shell command and tagteam starts it, detached, each
 time a review is recorded, including skipped and interrupted ones. The command gets the run as JSON on
 stdin, with two extra fields: `outcome` (`passed`, `blocked`, `resolved`, `unresolved`, `unreviewed`,
-`failed`, `interrupted`) and `summary` (the status-line text). The same two values are in the environment as
-`TAGTEAM_OUTCOME` and `TAGTEAM_SUMMARY`, and `TAGTEAM_DEPTH` is set, so an agent the command starts is not
+`failed`, `interrupted`, `suggestions`) and `summary` (the status-line text). The same two values are in the
+environment as `TAGTEAM_OUTCOME` and `TAGTEAM_SUMMARY`, `TAGTEAM_MODE` is `block` or `advise` (the run's
+kind), and `TAGTEAM_DEPTH` is set, so an agent the command starts is not
 reviewed. tagteam never waits for the command, and a failure is only logged. Only `~/.tagteam/config.toml`
 can set it. For example, a macOS notification:
 
@@ -184,6 +225,7 @@ defaults:
 | `review.block_at` | make it stricter (block on more severities, for example `minor`) |
 | `review.min_confidence` | lower it |
 | `review.per_change.small`, `.large`, `.high_risk`, `.docs` | raise them (more reviewers per change) |
+| `review.blocking.small`, `.large`, `.high_risk`, `.docs` | switch them to `true` (make that tier blocking) |
 | `review.large_lines` | lower it (minimum 1) |
 | `classify.risk` | add patterns |
 | `limits.max_rounds_per_turn`, `limits.max_reviews_per_hour` | lower them (minimum 1) |
@@ -210,8 +252,8 @@ defaults:
 | Rounds per turn | `limits.max_rounds_per_turn = 2` | After two blocking rounds, one last confirm review runs that cannot block; then the turn is always allowed |
 | Reviews per hour | `limits.max_reviews_per_hour = 30` | Across all sessions and agents; past it you see `review limit reached (30 per hour)` and turns are allowed unreviewed. A crashed run still counts |
 | No repeat reviews | always | A diff already approved is not reviewed again; a diff already blocked gets the same block re-issued without spending a review |
-| One review at a time | always | A second trigger in the same session while a review runs is skipped, not queued |
-| Hook time budget | `review.deadline_s = 240` | Reviewers get what is left of `deadline_s` after setup (snapshots, checkouts). If setup alone takes over `min(60, deadline_s / 2)` seconds, the turn is allowed with `⚠ Not reviewed: repo too slow to sandbox, see tagteam.log` |
+| One review at a time | always | A second trigger in the same session waits for the running review, up to `review.deadline_s`; past that, the turn is allowed with `⚠ Not reviewed: earlier review still running` and the next review covers it |
+| Hook time budget | `review.deadline_s = 240` | Reviewers get what is left of `deadline_s` after setup (snapshots, checkouts). If setup alone takes over `min(60, deadline_s / 2)` seconds, the turn is allowed with `⚠ Not reviewed: repo too slow to sandbox, see tagteam.log`. The Stop hook timeout is `2 × deadline_s + 60`: one wait, then one review. A background review that overstays `deadline_s` by two minutes is stopped and shows as `⚠ Review interrupted` |
 | Failure breaker | `limits.cooldown_min = 15` | A reviewer that errors twice in a row is paused for 15 minutes; if all are paused, the turn is allowed with `⚠ Not reviewed`. `tagteam doctor` shows paused reviewers and `tagteam doctor --clear` resumes them |
 
 If tagteam's own state files can't be read or written, it skips the review and says
@@ -241,7 +283,9 @@ and 1 otherwise, and prints the fix in plain words.
 
 **tagteam itself:** run the install command above again with `--reinstall`. The
 hooks call the stable `tagteam` path, so they need no rewrite. Afterwards `tagteam doctor` shows anything
-that needs attention.
+that needs attention. Coming from a version without background reviews, run `tagteam install` once more:
+it raises the Stop hook timeout so a turn can wait for a background review (and in Codex,
+re-approve its hooks if `tagteam doctor` says so).
 
 **From an older checkout-based install** (hooks that run `<repo>/bin/tagteam`):
 
