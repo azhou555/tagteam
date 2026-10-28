@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -361,6 +362,15 @@ class Guided(unittest.TestCase):
             self.assertTrue(install._paint().on)
             with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
                 self.assertFalse(install._paint().on)
+
+    def test_codex_reminder_follows_codex_trust_not_this_run(self):
+        p = {"files": {"codex": (self.settings, "same", "same")}}                    # unchanged by this run
+        for trust, shown in (("stale", True), ("unapproved", True), (None, True), ("trusted", False)):
+            h = dataclasses.replace(harnesses.ALL["codex"], hook_trust=lambda t=trust: t)
+            out = io.StringIO()
+            with mock.patch.dict(harnesses.ALL, {"codex": h}), contextlib.redirect_stdout(out):
+                install.next_steps(p)
+            self.assertEqual("run /hooks, and approve" in out.getvalue(), shown, trust)
 
     def test_one_agent_stops_before_any_prompt(self):
         with mock.patch.object(harnesses, "detected", return_value=["claude"]), \
