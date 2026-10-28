@@ -129,11 +129,13 @@ def set_consent(reviewers, authors, yes, dry_run=False):
     """Save who may review (`reviewers.use`) and whose turns are reviewed. Never derived from detection:
     the list comes from --reviewers or an answer at the prompt, and --yes alone saves none."""
     found = [n for n in harnesses.detected() if harnesses.get(n).reviewer]
+    old, use = {}, None
     if reviewers is None and not yes and found:
         old = config.load().get("reviewers", {})
-        reviewers = ask_consent(found, [n for n in old.get("use") or [] if n in found]
-                                or [n for n in found if old.get(n, {}).get("enabled") is True])
-    if reviewers:
+        use = old.get("use")                          # None: never saved; [] was saved on purpose
+        reviewers = ask_consent(found, [n for n in use if n in found] if use is not None
+                                else [n for n in found if old.get(n, {}).get("enabled") is True])
+    if reviewers or (reviewers == [] and use):        # deselecting a saved list at the prompt clears it
         saved = {"reviewers": ("reviewers", "use", reviewers)}
     else:
         saved = {}
@@ -142,7 +144,7 @@ def set_consent(reviewers, authors, yes, dry_run=False):
     if authors is not None:
         saved["authors"] = ("authors", "review", authors)
     for table, key, items in saved.values():
-        print(f"{'would save' if dry_run else 'saved'} {table}.{key} = {', '.join(items)}")
+        print(f"{'would save' if dry_run else 'saved'} {table}.{key} = {', '.join(items) or '(none): nothing is reviewed'}")
         if not dry_run:
             config.save_user(table, key, items)
 

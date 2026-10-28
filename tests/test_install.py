@@ -337,6 +337,22 @@ class Consent(unittest.TestCase):
             self.consent()
         ask.assert_called_once_with(["codex", "copilot"], ["copilot"])
 
+    def test_deselecting_a_saved_list_at_the_prompt_clears_it(self):
+        write_user_config('[reviewers]\nuse = ["copilot"]\n')
+        with mock.patch.object(install, "ask_consent", return_value=[]):
+            shown = self.consent()
+        self.assertEqual((config.load()["reviewers"]["use"], "saved reviewers.use = (none): nothing is reviewed" in shown),
+                         ([], True))
+        with mock.patch.object(install, "ask_consent", side_effect=AssertionError("prompted")):
+            self.consent(yes=True)                           # --yes alone leaves the saved list as it is
+        self.assertEqual(config.load()["reviewers"]["use"], [])
+
+    def test_an_empty_saved_list_preselects_nothing_not_legacy(self):
+        write_user_config('[reviewers]\nuse = []\n[agents.codex]\nenabled = true\n')
+        with mock.patch.object(install, "ask_consent", return_value=[]) as ask:
+            self.consent()
+        ask.assert_called_once_with(["codex", "copilot"], [])
+
     def test_ask_orders_choices_and_shows_copy(self):
         got, shown = self.ask("2,1\n")
         self.assertEqual(got, ["copilot", "codex"])
