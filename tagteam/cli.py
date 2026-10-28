@@ -123,11 +123,13 @@ def status(days):
     if running:
         print("\nRunning now:")
         for r in running:
-            print(f"  {r['run_id']}  {r['author']:7} -> {','.join(r['reviewers'])}  {now - r['started']:.0f}s")
+            print(f"  {r['run_id']}  {r['author']:7} -> {','.join(r['reviewers'])}  {now - r['started']:.0f}s"
+                  f"{'  in background' if r.get('background') else ''}")
     if runs:
         print("\nRecent runs:")
         for r in runs[-5:]:
-            print(f"  {r['run_id']}  {r['author']:7} -> {','.join(r['reviewers']) or '-':20} {live.summary(r)}")
+            print(f"  {r['run_id']}  {r['author']:7} -> {','.join(r['reviewers']) or '-':20} {live.summary(r)}"
+                  f"  ({live._mode(r)})")
 
 
 def show_config():

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -11,7 +13,7 @@ from unittest import mock
 
 from tests.helpers import CFG, REAL_DETACH, ROOT, HookRig, finding, sh, state, use_toml, write_user_config
 
-from tagteam import adapters, core, limits, live, runner, sandbox, verdict
+from tagteam import adapters, cli, core, limits, live, quota, runner, sandbox, verdict
 
 BUG = finding(file="feature.py", line=1, claim="the loop skips the last item")
 
@@ -301,6 +303,67 @@ class Background(HookRig, unittest.TestCase):
         with limits.session_lock("claude", "sess1", wait=10) as (lock, _):
             self.assertEqual(lock, limits.HELD)
         self.assertEqual(state.read_jsonl(state.path("runs.jsonl"))[-1]["reviewers"], ["copilot"])
+
+
+class Surfaces(unittest.TestCase):
+    """Every surface tells a review the author waits for from one it doesn't."""
+
+    def run_rec(self, **kw):
+        return {"ts": time.time(), "run_id": "x", "author": "claude", "session_id": "s", "tag": "turn", "round": 1,
+                "max_rounds": 2, "prior": 0, "confirm": False, "mode": "advise", "reviewers": ["copilot"],
+                "action": "allow", "blocking": 0, "suggestions": 2, "advisory": 0, "failed": [], "duration": 3.0, **kw}
+
+    def running(self, **kw):
+        now = time.time()
+        return live.tracking({"run_id": "r1", "author": "claude", "session_id": "s", "tag": "turn", "round": 1,
+                              "max_rounds": 2, "reviewers": ["copilot"], "started": now, "expires": now + 300, **kw})
+
+    def test_running(self):
+        with self.running(mode="advise", background=True):
+            self.assertIn("tagteam ⟳ Reviewing in background · copilot … 0s", live.segment("claude", "s"))
+            self.assertIn("  ⟳ Reviewing in background  claude  copilot … 0s", live.render_watch())
+            self.assertIn("⟳ Reviewing in background · claude → copilot | color=", live.render_swiftbar())
+        with self.running():
+            self.assertIn("tagteam ⟳ Reviewing changes, round 1/2 · copilot … 0s", live.segment("claude", "s"))
+            self.assertIn("⟳ Reviewing changes, round 1/2 · claude → copilot | color=", live.render_swiftbar())
+
+    def test_findings(self):
+        self.assertEqual(live.summary(self.run_rec()), "● Suggestions: 2 issues, not blocking")
+        self.assertEqual(live.summary(self.run_rec(suggestions=1, advisory=1, prior=3)),
+                         "● Suggestions: 1 issue, not blocking, 1 minor note")
+        self.assertEqual(live.summary(self.run_rec(mode="block", action="block", blocking=1)),
+                         "✗ Changes requested: 1 issue to fix (round 1/2)")
+        self.assertEqual((live.KINDS["suggestions"]["hex"], live.KINDS["blocked"]["hex"]), ("#3B7DC4,#B3D4FF", "#C8554F,#FFB3B3"))
+        live.record_run(self.run_rec())
+        self.assertIn("tagteam\x1b[0m \x1b[38;5;153m● Suggestions: 2 issues, not blocking\x1b[0m", live.segment("claude", "s", color=True))
+        self.assertIn("● Suggestions: 2 issues, not blocking  (not blocking, 3s)", live.render_watch())
+        self.assertIn("● Suggestions: 2 issues, not blocking · not blocking | color=#3B7DC4,#B3D4FF", live.render_swiftbar())
+        self.assertIn("sfcolor2=#3B7DC4,#B3D4FF", live.render_swiftbar().splitlines()[0])
+
+    def test_menu_bar_groups_open_issues(self):
+        state.write_json(state.path("sessions", "claude-s.json"), {"prior": [
+            {**finding("minor", file="b.py", claim="name is unclear"), "gate": "advise"},
+            {**finding("blocker", file="a.py", claim="drops the last row"), "gate": "block"}]})
+        out = live.render_swiftbar().splitlines()
+        i = out.index("Open issues · Blocking | size=11 color=gray")
+        self.assertEqual(out[i:i + 4], [
+            "Open issues · Blocking | size=11 color=gray", "[blocker] a.py: drops the last row (claude) | color=#C8554F,#FFB3B3",
+            "Open issues · Not blocking | size=11 color=gray", "[minor] b.py: name is unclear (claude) | color=#3B7DC4,#B3D4FF"])
+
+    def test_status_command(self):
+        live.record_run(self.run_rec())
+        out = io.StringIO()
+        with self.running(mode="advise", background=True), mock.patch.object(quota, "headroom", return_value=None), \
+                contextlib.redirect_stdout(out):
+            cli.status(7)
+        self.assertRegex(out.getvalue(), r"r1  claude  -> copilot  \d+s  in background")
+        self.assertIn("● Suggestions: 2 issues, not blocking  (not blocking)", out.getvalue())
+
+    def test_on_review_gets_the_mode(self):
+        write_user_config('[hooks]\non_review = "true"\n')
+        with mock.patch("subprocess.Popen") as popen:
+            live.record_run(self.run_rec())
+        self.assertEqual(popen.call_args.kwargs["env"]["TAGTEAM_MODE"], "advise")
 
 
 if __name__ == "__main__":

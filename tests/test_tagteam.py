@@ -509,7 +509,7 @@ class Live(unittest.TestCase):
         self.assertTrue(live.segment("claude", "s").startswith(
             "tagteam ⚠ Review interrupted: stopped before reviewers finished · 2 earlier issues not re-checked · "))
         self.assertIn("⚠ Review interrupted", live.render_watch())
-        self.assertIn(f"Review interrupted: stopped before reviewers finished · 2 earlier issues not re-checked "
+        self.assertIn(f"Review interrupted: stopped before reviewers finished · 2 earlier issues not re-checked · blocking "
                       f"| color={live.KINDS['interrupted']['hex']}", live.render_swiftbar())
 
     def test_killed_review_lands_before_a_later_run(self):
@@ -555,7 +555,7 @@ class Live(unittest.TestCase):
         self.assertIn("\x1b[38;5;217m✗ Changes requested: 1 issue to fix (round 1/2)\x1b[0m", seg)
         self.assertNotIn("48;5", seg)                                        # no background blocks
         with live.tracking(self.rec()):
-            self.assertIn("\x1b[38;5;223m⟳ Reviewing changes\x1b[0m", live.segment("claude", "s", color=True))
+            self.assertIn("\x1b[38;5;223m⟳ Reviewing changes, round 1/2\x1b[0m", live.segment("claude", "s", color=True))
 
     def test_swiftbar_states(self):
         self.assertTrue(live.render_swiftbar().startswith(
@@ -565,7 +565,7 @@ class Live(unittest.TestCase):
         rose = live.KINDS["blocked"]["hex"]
         self.assertTrue(out.startswith(":person.2.fill: :xmark.octagon.fill: 1 | "), out)
         self.assertIn(f"sfcolor2={rose}", out.splitlines()[0])
-        self.assertIn(f"Changes requested: 1 issue to fix (round 1/2) | color={rose} bash=/usr/bin/open", out)
+        self.assertIn(f"Changes requested: 1 issue to fix (round 1/2) · blocking | color={rose} bash=/usr/bin/open", out)
         live.note_error()
         head = live.render_swiftbar().splitlines()[0]
         self.assertIn(":exclamationmark.triangle.fill:", head)

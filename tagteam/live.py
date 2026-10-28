@@ -290,6 +290,31 @@ def _plural(n, word):
     return f"{n} {word}{'s' if n != 1 else ''}"
 
 
+def _doing(r):
+    """What a running review is, in words: `⟳ Reviewing in background` when the author isn't waiting."""
+    if r.get("background"):
+        return "⟳ Reviewing in background"
+    return f"⟳ Reviewing {'plan' if r['tag'] == 'plan-gate' else 'changes'}, round {r['round']}/{r['max_rounds']}"
+
+
+def _mode(run):
+    return "blocking" if run.get("mode", "block") == "block" else "not blocking"
+
+
+def open_issues(now=None):
+    """[(author, issue)] still open in sessions active in the last week."""
+    now = now or time.time()
+    out = []
+    for p in sorted(state.path("sessions", "x").parent.glob("*.json")):
+        try:
+            fresh = p.stat().st_mtime >= now - SESSION_TTL
+        except OSError:
+            continue
+        s = state.read_json(p) if fresh else None
+        out += [(p.stem.split("-", 1)[0], f) for f in (s or {}).get("prior") or [] if isinstance(f, dict)]
+    return out
+
+
 def segment(agent, session_id, now=None, color=False):
     """The tagteam line for one agent session's status bar."""
     now = now or time.time()
@@ -300,9 +325,7 @@ def segment(agent, session_id, now=None, color=False):
     head = paint.brand("tagteam")
     if mine:
         r = mine[-1]
-        what = "plan" if r["tag"] == "plan-gate" else "changes"
-        parts = [f"{head} {paint.kind('running', f'⟳ Reviewing {what}')}, round {r['round']}/{r['max_rounds']}",
-                 _progress(r, now, paint)]
+        parts = [f"{head} {paint.kind('running', _doing(r))}", _progress(r, now, paint)]
     elif last := s["sessions"].get(f"{agent}:{session_id}"):
         kind, detail = outcome(last)
         parts = [f"{head} {paint.kind(kind, summary(last))}", paint.dim(_ago(last["ts"], now))]
@@ -379,8 +402,8 @@ def render_watch(now=None, recent=5, color=False):
     lines = [f"tagteam watch  {time.strftime('%H:%M:%S', time.localtime(now))}", ""]
     running = active(now)
     lines.append(f"Running ({len(running)}):")
-    lines += [f"  {paint.kind('running', '⟳')} {r['author']:7} {r['tag']} round {r['round']}/{r['max_rounds']}  "
-              f"{_progress(r, now, paint)}" for r in running] or ["  none"]
+    lines += [f"  {paint.kind('running', _doing(r))}  {r['author']:7} {_progress(r, now, paint)}"
+              for r in running] or ["  none"]
     today, week = _today_and_week(now)
     lines.append(f"\nReviews today: {len(today)}")
     for key, label in (("author", "by author"), ("reviewers", "by reviewer")):
@@ -391,7 +414,7 @@ def render_watch(now=None, recent=5, color=False):
     for r in week[-recent:][::-1]:
         kind = outcome(r)[0]
         lines.append(f"  {_when(r['ts'], now):9}  {r['author']:7} -> {','.join(r['reviewers']) or '-':14} "
-                     f"{paint.kind(kind, summary(r))}  ({_dur(r['duration'])})")
+                     f"{paint.kind(kind, summary(r))}  ({_mode(r)}, {_dur(r['duration'])})")
     if not week:
         lines.append("  none")
     if s["errors"]:
@@ -442,9 +465,17 @@ def render_swiftbar(now=None, recent=8):
     if running:
         lines.append(_sb("Running", size=11, color="gray"))
         for r in running:
-            lines.append(_sb(f"⟳ {r['author']} → {', '.join(r['reviewers'])} · round {r['round']}/{r['max_rounds']}",
-                             color=KINDS["running"]["hex"]))
+            lines.append(_sb(f"{_doing(r)} · {r['author']} → {', '.join(r['reviewers'])}", color=KINDS["running"]["hex"]))
             lines.append(_sb(f"    {_progress(r, now)}", font="Menlo", size=12))
+        lines.append("---")
+    issues = open_issues(now)
+    for gate, label, kind in (("block", "Blocking", "blocked"), ("advise", "Not blocking", "suggestions")):
+        mine = [(a, f) for a, f in issues if f.get("gate", "block") == gate]
+        if mine:
+            lines.append(_sb(f"Open issues · {label}", size=11, color="gray"))
+            lines += [_sb(f"[{f.get('severity')}] {f.get('file') or '(general)'}: {f.get('claim')} ({a})",
+                          color=KINDS[kind]["hex"]) for a, f in mine[:8]]
+    if issues:
         lines.append("---")
     lines.append(_sb(f"Reviews today: {len(today)}", size=11, color="gray"))
     if today:
@@ -456,7 +487,8 @@ def render_swiftbar(now=None, recent=8):
     for r in week[-recent:][::-1]:
         kind_r = outcome(r)[0]
         run_dir = state.path("runs", r["run_id"], "x").parent
-        lines.append(_sb(f"{_when(r['ts'], now):9}  {r['author']} → {', '.join(r['reviewers']) or '—'}: {summary(r)}",
+        lines.append(_sb(f"{_when(r['ts'], now):9}  {r['author']} → {', '.join(r['reviewers']) or '—'}: {summary(r)}"
+                         f" · {_mode(r)}",
                          color=KINDS[kind_r]["hex"], bash="/usr/bin/open", param1=f'"{run_dir}"', terminal="false"))
     if not week:
         lines.append(_sb("none yet", color="gray"))
