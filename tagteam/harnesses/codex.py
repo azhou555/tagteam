@@ -21,12 +21,15 @@ def snapshot_path():
     return state.HOME / "codex-trust-at-install.json"
 
 
+def _keys(event, i, group):
+    """Codex's approval keys for one hook group: `<file>:<snake_event>:<group>:<hook>`."""
+    return [f"{PATH}:{re.sub(r'(?<!^)(?=[A-Z])', '_', event).lower()}:{i}:{j}" for j in range(len(group.get("hooks", [])))]
+
+
 def _our_keys():
     hooks = json.loads(PATH.read_text()).get("hooks", {})
-    return [f"{PATH}:{re.sub(r'(?<!^)(?=[A-Z])', '_', event).lower()}:{i}:{j}"
-            for event, groups in hooks.items() if isinstance(groups, list)
-            for i, g in enumerate(groups) if base.ours(g)
-            for j in range(len(g.get("hooks", [])))]
+    return [k for event, groups in hooks.items() if isinstance(groups, list)
+            for i, g in enumerate(groups) if base.ours(g) for k in _keys(event, i, g)]
 
 
 def _records():
@@ -38,12 +41,15 @@ def _hash(records, key):
     return h if isinstance(h, str) else None
 
 
-def save_trust_snapshot():
+def save_trust_snapshot(before=None):
     """Codex keys approvals by hook position, so rewriting a hook leaves its old approval in place but stale.
-    Remember which approvals existed at install so `hook_trust` can tell them from ones given after."""
+    Remember which approvals existed at install so `hook_trust` can tell them from ones given after. Only the
+    hooks this install changed (all of them without `before`, our entries before it): an unchanged hook's old
+    approval is still valid, and Codex doesn't ask again."""
     try:
         records = _records() if CONFIG.exists() else {}      # no Codex config yet: nothing was approved before
-        snap = {k: h for k in _our_keys() if (h := _hash(records, k))}
+        changed = [k for e, i, g in _our_entries() or [] if (e, i, g) not in (before or []) for k in _keys(e, i, g)]
+        snap = {k: h for k in changed if (h := _hash(records, k))}
         snapshot_path().parent.mkdir(parents=True, exist_ok=True)
         snapshot_path().write_text(json.dumps(snap, indent=2) + "\n")
     except (OSError, ValueError):
@@ -82,7 +88,7 @@ def install(entry_cmd, stop_timeout, dry_run):
     before = _our_entries()
     change = install_claude_shaped("codex", PATH, entry_cmd, stop_timeout, dry_run)
     if not dry_run and _our_entries() != before:     # unchanged hooks keep their approvals: so must the snapshot
-        save_trust_snapshot()
+        save_trust_snapshot(before)
     return change
 
 

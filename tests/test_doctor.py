@@ -238,6 +238,17 @@ class CodexTrust(unittest.TestCase):
             codex_h.install("/opt/tagteam", 100, dry_run=False)                       # changed hooks: re-approve
             self.assertEqual(codex_h.hook_trust(), "stale")
 
+    def test_a_hook_the_install_left_alone_keeps_its_approval(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            codex_h.install("/bin/tagteam", 100, dry_run=False)
+            self.records({k: "sha256:approved" for k in codex_h._our_keys()})
+            codex_h.install("/bin/tagteam", 540, dry_run=False)                       # only the Stop timeout changes
+        stop = next(k for k in codex_h._our_keys() if ":stop:" in k)
+        self.assertEqual(set(json.loads(self.snap.read_text())), {stop})              # the others weren't touched
+        self.assertEqual(codex_h.hook_trust(), "stale")                               # Stop needs re-approval
+        self.records({**{k: "sha256:approved" for k in codex_h._our_keys()}, stop: "sha256:new"})
+        self.assertEqual(codex_h.hook_trust(), "trusted")                             # re-approving Stop is enough
+
     def test_unreadable_files(self):
         self.cfg.write_text("not [ toml")
         self.assertIsNone(codex_h.hook_trust())
