@@ -50,6 +50,10 @@ you confirm:
    `--agents claude,codex` names them explicitly.
 4. **Next steps.** Codex approval if needed, a first change to try, and `tagteam doctor`'s health check.
 
+On a terminal each agent has its own color (claude orange, codex mint, copilot lavender, agy blue), what
+will change is highlighted, and what stays as it is is dimmed. Set `NO_COLOR=1` for plain text; piped
+output is always plain.
+
 tagteam never sends code to an agent just because it is installed. The list is saved as `reviewers.use`
 in `~/.tagteam/config.toml`, and **with no list, nothing is reviewed**: hooks run, turns are allowed, and
 you see `⚠ Not reviewed: no reviewers configured; run tagteam install`.

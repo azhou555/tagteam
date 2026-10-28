@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import pty
+import re
 import shlex
 import subprocess
 import sys
@@ -348,6 +349,19 @@ class Guided(unittest.TestCase):
         self.assertEqual(self.settings.read_bytes(), after)
         self.assertIn("reviewers.use stays codex", shown)
 
+    def test_a_terminal_gets_colors_and_no_color_turns_them_off(self):
+        p = {"files": {"claude": (self.settings, self.settings.read_text(), self.settings.read_text())},
+             "routing": False, "menubar": "write ~/SwiftBar/tagteam.2s.sh"}
+        shown = install.summary(p, ["agy", "codex"], None, install.live.Paint(True))
+        self.assertIn("\x1b[38;5;111magy\x1b[0m, \x1b[38;5;151mcodex\x1b[0m", shown)    # each agent its own color
+        self.assertIn("\x1b[2malready up to date\x1b[0m", shown)                         # unchanged is dimmed
+        self.assertIn(f"\x1b[38;5;{install.CHANGE}mwrite ~/SwiftBar", shown)              # a change stands out
+        self.assertNotIn("\x1b", install.summary(p, ["agy"], None))                       # plain by default
+        with mock.patch("sys.stdout.isatty", return_value=True):
+            self.assertTrue(install._paint().on)
+            with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
+                self.assertFalse(install._paint().on)
+
     def test_one_agent_stops_before_any_prompt(self):
         with mock.patch.object(harnesses, "detected", return_value=["claude"]), \
                 mock.patch.object(install, "ask_consent", side_effect=AssertionError("prompted")):
@@ -423,6 +437,8 @@ class Consent(unittest.TestCase):
             out += chunk
         os.waitpid(pid, 0)
         text = out.decode().replace("\x1b[2K", "").replace("\x1b[?25l", "").replace("\x1b[?25h", "")
+        self.assertIn("\x1b[38;5;151mcodex   \x1b[0m", text)                  # a terminal gets each agent's color
+        text = re.sub(r"\x1b\[[0-9;]*m", "", text)
         self.assertIn("› [2] codex   model x", text)
         self.assertEqual(text.strip().splitlines()[-1].strip(), "['copilot', 'codex', 'agy']")
 

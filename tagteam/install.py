@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-from . import config, harnesses, resources, state
+from . import config, harnesses, live, resources, state
 from .harnesses import base
 
 H = pathlib.Path.home()
@@ -57,6 +57,18 @@ def check_agent(name):
     return r.returncode
 
 
+CHANGE, GOOD, ATTENTION, ERROR = (live.KINDS[k]["ansi"] for k in ("running", "passed", "unresolved", "blocked"))
+
+
+def _paint():
+    """Colors only on a terminal, and never with NO_COLOR set."""
+    return live.Paint(sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
+
+
+def _names(names, c):
+    return ", ".join(c.agent(n) for n in names)
+
+
 PICK_KEYS = {"\x1b[A": "up", "\x1b[B": "down", "k": "up", "j": "down", " ": "toggle", "\n": "done", "\r": "done"}
 
 
@@ -81,14 +93,18 @@ def _pick(detected, preselected, notes):
     import termios
     import tty
     fd, out = sys.stdin.fileno(), sys.stdout
-    cursor, chosen = 0, [detected.index(n) for n in preselected]
-    print("Pick the agents that may review your changes. Each one you pick receives your diffs.\n"
-          "↑/↓ move · space select · enter save. Numbers are the review order; pick none to save nothing.")
+    cursor, chosen, c = 0, [detected.index(n) for n in preselected], _paint()
+    print(c.bold("Pick the agents that may review your changes.") + " Each one you pick "
+          + c.bold(c.fg(ATTENTION, "receives your diffs")) + ".\n"
+          + c.dim("↑/↓ move · space select · enter save. Numbers are the review order; pick none to save nothing."))
+
+    def row(i, name):
+        mark = c.brand("›") if i == cursor else " "
+        num = c.bold(c.fg(GOOD, str(chosen.index(i) + 1))) if i in chosen else " "
+        return f"\x1b[2K{mark} [{num}] {c.agent(name, f'{name:8}')}{c.dim(notes.get(name, ''))}\n"
 
     def draw(first):
-        out.write(("" if first else f"\x1b[{len(detected)}F") + "".join(
-            f"\x1b[2K{'›' if i == cursor else ' '} [{chosen.index(i) + 1 if i in chosen else ' '}] {name:8}{notes.get(name, '')}\n"
-            for i, name in enumerate(detected)))
+        out.write(("" if first else f"\x1b[{len(detected)}F") + "".join(row(i, n) for i, n in enumerate(detected)))
         out.flush()
     old = termios.tcgetattr(fd)
     try:
@@ -110,10 +126,11 @@ def ask_consent(detected, preselected, notes=None):
     notes = notes or {}
     if sys.stdin.isatty() and sys.stdout.isatty():
         return _pick(detected, preselected, notes)
-    print("These agents can review your changes. Each one you pick receives your diffs. "
-          "Pick reviewers in order (e.g. 2,1), or press Enter for none:")
+    c = _paint()
+    print("These agents can review your changes. Each one you pick " + c.bold(c.fg(ATTENTION, "receives your diffs"))
+          + ". Pick reviewers in order (e.g. 2,1), or press Enter for none:")
     for i, name in enumerate(detected, 1):
-        print(f"  {i}. [{'x' if name in preselected else ' '}] {name:8}{notes.get(name, '')}")
+        print(f"  {i}. [{'x' if name in preselected else ' '}] {c.agent(name, f'{name:8}')}{c.dim(notes.get(name, ''))}")
     if preselected:
         print("  ([x] = enabled in your old config; type their numbers to keep them)")
     while True:
@@ -161,16 +178,17 @@ def choose_reviewers(reviewers, yes):
 
 def save_consent(reviewers, authors, dry_run=False):
     """Save who may review (`reviewers.use`; None leaves it) and whose turns are reviewed (`authors.review`)."""
-    saved = {}
+    saved, c = {}, _paint()
     if reviewers is not None:
         saved["reviewers"] = ("reviewers", "use", reviewers)
     elif not config.load().get("reviewers", {}).get("use"):
-        print("no reviewer list saved: nothing is reviewed until you run "
+        print(c.fg(ATTENTION, "no reviewer list saved: nothing is reviewed") + " until you run "
               "`tagteam install --reviewers codex,claude` (names in your preferred order)")
     if authors is not None:
         saved["authors"] = ("authors", "review", authors)
     for table, key, items in saved.values():
-        print(f"{'would save' if dry_run else 'saved'} {table}.{key} = {', '.join(items) or '(none): nothing is reviewed'}")
+        print(f"{'would save' if dry_run else 'saved'} {table}.{key} = "
+              + (_names(items, c) or c.fg(ATTENTION, "(none): nothing is reviewed")))
         if not dry_run:
             config.save_user(table, key, items)
 
@@ -179,11 +197,12 @@ def set_consent(reviewers, authors, yes, dry_run=False):
     save_consent(choose_reviewers(reviewers, yes), authors, dry_run)
 
 
-INTRO = """tagteam {version}
-When a coding agent finishes a turn that changed code, a plan or a design, a different agent reviews the change,
-read-only. Large changes, plans and designs wait for the review; small ones are reviewed in the background.
-Reviews run on this machine through the agent apps you already use. Your diffs go only to the reviewers you pick.
-"""
+def intro(c):
+    return (f"{c.bold(c.brand('tagteam'))} {c.dim(_version())}\n"
+            "When a coding agent finishes a turn that changed code, a plan or a design, a different agent reviews the "
+            "change,\nread-only. Large changes, plans and designs wait for the review; small ones are reviewed in the "
+            "background.\nReviews run on this machine through the agent apps you already use. "
+            + c.bold("Your diffs go only to the reviewers you pick.") + "\n")
 
 
 def _version():
@@ -205,13 +224,16 @@ def _has_hooks(p):
         return False
 
 
-def agent_lines():
+def agent_lines(c=None):
+    c = c or live.Paint(False)
     for name, h in harnesses.ALL.items():
         if not h.detect():
-            yield f"  {name:8}not installed"
+            yield "  " + c.dim(f"{name:8}not installed")
             continue
-        hooks = "tagteam hooks in place" if _has_hooks(h.hooks_path()) else "no tagteam hooks yet"
-        yield f"  {name:8}installed · {SIGN_IN[h.logged_in()]} · {hooks}"
+        signed = h.logged_in()
+        sign_in = c.fg(GOOD, SIGN_IN[signed]) if signed else c.dim(SIGN_IN[signed])
+        hooks = c.fg(GOOD, "tagteam hooks in place") if _has_hooks(h.hooks_path()) else c.dim("no tagteam hooks yet")
+        yield f"  {c.agent(name, f'{name:8}')}installed · {sign_in} · {hooks}"
 
 
 def plan(agents):
@@ -226,7 +248,7 @@ def plan(agents):
         if name in agents and h.author:
             rc = check_agent(name)
             if rc:
-                print(f"{name}: kept existing hooks (check failed with exit {rc}; "
+                print(_paint().fg(ATTENTION, f"{name}: kept existing hooks") + f" (check failed with exit {rc}; "
                       f"`{entry_cmd} hook {name} turn-end --check` shows why)")
                 continue
             files[name] = h.author.install(entry_cmd, stop_timeout, True)
@@ -262,33 +284,42 @@ def describe(old, new):
     return "; ".join(what) or "already up to date"
 
 
-def summary(p, reviewers, authors):
-    rows = [(_tilde(path), describe(old, new)) for path, old, new in p["files"].values()]
+def summary(p, reviewers, authors, c=None):
+    """What install will do, one row per file or setting. Changes stand out; what stays as it is is dimmed."""
+    c = c or live.Paint(False)
+
+    def change(text):
+        return c.dim(text) if text == "already up to date" or text.startswith("skipped") else c.fg(CHANGE, text)
+    rows = [(_tilde(path), change(describe(old, new))) for path, old, new in p["files"].values()]
     current = config.load().get("reviewers", {}).get("use")
-    settings = ['routing.mode = "quota" (keeps how your existing config routes reviews)'] if p["routing"] else []
-    settings.append(f"reviewers.use = {', '.join(reviewers) or '(none): nothing is reviewed'}"
+    settings = [c.fg(CHANGE, 'routing.mode = "quota"') + " (keeps how your existing config routes reviews)"] \
+        if p["routing"] else []
+    settings.append(c.fg(CHANGE, "reviewers.use = ") + (_names(reviewers, c) or c.fg(ATTENTION, "(none): nothing is reviewed"))
                     if reviewers is not None and reviewers != current
-                    else f"reviewers.use stays {', '.join(current)}" if current
-                    else "reviewers.use not set: nothing is reviewed until you pick reviewers")
+                    else c.dim("reviewers.use stays ") + _names(current, c) if current
+                    else c.fg(ATTENTION, "reviewers.use not set: nothing is reviewed until you pick reviewers"))
     if authors is not None:
-        settings.append(f"authors.review = {', '.join(authors) or '(none)'}")
+        settings.append(c.fg(CHANGE, "authors.review = ") + (_names(authors, c) or "(none)"))
     rows += [(_tilde(state.HOME / "config.toml") if i == 0 else "", s) for i, s in enumerate(settings)]
-    rows.append(("menu bar", p["menubar"]))
+    rows.append(("menu bar", change(p["menubar"])))
     w = max(len(label) for label, _ in rows) + 3
-    return ("\ntagteam install will:\n" + "".join(f"  {label:{w}}{text}\n" for label, text in rows)
-            + "Each file is copied beside itself as <name>.tagteam-bak-<time> before it changes.")
+    return ("\n" + c.bold("tagteam install will:") + "\n" + "".join(f"  {label:{w}}{text}\n" for label, text in rows)
+            + c.dim("Each file is copied beside itself as <name>.tagteam-bak-<time> before it changes."))
 
 
-def diffs(p):
+def diffs(p, c=None):
+    c = c or live.Paint(False)
     out = []
     for path, old, new in p["files"].values():
         out += difflib.unified_diff(old.splitlines(), new.splitlines(), str(path), f"{path} (after install)",
                                     lineterm="")
-    return "\n".join(out)
+    return "\n".join(c.bold(ln) if ln.startswith(("---", "+++")) else c.fg(GOOD, ln) if ln.startswith("+")
+                     else c.fg(ERROR, ln) if ln.startswith("-") else c.dim(ln) if ln.startswith("@@") else ln
+                     for ln in out)
 
 
 def confirm():
-    print("\nApply? [Y/n] ", end="", flush=True)
+    print("\n" + _paint().bold("Apply? [Y/n] "), end="", flush=True)
     return sys.stdin.readline().strip().lower() in ("", "y", "yes")
 
 
@@ -303,8 +334,8 @@ def apply(p):
     try:
         install_swiftbar()
     except (OSError, subprocess.CalledProcessError) as e:
-        print(f"menu bar: failed ({e}). Hooks are in place, so reviews still run; re-run install to retry.")
-    from . import live
+        print(_paint().fg(ATTENTION, f"menu bar: failed ({e}).") + " Hooks are in place, so reviews still run; "
+              "re-run install to retry.")
     n = live.backfill()
     if n:
         print(f"seeded {n} past reviews into {state.path('runs.jsonl')}")
@@ -317,53 +348,55 @@ def install(agents):
 
 def next_steps(p):
     cfg = config.load()
-    use = cfg.get("reviewers", {}).get("use") or []
-    print("\nNext:")
+    use, c = cfg.get("reviewers", {}).get("use") or [], _paint()
+    print("\n" + c.bold("Next:"))
     codex = p["files"].get("codex")
     if codex and codex[1] != codex[2]:
-        print("  - Codex: open `codex`, run /hooks, and approve tagteam's 3 hooks. Codex runs no new hook until "
-              "you do.")
+        print("  - " + c.bold(c.fg(ATTENTION, "Action needed:")) + f" open {c.agent('codex')}, run /hooks, and "
+              "approve tagteam's 3 hooks. Codex runs no new hook until you do.")
     author = next((a for a in p["files"] if a in cfg["authors"]["review"] and any(r != a for r in use)), None)
     if author:
-        print(f"  - Try it: ask {author} for a change of {cfg['triggers']['min_changed_lines']}+ lines. When its "
-              f"turn ends, {' or '.join(r for r in use if r != author)} reviews it; "
+        print(f"  - {c.bold('Try it:')} ask {c.agent(author)} for a change of {cfg['triggers']['min_changed_lines']}+ "
+              f"lines. When its turn ends, {' or '.join(c.agent(r) for r in use if r != author)} reviews it; "
               "`tagteam watch` or the menu bar shows it live.")
     elif not use:
-        print("  - Nothing is reviewed yet: run `tagteam install` again and pick reviewers.")
-    print(f"  - Settings: {_tilde(state.HOME / 'config.toml')} (`tagteam config` shows every value). "
+        print("  - " + c.fg(ATTENTION, "Nothing is reviewed yet:") + " run `tagteam install` again and pick reviewers.")
+    print(f"  - {c.bold('Settings:')} {_tilde(state.HOME / 'config.toml')} (`tagteam config` shows every value). "
           "Re-run `tagteam install` to change reviewers; `tagteam uninstall` removes everything.")
     from . import doctor
-    print("\nHealth check (`tagteam doctor`):")
+    print("\n" + c.bold("Health check (`tagteam doctor`):"))
     doctor.run(False, False)
 
 
 def run(agents, reviewers, authors, yes, dry_run):
     """`tagteam install`: say what tagteam is, choose reviewers, show the plan, confirm, apply, say what's next.
     Nothing is written before the confirm. Returns the exit code."""
-    print(INTRO.format(version=_version()))
-    print("\n".join(agent_lines()) + "\n")
+    c = _paint()
+    print(intro(c))
+    print("\n".join(agent_lines(c)) + "\n")
     found = harnesses.detected()
     if len(found) < 2:
-        print(f"tagteam needs two agents: one writes, a different one reviews. Installed: {', '.join(found) or 'none'}.\n"
-              f"Install and sign in to another of {', '.join(harnesses.ALL)}, then run `tagteam install` again.")
+        print(c.fg(ERROR, "tagteam needs two agents: one writes, a different one reviews.")
+              + f" Installed: {_names(found, c) or 'none'}.\n"
+              f"Install and sign in to another of {_names(harnesses.ALL, c)}, then run `tagteam install` again.")
         return 1
     try:
         use = choose_reviewers(reviewers, yes)
         p = plan(agents)
-        print(summary(p, use, authors))
+        print(summary(p, use, authors, c))
         if dry_run:
-            print("\n" + (diffs(p) or "no hook file changes") + "\n\n(dry run: nothing was written)")
+            print("\n" + (diffs(p, c) or c.dim("no hook file changes")) + "\n\n" + c.bold("(dry run: nothing was written)"))
             return 0
         if not yes and not confirm():
-            print("nothing was changed")
+            print(c.dim("nothing was changed"))
             return 1
     except KeyboardInterrupt:
-        print("\ncancelled: nothing was changed")
+        print("\n" + c.dim("cancelled: nothing was changed"))
         return 130
     try:
         apply(p)
     except (OSError, ValueError) as e:
-        print(f"\ninstall stopped: {e}\nFiles updated above were backed up first (names shown). Fix the cause and "
+        print("\n" + c.bold(c.fg(ERROR, f"install stopped: {e}")) + "\nFiles updated above were backed up first (names shown). Fix the cause and "
               "run `tagteam install` again; it replaces only tagteam's own entries.")
         return 1
     save_consent(use, authors)

@@ -179,6 +179,7 @@ def note_error(now=None):
 # Pastel palette. ansi: 256-color code for terminals. hex: SwiftBar "light-mode,dark-mode" (deeper shade on a
 # light menu bar, where pastels wash out).
 BRAND = {"ansi": 108, "hex": "#5E8C61,#A3C9A8", "sf": "person.2.fill"}            # sage
+AGENTS = {"claude": 215, "codex": 151, "copilot": 183, "agy": 111}                  # orange, mint, lavender, blue
 KINDS = {
     "running": {"icon": "⟳", "label": "Reviewing", "ansi": 223, "sf": "arrow.triangle.2.circlepath",
                 "hex": "#C27C2C,#FFD8A8"},
@@ -256,7 +257,7 @@ def _ago(ts, now):
     return f"{secs // 3600}h ago" if secs < 86400 else f"{secs // 86400}d ago"
 
 
-class _Paint:
+class Paint:
     """ANSI helpers that collapse to plain text when color is off."""
 
     def __init__(self, on):
@@ -268,6 +269,13 @@ class _Paint:
     def dim(self, text):
         return f"\x1b[2m{text}\x1b[0m" if self.on else text
 
+    def bold(self, text):
+        return f"\x1b[1m{text}\x1b[0m" if self.on else text
+
+    def agent(self, name, text=None):
+        """An agent's name (or `text`, e.g. the name padded) in that agent's color."""
+        return self.fg(AGENTS.get(name, BRAND["ansi"]), name if text is None else text)
+
     def kind(self, kind, text):
         return self.fg(KINDS[kind]["ansi"], text)
 
@@ -275,7 +283,7 @@ class _Paint:
         return self.fg(BRAND["ansi"], text)
 
 
-def _progress(rec, now, paint=_Paint(False)):
+def _progress(rec, now, paint=Paint(False)):
     parts = []
     for r, st in rec["reviewers"].items():
         if st["state"] == "running":
@@ -318,7 +326,7 @@ def open_issues(now=None):
 def segment(agent, session_id, now=None, color=False):
     """The tagteam line for one agent session's status bar."""
     now = now or time.time()
-    paint = _Paint(color)
+    paint = Paint(color)
     running = active(now)
     mine = [r for r in running if r["author"] == agent and r["session_id"] == session_id]
     s = _load_status(now)
@@ -397,7 +405,7 @@ def _when(ts, now):
 
 def render_watch(now=None, recent=5, color=False):
     now = now or time.time()
-    paint = _Paint(color)
+    paint = Paint(color)
     s = _load_status(now)
     lines = [f"tagteam watch  {time.strftime('%H:%M:%S', time.localtime(now))}", ""]
     running = active(now)
