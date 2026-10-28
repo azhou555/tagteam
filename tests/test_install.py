@@ -3,10 +3,12 @@ import io
 import json
 import os
 import pathlib
+import pty
 import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -65,7 +67,8 @@ class Install(unittest.TestCase):
                 mock.patch.object(install, "entry_argv", return_value=[str(ROOT / "bin" / "tagteam")]):
             with mock.patch.object(install.subprocess, "run") as run:
                 install.install_swiftbar()
-            self.assertEqual(run.call_args_list[0].args[0][:3], ["open", "-g", "-a"])   # folder kept: no restart
+            cmds = [c.args[0] for c in run.call_args_list]
+            self.assertEqual((cmds[0], cmds[1][:3]), (["pgrep", "-qx", "SwiftBar"], ["open", "-g", "-a"]))  # folder kept: no restart
             self.assertIn(["open", "-g", install.SWIFTBAR_ENABLE], [c.args[0] for c in run.call_args_list])
             self.assertIn("<swiftbar.hideDisablePlugin>true", plugin.read_text())
             self.assertTrue(os.access(plugin, os.X_OK))
@@ -125,6 +128,44 @@ class Install(unittest.TestCase):
                 mock.patch.object(install, "_swiftbar_dir", return_value=configured),
                 mock.patch.object(install.time, "sleep"), mock.patch("builtins.print"),
                 mock.patch.object(install, "install_launcher")]
+
+    def swiftbar_cmds(self, configured, running):
+        """install_swiftbar's commands while SwiftBar is up for the first `running` pgrep checks."""
+        home, checks = pathlib.Path(tempfile.mkdtemp()), iter(range(10 ** 6))
+
+        def run(argv, **kw):
+            return mock.Mock(returncode=0 if argv[0] == "pgrep" and next(checks) < running else 1)
+        with contextlib.ExitStack() as st:
+            for p in self.swiftbar_env(configured, home):
+                st.enter_context(p)
+            run = st.enter_context(mock.patch.object(install.subprocess, "run", side_effect=run))
+            install.install_swiftbar()
+        return [c.args[0][:3] for c in run.call_args_list if c.args[0][0] in ("pkill", "open")]
+
+    def test_a_running_swiftbar_is_never_reopened(self):
+        configured = pathlib.Path(tempfile.mkdtemp())
+        self.assertEqual(self.swiftbar_cmds(configured, running=10 ** 6),
+                         [["open", "-g", install.SWIFTBAR_ENABLE], ["open", "-g", "swiftbar://refreshallplugins"]])
+
+    def test_a_restart_opens_swiftbar_only_once_it_has_quit(self):
+        self.assertEqual(self.swiftbar_cmds(None, running=3)[:2], [["pkill", "-x", "SwiftBar"], ["open", "-g", "-a"]])
+        self.assertEqual(self.swiftbar_cmds(None, running=10 ** 6)[:2],
+                         [["pkill", "-x", "SwiftBar"], ["open", "-g", install.SWIFTBAR_ENABLE]])   # never quit: no reopen
+
+    def relaunch(self, quits_after):
+        """Run the launcher's shell with stand-in pkill/pgrep/open; pgrep says running for `quits_after` checks."""
+        d = pathlib.Path(tempfile.mkdtemp())
+        for name, body in (("pkill", "exit 0"), ("sleep", "exit 0"),
+                           ("pgrep", f'n=$(cat {d}/n 2>/dev/null || echo 0); echo $((n+1)) > {d}/n; [ $n -lt {quits_after} ]'),
+                           ("open", f'echo "$*" >> {d}/opened')):
+            (d / name).write_text(f"#!/bin/sh\n{body}\n")
+            (d / name).chmod(0o755)
+        subprocess.run(["sh", "-c", install.relaunch_sh()], env={**os.environ, "PATH": f"{d}:/usr/bin:/bin"}, check=True)
+        return (d / "opened").read_text().splitlines()
+
+    def test_launcher_waits_for_swiftbar_to_quit_and_never_reopens_a_running_one(self):
+        self.assertEqual(self.relaunch(3), [f"-g -a {install.SWIFTBAR_APP}", f"-g {install.SWIFTBAR_ENABLE}"])
+        self.assertEqual(self.relaunch(10 ** 6), [f"-g {install.SWIFTBAR_ENABLE}"])
 
     def test_swiftbar_migration_keeps_old_setup_when_destination_is_taken(self):
         home = pathlib.Path(tempfile.mkdtemp())
@@ -259,6 +300,42 @@ class Consent(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             install.set_consent(**{"reviewers": None, "authors": None, "yes": False, **kw})
         return out.getvalue()
+
+    def test_picker_keys_move_select_and_number_in_pick_order(self):
+        state = (0, [])
+        for key in ("toggle", "down", "down", "toggle", "down", "toggle", "toggle", "up", None):
+            state = install.pick_step(3, *state, key)
+        self.assertEqual(state, (2, [2, 0]))       # down wraps 2 -> 0, up wraps 0 -> 2; re-picking moves to the end
+
+    def test_picker_on_a_real_terminal(self):
+        pid, fd = pty.fork()
+        if pid == 0:                                         # child: the picker on the pty
+            try:
+                print(install._pick(["codex", "copilot", "agy"], ["copilot"]), flush=True)
+            finally:
+                os._exit(0)
+        for keys in (" ", "\x1b[B\x1b[B", " ", "\n"):        # pick codex, move to agy, pick it, save
+            time.sleep(0.3)
+            os.write(fd, keys.encode())
+        out = b""
+        while True:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        os.waitpid(pid, 0)
+        text = out.decode().replace("\x1b[2K", "").replace("\x1b[?25l", "").replace("\x1b[?25h", "")
+        self.assertIn("› [2] codex", text)
+        self.assertEqual(text.strip().splitlines()[-1].strip(), "['copilot', 'codex', 'agy']")
+
+    def test_install_preselects_the_current_list(self):
+        write_user_config('[reviewers]\nuse = ["copilot", "kiro"]\n')
+        with mock.patch.object(install, "ask_consent", return_value=["copilot"]) as ask:
+            self.consent()
+        ask.assert_called_once_with(["codex", "copilot"], ["copilot"])
 
     def test_ask_orders_choices_and_shows_copy(self):
         got, shown = self.ask("2,1\n")

@@ -2,6 +2,7 @@
 exactly ours; Orca's and other entries are left alone); this module adds the menu bar item and launcher."""
 import os
 import pathlib
+import select
 import shlex
 import shutil
 import subprocess
@@ -52,8 +53,58 @@ def check_agent(name):
     return r.returncode
 
 
+PICK_KEYS = {"\x1b[A": "up", "\x1b[B": "down", "k": "up", "j": "down", " ": "toggle", "\n": "done", "\r": "done"}
+
+
+def pick_step(n, cursor, chosen, key):
+    """One keypress in the picker: the (cursor, chosen) after it. `chosen` holds indexes in the order picked."""
+    if key in ("up", "down"):
+        return (cursor + (1 if key == "down" else -1)) % n, chosen
+    if key == "toggle":
+        return cursor, [i for i in chosen if i != cursor] if cursor in chosen else chosen + [cursor]
+    return cursor, chosen
+
+
+def _key(fd):
+    ch = os.read(fd, 1).decode(errors="ignore")
+    while ch.startswith("\x1b") and len(ch) < 3 and select.select([fd], [], [], 0.05)[0]:
+        ch += os.read(fd, 1).decode(errors="ignore")    # an arrow key is ESC [ A; a lone ESC is ignored
+    return PICK_KEYS.get(ch)
+
+
+def _pick(detected, preselected):
+    """Arrow keys move, space selects, enter saves. A pick's number is its place in the review order."""
+    import termios
+    import tty
+    fd, out = sys.stdin.fileno(), sys.stdout
+    cursor, chosen = 0, [detected.index(n) for n in preselected]
+    print("Pick the agents that may review your changes. Each one you pick receives your diffs.\n"
+          "↑/↓ move · space select · enter save. Numbers are the review order; pick none to save nothing.")
+
+    def draw(first):
+        out.write(("" if first else f"\x1b[{len(detected)}F") + "".join(
+            f"\x1b[2K{'›' if i == cursor else ' '} [{chosen.index(i) + 1 if i in chosen else ' '}] {name}\n"
+            for i, name in enumerate(detected)))
+        out.flush()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        out.write("\x1b[?25l")
+        draw(True)
+        while (key := _key(fd)) != "done":
+            cursor, chosen = pick_step(len(detected), cursor, chosen, key)
+            draw(False)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        out.write("\x1b[?25h")
+        out.flush()
+    return [detected[i] for i in chosen]
+
+
 def ask_consent(detected, preselected):
-    """Numbered prompt on stdin; returns the picked agents in the order typed. Nothing typed means none."""
+    """The picker on a terminal, else a numbered prompt on stdin. Returns the picked agents in order; none is []."""
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return _pick(detected, preselected)
     print("These agents can review your changes. Each one you pick receives your diffs. "
           "Pick reviewers in order (e.g. 2,1), or press Enter for none:")
     for i, name in enumerate(detected, 1):
@@ -80,7 +131,8 @@ def set_consent(reviewers, authors, yes, dry_run=False):
     found = [n for n in harnesses.detected() if harnesses.get(n).reviewer]
     if reviewers is None and not yes and found:
         old = config.load().get("reviewers", {})
-        reviewers = ask_consent(found, [n for n in found if old.get(n, {}).get("enabled") is True])
+        reviewers = ask_consent(found, [n for n in old.get("use") or [] if n in found]
+                                or [n for n in found if old.get(n, {}).get("enabled") is True])
     if reviewers:
         saved = {"reviewers": ("reviewers", "use", reviewers)}
     else:
@@ -180,12 +232,26 @@ def install_swiftbar(dry_run=False):
         if legacy and _ours_plugin(current / SWIFTBAR_PLUGIN):
             (current / SWIFTBAR_PLUGIN).unlink()
         subprocess.run(["pkill", "-x", "SwiftBar"], check=False)    # SwiftBar reads its folder only at launch
-        time.sleep(1)
-    subprocess.run(["open", "-g", "-a", str(SWIFTBAR_APP)], check=False)
+        for _ in range(25):
+            if not _swiftbar_running():
+                break
+            time.sleep(0.2)
+    if not _swiftbar_running():                      # opening a running SwiftBar pops "SwiftBar is already running"
+        subprocess.run(["open", "-g", "-a", str(SWIFTBAR_APP)], check=False)
     subprocess.run(["open", "-g", SWIFTBAR_ENABLE], check=False)
     subprocess.run(["open", "-g", "swiftbar://refreshallplugins"], check=False)
     print(f"menu bar: wrote {plugin}")
     install_launcher()
+
+
+def relaunch_sh():
+    """The launcher's restart. Opening a running SwiftBar pops "SwiftBar is already running", so wait until it quit."""
+    return ("pkill -x SwiftBar; for i in $(seq 25); do pgrep -qx SwiftBar || break; sleep 0.2; done; "
+            f"pgrep -qx SwiftBar || open -g -a '{SWIFTBAR_APP}'; open -g '{SWIFTBAR_ENABLE}'")
+
+
+def _swiftbar_running():
+    return subprocess.run(["pgrep", "-qx", "SwiftBar"], check=False).returncode == 0
 
 
 def install_launcher():
@@ -193,10 +259,10 @@ def install_launcher():
     if LAUNCHER.exists() and not (LAUNCHER / LAUNCHER_MARK).exists():
         print(f"launcher: skipped. {LAUNCHER} exists and isn't tagteam's")
         return
-    # Always a clean restart: a running SwiftBar can be stuck with no items, and `open` on a running one only
-    # says it's already open. Then re-enable the plugin: SwiftBar keeps a disabled plugin hidden across restarts.
-    script = (f'do shell script "pkill -x SwiftBar; sleep 1; open -g -a \'{SWIFTBAR_APP}\'; '
-              f'open -g \'{SWIFTBAR_ENABLE}\'"\n'
+    # Always a clean restart: a running SwiftBar can be stuck with no items, and `open` on a running one pops
+    # "SwiftBar is already running", so wait until it has quit. Then re-enable the plugin: SwiftBar keeps a
+    # disabled plugin hidden across restarts.
+    script = (f'do shell script "{relaunch_sh()}"\n'
               'display notification "Look for the sage two-person icon in the menu bar." with title "tagteam"')
     shutil.rmtree(LAUNCHER, ignore_errors=True)
     LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
