@@ -12,17 +12,17 @@ LENSES = {
 }
 
 
-def needed(kind, artifacts, rv):
-    per = rv["per_change"]
-    if kind in ("design", "plan"):
-        n = per["docs"]
-    elif sum(a["lines_changed"] for a in artifacts) >= rv["large_lines"]:
-        n = per["large"]
-    else:
-        n = per["small"]
+def tier(kind, artifacts, rv):
+    """small | large | high_risk | docs: the one lookup for reviewer counts (`per_change`) and `blocking`."""
     if any(a.get("risk") == "high" for a in artifacts):
-        n = max(n, per["high_risk"])
-    return n
+        return "high_risk"
+    if kind in ("design", "plan"):
+        return "docs"
+    return "large" if sum(a["lines_changed"] for a in artifacts) >= rv["large_lines"] else "small"
+
+
+def needed(kind, artifacts, rv):
+    return rv["per_change"][tier(kind, artifacts, rv)]
 
 
 def candidates(author, cfg):

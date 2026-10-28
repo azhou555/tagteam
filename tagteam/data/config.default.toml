@@ -10,6 +10,7 @@ min_changed_lines = 5
 
 [review]
 per_change = { small = 1, large = 2, high_risk = 2, docs = 2 }   # reviewers per change; docs = design + plan
+blocking = { small = false, large = true, high_risk = true, docs = true }   # false: reviewed in the background
 large_lines = 150           # a code change this big counts as "large"
 deadline_s = 240            # review wall clock, setup included; Stop hook timeout is set above this
 block_at = "major"          # blocker | major | minor

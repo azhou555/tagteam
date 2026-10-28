@@ -131,6 +131,10 @@ def _add(v, cur):
     return cur + added if added else None
 
 
+def _enable(v, cur):
+    return True if v is True and cur is False else None
+
+
 def _stricter(v, cur):
     return v if v in RANK and cur in RANK and RANK[v] > RANK[cur] else None
 
@@ -143,6 +147,7 @@ REPO_RULES = {
     "review.large_lines": _lower(1),
     "limits.max_rounds_per_turn": _lower(1), "limits.max_reviews_per_hour": _lower(1),
     **{f"review.per_change.{k}": _raise for k in PER_CHANGE_KINDS},
+    **{f"review.blocking.{k}": _enable for k in PER_CHANGE_KINDS},
 }
 
 

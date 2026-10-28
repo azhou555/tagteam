@@ -35,6 +35,16 @@ class Routing(unittest.TestCase):
             plan, _ = router.route("claude", groups, cfg, FULL, {})
         self.assertEqual(list(plan), ["codex", "agy"])
 
+    def test_tier_picks_one_bucket_per_change(self):
+        rv = CFG["review"]
+        cases = [("code", [art("a.py", 149)], "small"), ("code", [art("a.py", 100), art("b.py", 50)], "large"),
+                 ("code", [art("auth.py", 3, risk="high")], "high_risk"), ("design", [art("d.md", 3)], "docs"),
+                 ("plan", [art("p.md", 500)], "docs"), ("plan", [art("p.md", risk="high")], "high_risk")]
+        self.assertEqual([router.tier(k, a, rv) for k, a, _ in cases], [t for _, _, t in cases])
+        self.assertEqual({t: rv["blocking"][t] for t in ("small", "large", "high_risk", "docs")},
+                         {"small": False, "large": True, "high_risk": True, "docs": True})
+        self.assertEqual(router.needed("code", [art("a.py", 10)], cfg_with([], small=3)["review"]), 3)
+
     def test_duplicate_use_entries_collapse_keeping_order(self):
         self.assertEqual(router.candidates("claude", cfg_with(["codex", "copilot", "codex"])), ["codex", "copilot"])
         plan, _ = router.route("claude", {"code": [art("a.py", 200)]}, cfg_with(["codex", "codex", "agy"], large=2),

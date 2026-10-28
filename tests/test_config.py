@@ -150,6 +150,9 @@ class RepoTightens(ConfigCase):
         ("review.per_change.small", None, 3, 3, True),
         ("review.per_change.small", None, 0, 1, False),
         ("review.per_change.docs", 3, 2, 3, False),
+        ("review.blocking.small", None, True, True, True),
+        ("review.blocking.large", None, False, True, False),
+        ("review.blocking.small", True, False, True, False),
         ("review.large_lines", None, 50, 50, True),
         ("review.large_lines", None, 500, 150, False),
         ("review.large_lines", None, 0, 1, True),                       # floor 1
