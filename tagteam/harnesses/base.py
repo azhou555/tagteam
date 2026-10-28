@@ -17,7 +17,7 @@ SEVERITIES = ("blocker", "major", "minor", "nit")
 class Author:
     parse: Callable            # (phase, payload) -> HookEvent | None
     encode: Callable           # (phase, verdict) -> stdout
-    install: Callable          # (entry_cmd, stop_timeout, dry_run)
+    install: Callable          # (entry_cmd, stop_timeout, dry_run) -> (path, old text, new text)
     uninstall: Callable
     can_block_at_stop: bool
     can_notice: bool
@@ -95,18 +95,23 @@ def load(p):
 
 
 def save(p, data, dry_run):
+    """Write `data` as JSON, backing up the old file first. Returns (path, old text or "", new text); a dry run
+    only returns it."""
     text = json.dumps(data, indent=2) + "\n"
+    old = p.read_text() if p.exists() else ""
     if dry_run:
-        print(f"--- {p} (dry run)\n{text}")
-        return
+        return p, old, text
     p.parent.mkdir(parents=True, exist_ok=True)
+    bak = None
     if p.exists():
-        shutil.copyfile(p, p.with_name(p.name + f".tagteam-bak-{time.strftime('%Y%m%d%H%M%S')}"))
+        bak = p.with_name(p.name + f".tagteam-bak-{time.strftime('%Y%m%d%H%M%S')}")
+        shutil.copyfile(p, bak)
     tmp = p.with_name(p.name + ".tagteam-tmp")
     tmp.write_text(text)
     json.loads(tmp.read_text())                     # re-validate before replacing
     tmp.replace(p)
-    print(f"updated {p}")
+    print(f"updated {p}" + (f" (backup: {bak.name})" if bak else ""))
+    return p, old, text
 
 
 def strip(hooks):

@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 
 from tests.helpers import FIX, ROOT, USER_CONFIG, clear_user_config, state, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
-from tagteam import cli, config, harnesses, install  # noqa: E402
+from tagteam import cli, config, doctor, harnesses, install  # noqa: E402
 from tagteam.harnesses import agy as agy_h, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
 
 
@@ -281,6 +281,98 @@ class Install(unittest.TestCase):
         self.assertTrue(any("codex: kept existing hooks (check failed" in str(c.args[0]) for c in pr.call_args_list))
 
 
+class Guided(unittest.TestCase):
+    """`tagteam install` as a user runs it: intro, choose, summary, confirm, apply, next steps."""
+    USER_HOOK = {"hooks": [{"type": "command", "command": "my-own-hook"}]}
+    tearDown = Install.tearDown
+
+    def setUp(self):
+        Install.setUp(self)                                  # the same isolation, without Install's tests
+        clear_user_config()
+        self.addCleanup(clear_user_config)
+        self.settings.write_text(json.dumps({"hooks": {"Stop": [self.USER_HOOK]}}, indent=2) + "\n")
+        self.before = self.settings.read_bytes()
+        for p in (mock.patch.object(harnesses, "detected", return_value=["claude", "codex"]),
+                  mock.patch("tagteam.doctor.run", return_value=0)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_install(self, answers="", reviewers=("codex",), yes=False, dry_run=False):
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(answers)), contextlib.redirect_stdout(out):
+            rc = install.run(["claude"], None if reviewers is None else list(reviewers), None, yes, dry_run)
+        return rc, out.getvalue()
+
+    def assert_nothing_written(self):
+        self.assertEqual(self.settings.read_bytes(), self.before)
+        self.assertFalse(USER_CONFIG.exists())
+
+    def test_dry_run_shows_summary_and_diff_and_writes_nothing(self):
+        rc, shown = self.run_install(dry_run=True)
+        self.assertEqual(rc, 0)
+        self.assert_nothing_written()
+        self.assertIn("a different agent reviews the change", shown)
+        self.assertIn("add tagteam's hooks; show tagteam in your status line (your own command still runs)", shown)
+        self.assertIn("reviewers.use = codex", shown)
+        self.assertIn('+            "command": ": tagteam-hook-form=1; /opt/bin/tagteam hook claude turn-end",', shown)
+        self.assertNotIn('+      "hooks": [{"type": "command", "command": "my-own-hook"', shown)   # a diff, not the file
+        self.assertIn("(dry run: nothing was written)", shown)
+
+    def test_declining_the_confirm_writes_nothing(self):
+        rc, shown = self.run_install("n\n")
+        self.assertEqual(rc, 1)
+        self.assert_nothing_written()
+        self.assertIn("Apply? [Y/n]", shown)
+
+    def test_ctrl_c_at_the_picker_writes_nothing(self):
+        with mock.patch.object(install, "ask_consent", side_effect=KeyboardInterrupt):
+            rc, shown = self.run_install(reviewers=None)
+        self.assertEqual(rc, 130)
+        self.assert_nothing_written()
+        self.assertIn("cancelled: nothing was changed", shown)
+
+    def test_confirm_applies_then_says_what_next(self):
+        rc, shown = self.run_install("\n")
+        self.assertEqual(rc, 0)
+        data = json.loads(self.settings.read_text())
+        self.assertIn(self.USER_HOOK, data["hooks"]["Stop"])
+        self.assertIn("/opt/bin/tagteam hook claude turn-end", self.settings.read_text())
+        self.assertEqual(config.load()["reviewers"]["use"], ["codex"])
+        self.assertRegex(shown, r"updated .*settings\.json \(backup: settings\.json\.tagteam-bak-\d{14}\)")
+        self.assertIn("Try it: ask claude for a change of 5+ lines. When its turn ends, codex reviews it", shown)
+        doctor.run.assert_called_once_with(False, False)
+        rc, shown = self.run_install(yes=True, reviewers=None)                   # a re-run changes nothing
+        self.assertIn("already up to date", shown)
+        self.assertIn("reviewers.use stays codex", shown)
+
+    def test_one_agent_stops_before_any_prompt(self):
+        with mock.patch.object(harnesses, "detected", return_value=["claude"]), \
+                mock.patch.object(install, "ask_consent", side_effect=AssertionError("prompted")):
+            rc, shown = self.run_install(reviewers=None)
+        self.assertEqual(rc, 1)
+        self.assert_nothing_written()
+        self.assertIn("tagteam needs two agents", shown)
+
+    def test_a_menu_bar_failure_keeps_the_hooks(self):
+        with mock.patch.object(install, "install_swiftbar", side_effect=OSError("disk full")):
+            rc, shown = self.run_install(yes=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("/opt/bin/tagteam hook claude", self.settings.read_text())
+        self.assertIn("menu bar: failed (disk full). Hooks are in place", shown)
+
+    def test_a_hook_write_failure_names_the_backups_and_exits_1(self):
+        def failing_save(p, data, dry_run, real=harnesses.base.save):
+            if not dry_run:
+                raise OSError("read-only file system")
+            return real(p, data, dry_run)
+        with mock.patch.object(harnesses.base, "save", side_effect=failing_save):
+            rc, shown = self.run_install(yes=True)
+        self.assertEqual(rc, 1)
+        self.assert_nothing_written()
+        self.assertIn("install stopped: read-only file system", shown)
+        self.assertIn("run `tagteam install` again", shown)
+
+
 class Consent(unittest.TestCase):
     def setUp(self):
         clear_user_config()
@@ -311,7 +403,7 @@ class Consent(unittest.TestCase):
         pid, fd = pty.fork()
         if pid == 0:                                         # child: the picker on the pty
             try:
-                print(install._pick(["codex", "copilot", "agy"], ["copilot"]), flush=True)
+                print(install._pick(["codex", "copilot", "agy"], ["copilot"], {"codex": "model x"}), flush=True)
             finally:
                 os._exit(0)
         for keys in (" ", "\x1b[B\x1b[B", " ", "\n"):        # pick codex, move to agy, pick it, save
@@ -328,14 +420,15 @@ class Consent(unittest.TestCase):
             out += chunk
         os.waitpid(pid, 0)
         text = out.decode().replace("\x1b[2K", "").replace("\x1b[?25l", "").replace("\x1b[?25h", "")
-        self.assertIn("› [2] codex", text)
+        self.assertIn("› [2] codex   model x", text)
         self.assertEqual(text.strip().splitlines()[-1].strip(), "['copilot', 'codex', 'agy']")
 
     def test_install_preselects_the_current_list(self):
         write_user_config('[reviewers]\nuse = ["copilot", "kiro"]\n')
         with mock.patch.object(install, "ask_consent", return_value=["copilot"]) as ask:
             self.consent()
-        ask.assert_called_once_with(["codex", "copilot"], ["copilot"])
+        self.assertEqual(ask.call_args.args[:2], (["codex", "copilot"], ["copilot"]))
+        self.assertIn("model", ask.call_args.args[2]["codex"])                   # each choice carries its note
 
     def test_deselecting_a_saved_list_at_the_prompt_clears_it(self):
         write_user_config('[reviewers]\nuse = ["copilot"]\n')
@@ -351,7 +444,7 @@ class Consent(unittest.TestCase):
         write_user_config('[reviewers]\nuse = []\n[agents.codex]\nenabled = true\n')
         with mock.patch.object(install, "ask_consent", return_value=[]) as ask:
             self.consent()
-        ask.assert_called_once_with(["codex", "copilot"], [])
+        self.assertEqual(ask.call_args.args[:2], (["codex", "copilot"], []))
 
     def test_ask_orders_choices_and_shows_copy(self):
         got, shown = self.ask("2,1\n")
@@ -394,7 +487,7 @@ class Consent(unittest.TestCase):
         write_user_config('[agents.codex]\nenabled = true\n[agents.copilot]\nenabled = false\n')
         with mock.patch.object(install, "ask_consent", return_value=[]) as ask:
             self.consent()
-        ask.assert_called_once_with(["codex", "copilot"], ["codex"])
+        self.assertEqual(ask.call_args.args[:2], (["codex", "copilot"], ["codex"]))
         self.assertNotIn("use", config.load()["reviewers"])
 
     def test_save_keeps_other_settings_and_replaces_old_list(self):
@@ -416,32 +509,24 @@ class Consent(unittest.TestCase):
         self.assertIn("no reviewer list saved", shown)
 
     def test_cli_passes_flags(self):
-        with mock.patch.object(install, "install") as inst, mock.patch.object(install, "set_consent") as sc, \
-                contextlib.redirect_stdout(io.StringIO()):
+        with mock.patch.object(install, "run", return_value=0) as run, contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(harnesses, "detected", return_value=["claude", "codex"]), self.assertRaises(SystemExit):
             cli.main(["install", "--reviewers", "codex,copilot", "--authors", "claude", "--yes"])
-        sc.assert_called_once_with(["codex", "copilot"], ["claude"], True, False)
-        with mock.patch.object(install, "install"), mock.patch.object(install, "set_consent"), \
-                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+        run.assert_called_once_with(["claude", "codex"], ["codex", "copilot"], ["claude"], True, False)
+        with mock.patch.object(install, "run") as run, contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit):
             cli.main(["install", "--reviewers", "kiro"])
-
-
-    def test_agents_default_to_detected_and_skipped_are_named(self):
-        out = io.StringIO()
-        with mock.patch.object(harnesses, "detected", return_value=["claude", "codex"]), \
-                mock.patch.object(install, "install") as inst, mock.patch.object(install, "set_consent"), \
-                contextlib.redirect_stdout(out):
-            cli.main(["install", "--yes"])
-        inst.assert_called_once_with(["claude", "codex"], dry_run=False)
-        self.assertIn("copilot: not installed, skipped", out.getvalue())
-        self.assertIn("agy: not installed, skipped", out.getvalue())
-        self.assertNotIn("claude: not installed", out.getvalue())
-        out = io.StringIO()
-        with mock.patch.object(harnesses, "detected", return_value=["claude"]), \
-                mock.patch.object(install, "install") as inst, mock.patch.object(install, "set_consent"), \
-                contextlib.redirect_stdout(out):
+        run.assert_not_called()
+        with mock.patch.object(install, "run", return_value=0) as run, self.assertRaises(SystemExit):
             cli.main(["install", "--yes", "--agents", "copilot"])
-        inst.assert_called_once_with(["copilot"], dry_run=False)
-        self.assertNotIn("skipped", out.getvalue())
+        self.assertEqual(run.call_args.args[0], ["copilot"])
+
+    def test_bare_command_and_help_say_what_tagteam_is(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main([])
+        self.assertIn("a different agent reviews the change", out.getvalue())
+        self.assertIn("Start with `tagteam install`", out.getvalue())
 
     def migrate(self, text):
         if text is None:

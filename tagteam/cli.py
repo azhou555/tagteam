@@ -144,32 +144,40 @@ def show_config():
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="tagteam")
-    sub = p.add_subparsers(dest="cmd", required=True)
-    h = sub.add_parser("hook")
+    p = argparse.ArgumentParser(
+        prog="tagteam", formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Cross-agent review for coding agents. When Claude Code, Codex, Copilot CLI or Antigravity (agy)\n"
+                    "finishes a turn that changed code, a plan or a design, a different agent reviews the change.",
+        epilog="Start with `tagteam install`. Then `tagteam doctor` checks each agent, `tagteam watch` shows\n"
+               "reviews live, and `tagteam config` prints every setting.")
+    sub = p.add_subparsers(dest="cmd", metavar="command")
+    h = sub.add_parser("hook", help="internal: run by the agents' hooks")
     h.add_argument("agent", choices=["claude", "codex", "copilot", "agy"])
     h.add_argument("phase")
     h.add_argument("--check", action="store_true", help="parse stdin only; exit 1 if it is not a valid payload")
-    sub.add_parser("statusline")
-    sub.add_parser("swiftbar")
+    sub.add_parser("statusline", help="internal: the Claude status line")
+    sub.add_parser("swiftbar", help="internal: the menu bar item")
     sub.add_parser("config", help="print the effective config and where each value came from")
-    s = sub.add_parser("status")
+    s = sub.add_parser("status", help="usage headroom per agent and reviews over the last days")
     s.add_argument("--days", type=int, default=7)
-    i = sub.add_parser("install")
-    i.add_argument("--dry-run", action="store_true")
+    i = sub.add_parser("install", help="pick reviewers and add tagteam's hooks to your agents (asks before writing)")
+    i.add_argument("--dry-run", action="store_true", help="show what would change, with a diff of each file; write nothing")
     i.add_argument("--agents", help="agents to wire hooks for (default: the ones installed on this machine)")
     i.add_argument("--reviewers", help="agents that may review your changes, in order; saves reviewers.use")
     i.add_argument("--authors", help="agents whose turns get reviewed; saves authors.review")
-    i.add_argument("--yes", action="store_true", help="don't prompt; without --reviewers no reviewer list is saved")
+    i.add_argument("--yes", action="store_true", help="don't prompt or ask to confirm; without --reviewers the saved list is kept")
     d = sub.add_parser("doctor", help="check each agent's hooks and reviewer status; read-only")
     d.add_argument("--probe", action="store_true", help="also run one tiny real review per listed reviewer (costs money)")
     d.add_argument("--clear", action="store_true", help="re-enable reviewers the sandbox disabled and resume paused ones, then check")
-    w = sub.add_parser("watch")
+    w = sub.add_parser("watch", help="live view of running and recent reviews")
     w.add_argument("--once", action="store_true")
-    sub.add_parser("uninstall")
+    sub.add_parser("uninstall", help="remove tagteam's hooks, status line, menu bar item and launcher")
     b = sub.add_parser("background", help="internal: a non-blocking review, started by the Stop hook")
     b.add_argument("job")
     a = p.parse_args(argv)
+    if a.cmd is None:
+        p.print_help()
+        return
     if a.cmd == "hook":
         if a.check:
             sys.exit(check(a.agent, a.phase))
@@ -193,13 +201,10 @@ def main(argv=None):
             p.error(f"unknown agent: {', '.join(bad)} (choose from {', '.join(harnesses.ALL)})")
         try:
             agents = a.agents.split(",") if a.agents else harnesses.detected()
-            for n in harnesses.ALL if not a.agents else ():
-                if n not in agents:
-                    print(f"{n}: not installed, skipped")
-            install.install(agents, dry_run=a.dry_run)
-            install.set_consent(names["reviewers"], names["authors"], a.yes, a.dry_run)
+            rc = install.run(agents, names["reviewers"], names["authors"], a.yes, a.dry_run)
         except config.ConfigError as e:
             sys.exit(f"config error: {e}")
+        sys.exit(rc)
     elif a.cmd == "background":
         background(a.job)
     elif a.cmd == "uninstall":

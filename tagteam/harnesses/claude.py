@@ -65,7 +65,7 @@ def install_claude_shaped(agent, path, entry_cmd, stop_timeout, dry_run, before_
         hooks.setdefault(event, []).append(entry)
     if before_save:
         before_save(data)
-    base.save(path, data, dry_run)
+    return base.save(path, data, dry_run)
 
 
 def uninstall_claude_shaped(path, before_save=None):
@@ -112,7 +112,7 @@ def unwrap_statusline(data):
 
 def install(entry_cmd, stop_timeout, dry_run):
     wrap = None if state.extras_off() else lambda data: wrap_statusline(data, entry_cmd, dry_run)
-    install_claude_shaped("claude", PATH, entry_cmd, stop_timeout, dry_run, before_save=wrap)
+    return install_claude_shaped("claude", PATH, entry_cmd, stop_timeout, dry_run, before_save=wrap)
 
 
 def uninstall():

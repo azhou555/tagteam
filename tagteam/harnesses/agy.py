@@ -40,7 +40,7 @@ def install(entry_cmd, stop_timeout, dry_run):
         "Stop": [{"type": "command", "command": base.hook_cmd(entry_cmd, "agy", "turn-end"),
                   "timeout": stop_timeout}],
     }
-    base.save(PATH, data, dry_run)
+    return base.save(PATH, data, dry_run)
 
 
 def uninstall():
