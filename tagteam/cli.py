@@ -1,4 +1,5 @@
-"""tagteam CLI: `hook <agent> <phase> [--check]`, `statusline`, `swiftbar`, `config`, `status`, `watch`, `install`, `uninstall`, `doctor`."""
+"""tagteam CLI: `hook <agent> <phase> [--check]`, `statusline`, `swiftbar`, `config`, `status`, `watch`, `install`, `uninstall`, `doctor`;
+`background <job>` is the hook's own detached review."""
 import argparse
 import json
 import os
@@ -42,6 +43,18 @@ def hook(agent, phase):
         except Exception:
             pass
         print("{}")
+
+
+def background(job):
+    """The detached half of a non-blocking turn end, started by the hook; never raises."""
+    try:
+        core.background(job, alarm=True)
+    except Exception as e:
+        state.log("background review error", error=repr(e), tb=traceback.format_exc()[-2000:])
+        try:
+            live.note_error()
+        except Exception:
+            pass
 
 
 def check(agent, phase):
@@ -152,6 +165,8 @@ def main(argv=None):
     w = sub.add_parser("watch")
     w.add_argument("--once", action="store_true")
     sub.add_parser("uninstall")
+    b = sub.add_parser("background", help="internal: a non-blocking review, started by the Stop hook")
+    b.add_argument("job")
     a = p.parse_args(argv)
     if a.cmd == "hook":
         if a.check:
@@ -183,5 +198,7 @@ def main(argv=None):
             install.set_consent(names["reviewers"], names["authors"], a.yes, a.dry_run)
         except config.ConfigError as e:
             sys.exit(f"config error: {e}")
+    elif a.cmd == "background":
+        background(a.job)
     elif a.cmd == "uninstall":
         install.uninstall()

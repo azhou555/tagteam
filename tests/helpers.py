@@ -15,7 +15,16 @@ os.environ["TAGTEAM_HOME"] = TMP_HOME
 os.environ.pop("TAGTEAM_NO_MACOS_EXTRAS", None)       # clean-install runs set it; tests that need it set it themselves
 sys.path.insert(0, str(ROOT))
 
-from tagteam import config, state  # noqa: E402,F401
+from tagteam import config, core, state  # noqa: E402,F401
+
+REAL_DETACH = core._detach
+
+
+def _no_detach(argv, fd):
+    raise AssertionError(f"a test started a real background review: {argv}")
+
+
+core._detach = _no_detach                            # a detached child has no stubs: it would run real reviewers
 
 _run = unittest.TestCase.run
 
@@ -64,10 +73,12 @@ def finding(sev="major", conf=0.9, claim="off by one in loop", line=10, file="a.
 FULL = {"claude": 0.9, "codex": 0.9, "copilot": 0.9, "agy": 0.9}
 ALL_AGENTS = ["claude", "codex", "copilot", "agy"]
 USER_CONFIG = state.HOME / "config.toml"
+PIN_TEXT = "review.blocking.small = true\n"    # HookRig tests drive the blocking cycle unless they opt out
+PIN = [""]
 
 
 def write_user_config(text):
-    USER_CONFIG.write_text(text)
+    USER_CONFIG.write_text(PIN[0] + text)
 
 
 def clear_user_config():
@@ -81,13 +92,22 @@ def use_toml(use):
 class HookRig:
     """Mixin: real hook flow through cli.hook with every agent detected and reviewer CLIs stubbed."""
 
-    def rig(self, user_config=None):
+    def rig(self, user_config=None, small_blocks=True):
         from tagteam import core, harnesses
+        PIN[0] = PIN_TEXT if small_blocks else ""
         self.repo = make_repo()
         self.calls = []
         self.seen_active = []
+        self.detached = []
+
+        def detach(argv, fd):                        # a background review, run here so the stubs apply
+            self.detached.append(argv[-1])
+            if self.run_detached:
+                core.background(argv[-1])
+        self.run_detached = True
         self.rigs = [mock.patch.object(core, "headroom_map", return_value=FULL),
-                     mock.patch.object(harnesses, "detected", return_value=list(ALL_AGENTS))]
+                     mock.patch.object(harnesses, "detected", return_value=list(ALL_AGENTS)),
+                     mock.patch.object(core, "_detach", detach)]
         for x in self.rigs:
             x.start()
         clear_user_config()
@@ -98,6 +118,7 @@ class HookRig:
         for x in self.rigs:
             x.stop()
         clear_user_config()
+        PIN[0] = ""
 
     def run_hook(self, agent, phase, payload):
         from tagteam import cli

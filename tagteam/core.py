@@ -1,11 +1,18 @@
 """Hook phase handlers: turn-start snapshots, touch ledger, turn-end review, plan gate."""
+import dataclasses
 import os
+import pathlib
 import re
+import signal
+import subprocess
+import sys
 import time
 import uuid
 
 from . import changes, classify, limits, live, quota, router, runner, sandbox, state, verdict
-from .adapters import MARKER
+from .adapters import MARKER, HookEvent
+
+BACKGROUND = f"{MARKER} ⟳ Reviewing in the background; results appear in the status line"
 
 
 def _session_file(ev):
@@ -299,9 +306,9 @@ def wanted(ev, cfg, artifacts):
     return bool({a["kind"] for a in classify.annotate(artifacts, cfg)} & set(cfg["triggers"]["kinds"]))
 
 
-def _write_back(sf, turn_id, update, open_issues=None):
+def _write_back(sf, turn_id, update, carry=None):
     """update(session) and save it, unless a new turn has started since the review began: its fresh session
-    state wins, and the verdict reaches the author anyway. `open_issues`, when given, still carry into it."""
+    state wins, and only carry(session), when given, applies to it (the open issues)."""
     with state.locked(sf.stem):
         cur = state.read_json(sf)
         if not cur:
@@ -309,12 +316,16 @@ def _write_back(sf, turn_id, update, open_issues=None):
         if cur.get("turn_id") != turn_id:
             state.log("new turn started during review; session state not updated", session=sf.stem,
                       reviewed_turn=turn_id, current_turn=cur.get("turn_id"))
-            if open_issues is not None:
-                cur["prior"], cur["carried"] = open_issues, bool(open_issues) or cur.get("carried", False)
+            if carry:
+                carry(cur)
                 state.write_json(sf, cur)
             return
         update(cur)
         state.write_json(sf, cur)
+
+
+def _carry(open_issues, owed=None):
+    return lambda cur: cur.update(prior=open_issues, carried=bool(open_issues) or cur.get("carried", False), owed=owed)
 
 
 def turn_end(ev, cfg):
@@ -340,6 +351,8 @@ def _turn_end(ev, cfg, lock, fd):
     s = state.read_json(sf)
     if not s:
         return None                                  # hooks installed mid-session: no baseline yet
+    if s.get("owed") and s["round"] == 0:
+        return _owed(ev, cfg, s, sf)
     m = cfg["limits"]["max_rounds_per_turn"]
     artifacts, head = collect(s, cfg)
     changed = sum(a["lines_changed"] for a in artifacts)
@@ -371,7 +384,12 @@ def _turn_end(ev, cfg, lock, fd):
         return None
     if not wanted(ev, cfg, artifacts):
         return None
-    action, msg, run_dir, open_issues = review(ev, cfg, s, artifacts, round_no, "turn", lock, confirm, rebuttal, started)
+    mode = _mode(cfg, artifacts, prior)
+    if (mode == "advise" and s.get("repo") and head and lock == limits.HELD and cfg["reviewers"].get("use")
+            and _start_background(ev, cfg, s, artifacts, head, rebuttal, fd)):
+        return {"action": "allow", "message": BACKGROUND}
+    action, msg, run_dir, open_issues = review(ev, cfg, s, artifacts, round_no, "turn", lock, confirm, rebuttal, started,
+                                               mode)
     if run_dir is None and action == "allow" and not open_issues:   # no round spent: diff already passed, or a state-error notice
         return {"action": action, "message": msg} if msg else None
 
@@ -389,9 +407,70 @@ def _turn_end(ev, cfg, lock, fd):
             if os.path.isabs(a["path"]):
                 cur["reviewed_digests"][a["path"]] = changes.file_digest(a["path"])
         cur["touched"] = []
-    _write_back(sf, s.get("turn_id"), advance, open_issues)
+    _write_back(sf, s.get("turn_id"), advance, _carry(open_issues, s.get("owed")))
     state.log("review", run=str(run_dir), action=action, author=ev.agent, round=round_no)
     return {"action": action, "message": msg}
+
+
+def _mode(cfg, artifacts, prior):
+    """block: the author waits for the verdict. A blocking cycle stays blocking until a verdict closes it."""
+    rv, groups = cfg["review"], {}
+    for a in classify.annotate(artifacts, cfg):
+        groups.setdefault(a["kind"], []).append(a)
+    blocks = verdict.gated(prior) or any(rv["blocking"][router.tier(k, arts, rv)] for k, arts in groups.items())
+    return "block" if blocks else "advise"
+
+
+def _detach(argv, fd):
+    """Start argv in its own session, holding `fd`: the same open session lock, so it stays held after this hook
+    exits, with no gap, until the child exits."""
+    subprocess.Popen(argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),   # finds this tagteam
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, pass_fds=(fd,))
+
+
+def _start_background(ev, cfg, s, artifacts, head, rebuttal, fd):
+    """Hand the review to a detached `tagteam background`. False if it couldn't start: review in the foreground."""
+    job = state.path("jobs", f"{_session_file(ev).stem}-{uuid.uuid4().hex[:8]}.json")
+    try:
+        state.write_json(job, {"ev": dataclasses.asdict(ev), "cfg": cfg, "session": s, "artifacts": artifacts,
+                               "pinned": [head, _git_activity(s)], "rebuttal": rebuttal})
+        _detach([sys.executable, "-m", "tagteam", "background", str(job)], fd)
+    except OSError as e:
+        state.log("background review not started; reviewing now", error=repr(e))
+        job.unlink(missing_ok=True)
+        return False
+    return True
+
+
+def background(path, alarm=False):
+    """The detached half of a non-blocking turn end. It holds the session lock it was handed for its whole run
+    and spends none of the turn's rounds. `alarm` ends a run that overstays its deadline: the lock is freed and
+    the run shows as interrupted."""
+    job = state.read_json(path)
+    pathlib.Path(path).unlink(missing_ok=True)
+    if not job:
+        return
+    cfg, s, ev = job["cfg"], job["session"], HookEvent(**job["ev"])
+    if alarm:
+        signal.alarm(int(cfg["review"]["deadline_s"]) + 120)
+    action, msg, run_dir, open_issues = review(ev, cfg, s, job["artifacts"], 1, "turn", limits.HELD,
+                                               rebuttal=job["rebuttal"], mode="advise", pinned=tuple(job["pinned"]))
+    if open_issues is None or (run_dir is None and not msg):   # no verdict, or this diff was already reviewed
+        return
+    settle = _carry(open_issues, msg if action == "block" else None)   # a blocker blocks the next Stop
+    _write_back(_session_file(ev), s.get("turn_id"), settle, settle)
+    state.log("background review", run=str(run_dir), action=action, author=ev.agent)
+
+
+def _owed(ev, cfg, s, sf):
+    """A background review left a blocker: this Stop blocks with it as round 1, whatever the turn changed."""
+    issues = s.get("prior") or []
+    run = _run_record(ev, cfg, s, "turn", 1, False, action="block", prior=0, blocking=len(verdict.gated(issues)),
+                      suggestions=len(verdict.gated(issues, "advise")))
+    live.record_run(run)
+    _write_back(sf, s.get("turn_id"), lambda cur: cur.update(round=1, owed=None))
+    return {"action": "block", "message": s["owed"]}
 
 
 def _reverted(ev, cfg, s, sf, round_no, head):
