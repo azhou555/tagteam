@@ -139,10 +139,10 @@ class Background(HookRig, unittest.TestCase):
     def start(self, prompt="add feature"):
         return self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt=prompt))
 
-    def stop(self, *findings, lines=20, change=True, runner_fn=None):
+    def stop(self, *findings, lines=20, change=True, runner_fn=None, name="feature.py"):
         if change:
             self.n += 1
-            pathlib.Path(self.repo, "feature.py").write_text(f"a = {self.n}\n" * lines)
+            pathlib.Path(self.repo, name).write_text(f"a = {self.n}\n" * lines)
         fake = runner_fn or self.fake_run_all({"copilot": {"verdict": "approve", "summary": "", "findings": list(findings)}})
         with mock.patch.object(runner, "run_all", fake):
             return self.run_hook("claude", "x", self.claude("Stop", last_assistant_message="done"))
@@ -165,6 +165,27 @@ class Background(HookRig, unittest.TestCase):
         run = state.read_jsonl(state.path("runs.jsonl"))[-1]
         self.assertEqual((run["mode"], run["action"], run["blocking"], run["suggestions"]), ("advise", "allow", 0, 1))
         self.assertEqual((self.session()["round"], self.session()["owed"]), (0, None))   # no round spent
+
+    def test_a_suggestion_is_rechecked_only_by_a_review_of_its_own_file(self):
+        self.start()
+        self.stop(BUG)
+        self.start()
+        self.stop(name="other.py")                           # unrelated change, reviewer reports nothing
+        self.assertEqual(("skips the last item" in next(iter(self.calls[-1].values())), self.open_issues()),
+                         (False, [("the loop skips the last item", "major", "advise")]))
+        self.start()
+        self.stop()                                          # feature.py changed and nothing re-reported: fixed
+        self.assertEqual(("skips the last item" in next(iter(self.calls[-1].values())), self.open_issues()),
+                         (True, []))
+
+    def test_the_confirm_round_closes_the_blocking_cycle_not_an_untouched_suggestion(self):
+        self.start()
+        self.stop(BUG)
+        self.start()
+        other = finding(file="other.py", line=1, claim="the cache never expires")
+        for i, want in enumerate(["block", "block", None]):          # rounds 1 and 2 block; round 3 is the confirm
+            self.assertEqual(self.stop(other, lines=200 + i, name="other.py").get("decision"), want)
+        self.assertEqual(self.open_issues(), [("the loop skips the last item", "major", "advise")])
 
     def test_no_background_run_when_it_could_not_review_or_start(self):
         self.start()

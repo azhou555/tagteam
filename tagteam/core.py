@@ -155,8 +155,12 @@ def review(ev, cfg, s, artifacts, round_no, run_tag, lock, confirm=False, rebutt
         run = _run_record(ev, cfg, s, run_tag, round_no, confirm, reason=STATE_ERROR, mode=mode)
         live.record_run(run)
         return "allow", completion(run, 0), None, None
-    return _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, _clock() if started is None else started,
-                   mode, pinned)
+    paths = {a["path"] for a in artifacts}           # a suggestion is re-checked only with its own file
+    kept = [f for f in verdict.gated(s.get("prior") or [], "advise") if f["file"] not in paths]
+    action, msg, run_dir, open_issues = _review(ev, cfg, {**s, "prior": [f for f in s.get("prior") or [] if f not in kept]},
+                                                artifacts, round_no, run_tag, confirm, rebuttal,
+                                                _clock() if started is None else started, mode, pinned)
+    return action, msg, run_dir, None if open_issues is None else open_issues + kept
 
 
 def _session_guard(ev, wait, handler, *args, busy=None, lane=""):
@@ -400,8 +404,8 @@ def _turn_end(ev, cfg, lock, fd):
 
     if open_issues is None:                          # no verdict: what was open stays open
         open_issues = s.get("prior") or []
-    elif confirm:                                    # a confirm verdict is the last word: the cycle closes
-        open_issues = []
+    elif confirm:                                    # a confirm verdict is the last word on the blocking cycle
+        open_issues = verdict.gated(open_issues, "advise")
 
     def advance(cur):
         cur["round"] = round_no
