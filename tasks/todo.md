@@ -238,8 +238,15 @@ still blocks.
       background review; at the lock deadline it records `Not reviewed` and the next review covers both turns;
       a blocker from a background review blocks the next Stop; a killed background review records
       `Review interrupted`; surface strings per kind.
-- [ ] Live: headless Claude in a throwaway repo. A small buggy edit ends the turn at once, the status line shows
-      background then `● Suggestions`, the next prompt gets the issues as context. A large change still blocks.
+- [x] Live (2026-10-27, headless Claude, throwaway repo, Claude hooks reinstalled at 540s): an 11-line buggy edit
+      ended the turn in 7s; status line `⟳ Reviewing in background · copilot`, then `● Suggestions: 1 issue, not
+      blocking` (major, gate advise); the next prompt carried it as context. A 185-line change blocked rounds 1-2,
+      round 3 confirm allowed. A 4-line edit was skipped by `min_changed_lines`, as before.
+- [x] Found live: a review of one file was handed every open suggestion and dropped an unfixed one on another
+      file. Suggestions are now re-checked only by a review of their own file, and a confirm round closes only
+      the blocking cycle (verified live: the bank.py suggestion survived the refunds.py blocking cycle).
+- [ ] Codex hooks still have the old 300s Stop timeout; the wait for a background review plus its own review
+      needs 540s. Run `tagteam install` and re-approve in Codex `/hooks`.
 - Context injection per harness (checked 2026-10-27): Claude, UserPromptSubmit `additionalContext` (yes). Codex,
   yes: codex-rs `hooks/src/engine/output_parser.rs` `parse_user_prompt_submit` reads
   `hookSpecificOutput.additionalContext`, and the `user-prompt-submit.command.output` schema has `hookEventName`
