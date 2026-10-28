@@ -18,13 +18,17 @@ def turn_start(ev, cfg):
     repo = changes.repo_root(ev.cwd)
     snap = changes.snapshot(repo) if repo else None
     with state.locked(_session_file(ev).stem):
-        prior = (state.read_json(_session_file(ev)) or {}).get("prior") or []   # open until a verdict closes them
+        prev = state.read_json(_session_file(ev)) or {}
+        prior = prev.get("prior") or []              # open until a verdict closes them
+        unreviewed = prev.get("repo") == repo and prev.get("pending_baseline")   # a turn not reviewed: cover it too
+        base, touched = (prev["pending_baseline"], prev.get("pending_touched", [])) if unreviewed else (snap, [])
         state.write_json(_session_file(ev), {
             "turn_id": ev.turn_id or uuid.uuid4().hex[:12], "started": time.time(), "cwd": ev.cwd,
-            "repo": repo, "baseline": snap, "turn_baseline": snap,    # baseline advances each round; turn_baseline never
+            "repo": repo, "baseline": base, "turn_baseline": base,    # baseline advances each round; turn_baseline never
             "refs": changes.refs(repo) if repo else {},
-            "prompt": ev.prompt, "round": 0, "touched": [], "reviewed_digests": {}, "prior": prior, "carried": bool(prior),
-            "plan_rounds": 0, "plan_prior": [], "outside_touched": [], "reverted_prior": [],
+            "prompt": ev.prompt, "round": 0, "touched": touched, "reviewed_digests": {}, "prior": prior,
+            "carried": bool(prior), "owed": prev.get("owed"), "plan_rounds": 0, "plan_prior": [],
+            "outside_touched": [p for p in touched if not changes.in_repo(p, repo)], "reverted_prior": [],
         })
     return None
 
@@ -102,6 +106,7 @@ def completion(run, lines_changed):
 STATE_ERROR = limits.STATE_ERROR
 SLOW_SETUP = "repo too slow to sandbox, see tagteam.log"
 NO_SANDBOX = "no sandbox for a background review, see tagteam.log"
+STILL_RUNNING = "earlier review still running"
 
 
 def _git_activity(s):
@@ -142,13 +147,15 @@ def review(ev, cfg, s, artifacts, round_no, run_tag, lock, confirm=False, rebutt
                    mode, pinned)
 
 
-def _session_guard(ev, handler, *args):
-    """Run handler(*args, lock=...) holding this session's lock; a second trigger for the session is skipped."""
-    with limits.session_lock(ev.agent, ev.session_id) as lock:
+def _session_guard(ev, wait, handler, *args, busy=None):
+    """Run handler(*args, lock, fd) holding this session's lock. A review already running for the session (a
+    background one) is waited for, up to `wait` seconds; then busy() answers instead."""
+    with limits.session_lock(ev.agent, ev.session_id, wait) as (lock, fd):
         if lock == limits.BUSY:
-            state.log("review already running for this session; skipped", author=ev.agent, session=ev.session_id)
-            return None
-        return handler(*args, lock)
+            state.log("earlier review still running for this session; not reviewing", author=ev.agent,
+                      session=ev.session_id)
+            return busy() if busy else None
+        return handler(*args, lock, fd)
 
 
 def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started, mode, pinned):
@@ -311,10 +318,23 @@ def _write_back(sf, turn_id, update, open_issues=None):
 
 
 def turn_end(ev, cfg):
-    return _session_guard(ev, _turn_end, ev, cfg)
+    return _session_guard(ev, cfg["review"]["deadline_s"], _turn_end, ev, cfg, busy=lambda: _still_running(ev, cfg))
 
 
-def _turn_end(ev, cfg, lock):
+def _still_running(ev, cfg):
+    """The wait ran out: say so, and keep this turn's review point so the next turn's review covers it too."""
+    sf = _session_file(ev)
+    s = state.read_json(sf)
+    if not s:
+        return None
+    run = _run_record(ev, cfg, s, "turn", s["round"] + 1, False, reason=STILL_RUNNING)
+    live.record_run(run)
+    _write_back(sf, s.get("turn_id"), lambda cur: cur.update(pending_baseline=cur.get("baseline"),
+                                                             pending_touched=cur.get("touched", [])))
+    return {"action": "allow", "message": completion(run, 0)}
+
+
+def _turn_end(ev, cfg, lock, fd):
     started = _clock()
     sf = _session_file(ev)
     s = state.read_json(sf)
@@ -386,10 +406,10 @@ def _reverted(ev, cfg, s, sf, round_no, head):
 
 def plan_gate(ev, cfg):
     """Review a plan before the user approves it (Claude ExitPlanMode)."""
-    return _session_guard(ev, _plan_gate, ev, cfg)
+    return _session_guard(ev, cfg["review"]["deadline_s"], _plan_gate, ev, cfg)
 
 
-def _plan_gate(ev, cfg, lock):
+def _plan_gate(ev, cfg, lock, fd):
     started = _clock()
     if not ev.plan_text.strip():
         return None

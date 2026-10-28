@@ -99,7 +99,7 @@ def install(agents, dry_run=False):
     if config.migrate_routing(dry_run):
         print(f"{'would keep' if dry_run else 'kept'} quota routing for your existing config (routing.mode = \"quota\")")
     cfg = config.load(note_legacy=True)
-    stop_timeout = cfg["review"]["deadline_s"] + 60
+    stop_timeout = 2 * cfg["review"]["deadline_s"] + 60     # a wait for a background review, then our own
     entry_cmd = entry()
     for name, h in harnesses.ALL.items():
         if name in agents and h.author:

@@ -224,6 +224,7 @@ class Install(unittest.TestCase):
         self.assertEqual(len([e for e in hooks["Stop"] if claude_h.base.ours(e)]), 1)
         self.assertNotIn("/old/repo", json.dumps(ours))
         self.assertIn("/opt/bin/tagteam hook claude turn-end", json.dumps(hooks["Stop"][1]))
+        self.assertEqual(hooks["Stop"][1]["hooks"][0]["timeout"], 540)    # waits up to 240s, then reviews in 240s
 
     def test_failed_check_keeps_old_entries(self):
         codex = pathlib.Path(codex_h.PATH)

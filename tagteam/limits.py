@@ -104,24 +104,32 @@ HELD, BUSY, ERROR = "held", "busy", "error"
 
 
 @contextlib.contextmanager
-def session_lock(author, session_id):
-    """Yields HELD, BUSY (another review has this session) or ERROR (the lock itself failed).
-    The kernel frees the lock if the holder dies."""
+def session_lock(author, session_id, wait=0):
+    """Yields (HELD, fd), or (BUSY, None) if another review still has this session after `wait` seconds, or
+    (ERROR, None) if the lock itself failed. The kernel frees the lock once every process holding `fd` is gone,
+    so a child given `fd` keeps it; never LOCK_UN, which would free it for that child too."""
     try:
         f = open(state.path("locks", f"session-{safe_session_key(author, session_id)}.lock"), "w")
     except OSError as e:
         state.log("session lock unavailable", error=repr(e))
-        yield ERROR
+        yield ERROR, None
         return
     with f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as e:
-            if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
-                state.log("session lock failed", error=repr(e))
-            yield BUSY if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN) else ERROR
-            return
-        yield HELD
+        until = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    state.log("session lock failed", error=repr(e))
+                    yield ERROR, None
+                    return
+                if time.monotonic() >= until:
+                    yield BUSY, None
+                    return
+                time.sleep(0.2)
+        yield HELD, f.fileno()
 
 
 def disabled():

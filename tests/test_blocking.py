@@ -1,8 +1,14 @@
+import pathlib
+import threading
+import time
 import unittest
+from unittest import mock
 
-from tests.helpers import CFG, finding
+from tests.helpers import CFG, HookRig, finding, state, use_toml, write_user_config
 
-from tagteam import verdict
+from tagteam import limits, live, runner, verdict
+
+BLOCK_SMALL = "[review]\nblocking = { small = true }\n"
 
 
 def res(*findings):
@@ -44,6 +50,68 @@ class Gates(unittest.TestCase):
             "1. [major] a.py:40: writes the file before validating it  (copilot)", "   Evidence: e", "   Fix: f", "",
             "Suggestions (not blocking; fix when convenient):",
             "1. [major] a.py:10: cache key ignores the locale  (copilot)", "   Evidence: e", "   Fix: f"])
+
+
+class Flow(HookRig, unittest.TestCase):
+    def setUp(self):
+        self.rig(use_toml(["copilot"]) + BLOCK_SMALL)
+
+    def tearDown(self):
+        self.unrig()
+
+    def start(self):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+
+    def stop(self, results=None):
+        with mock.patch.object(runner, "run_all", self.fake_run_all(results or {})):
+            return self.run_hook("claude", "x", self.claude("Stop", last_assistant_message="done"))
+
+    def write(self, name, n=20):
+        pathlib.Path(self.repo, name).write_text("a = 1\n" * n)
+
+    def seg(self):
+        return live.segment("claude", "sess1")
+
+    def hold_lock(self, secs):
+        """Another review of this session, running for `secs`."""
+        held = threading.Event()
+
+        def run():
+            with limits.session_lock("claude", "sess1"):
+                held.set()
+                time.sleep(secs)
+        threading.Thread(target=run, daemon=True).start()
+        held.wait()
+
+    def test_the_next_stop_waits_for_a_running_review(self):
+        self.start()
+        self.write("feature.py")
+        t0 = time.monotonic()
+        self.hold_lock(0.6)
+        self.assertEqual(self.stop()["systemMessage"].split(" · ")[0], "[tagteam] ✓ Review passed: no issues found")
+        self.assertGreaterEqual(time.monotonic() - t0, 0.6)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_at_the_deadline_it_is_not_reviewed_and_the_next_review_covers_both_turns(self):
+        self.start()
+        self.write("one.py")
+        write_user_config(use_toml(["copilot"]) + BLOCK_SMALL + "deadline_s = 1\n")
+        self.hold_lock(3)
+        out = self.stop()
+        self.assertEqual((out["systemMessage"], self.calls), ("[tagteam] ⚠ Not reviewed: earlier review still running", []))
+        self.assertIn("⚠ Not reviewed: earlier review still running", self.seg())
+        time.sleep(2.2)
+        write_user_config(use_toml(["copilot"]) + BLOCK_SMALL)
+        self.start()
+        self.write("two.py")
+        self.stop()
+        prompt = next(iter(self.calls[-1].values()))
+        self.assertEqual(("one.py" in prompt, "two.py" in prompt), (True, True))
+        self.start()
+        self.write("three.py")
+        self.stop()
+        prompt = next(iter(self.calls[-1].values()))
+        self.assertEqual(("two.py" in prompt, "three.py" in prompt), (False, True))   # pending is used once
 
 
 if __name__ == "__main__":

@@ -298,8 +298,8 @@ class Guards(HookRig, unittest.TestCase):
         self.assertIn("state error", out["systemMessage"])
 
     def test_session_lock_contention_is_silent_not_error(self):
-        with limits.session_lock("claude", "s") as outer:
-            with limits.session_lock("claude", "s") as inner:
+        with limits.session_lock("claude", "s") as (outer, _):
+            with limits.session_lock("claude", "s") as (inner, _):
                 self.assertEqual((outer, inner), (limits.HELD, limits.BUSY))
 
     def test_remember_state_error_keeps_the_block(self):
@@ -327,7 +327,7 @@ class Guards(HookRig, unittest.TestCase):
         real = self.core.collect
 
         def collect(s, cfg):
-            with limits.session_lock("claude", "sess1") as st:
+            with limits.session_lock("claude", "sess1") as (st, _):
                 seen.append(st)
             return real(s, cfg)
         with mock.patch.object(self.core, "collect", collect):
@@ -390,9 +390,9 @@ with mock.patch.object(harnesses, "detected", return_value=["claude", "copilot"]
     cli.hook("claude", "x")
 '''
 
-    def test_concurrent_trigger_same_session_skipped(self):
+    def test_concurrent_trigger_same_session_waits_then_finds_nothing_new(self):
         home = tempfile.mkdtemp()
-        pathlib.Path(home, "config.toml").write_text(use_toml(["copilot"]))
+        pathlib.Path(home, "config.toml").write_text(use_toml(["copilot"]) + "[review]\nblocking = { small = true }\n")
         repo = make_repo()
         work = pathlib.Path(tempfile.mkdtemp())
         script = work / "s.py"
@@ -407,10 +407,9 @@ with mock.patch.object(harnesses, "detected", return_value=["claude", "copilot"]
         procs = {name: run("stop", name, sid) for name, sid in (("s1", "s"), ("s2", "s"), ("t", "t"))}
         wait_for([work / f"ready-{n}" for n in procs])
         (work / "go").write_text("")
-        end = time.time() + 20
-        while not any(procs[k].poll() is not None for k in ("s1", "s2")):     # the loser exits while the winner waits
-            self.assertLess(time.time(), end)
-            time.sleep(0.005)
+        wait_for([work / "pids"])
+        time.sleep(1)
+        self.assertEqual([procs[k].poll() for k in ("s1", "s2")], [None, None])   # the loser waits for the winner
         (work / "release").write_text("")
         outs = {n: json.loads(p.communicate(timeout=20)[0].strip().splitlines()[-1]) for n, p in procs.items()}
         self.assertEqual(len((work / "pids").read_text().split()), 2)         # one review for s, one for t
