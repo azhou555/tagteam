@@ -245,8 +245,9 @@ still blocks.
 - [x] Found live: a review of one file was handed every open suggestion and dropped an unfixed one on another
       file. Suggestions are now re-checked only by a review of their own file, and a confirm round closes only
       the blocking cycle (verified live: the bank.py suggestion survived the refunds.py blocking cycle).
-- [ ] Codex hooks still have the old 300s Stop timeout; the wait for a background review plus its own review
-      needs 540s. Run `tagteam install` and re-approve in Codex `/hooks`.
+- [x] Codex hooks have the 540s Stop timeout (installed 2026-10-27 23:57; Stop re-approved at 23:57:30). Doctor
+      kept saying "re-approve" because the install snapshot recorded every hook, including the two the
+      install left alone; it now records only the hooks an install changes (2026-10-28).
 - Context injection per harness (checked 2026-10-27): Claude, UserPromptSubmit `additionalContext` (yes). Codex,
   yes: codex-rs `hooks/src/engine/output_parser.rs` `parse_user_prompt_submit` reads
   `hookSpecificOutput.additionalContext`, and the `user-prompt-submit.command.output` schema has `hookEventName`

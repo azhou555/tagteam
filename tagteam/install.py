@@ -350,8 +350,8 @@ def next_steps(p):
     cfg = config.load()
     use, c = cfg.get("reviewers", {}).get("use") or [], _paint()
     print("\n" + c.bold("Next:"))
-    codex = p["files"].get("codex")
-    if codex and codex[1] != codex[2]:
+    trust = harnesses.get("codex").hook_trust
+    if "codex" in p["files"] and trust and trust() != "trusted":   # also hooks left unapproved by an earlier install
         print("  - " + c.bold(c.fg(ATTENTION, "Action needed:")) + f" open {c.agent('codex')}, run /hooks, and "
               "approve tagteam's 3 hooks. Codex runs no new hook until you do.")
     author = next((a for a in p["files"] if a in cfg["authors"]["review"] and any(r != a for r in use)), None)
