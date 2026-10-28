@@ -80,9 +80,10 @@ def _our_entries():
 
 def install(entry_cmd, stop_timeout, dry_run):
     before = _our_entries()
-    install_claude_shaped("codex", PATH, entry_cmd, stop_timeout, dry_run)
+    change = install_claude_shaped("codex", PATH, entry_cmd, stop_timeout, dry_run)
     if not dry_run and _our_entries() != before:     # unchanged hooks keep their approvals: so must the snapshot
         save_trust_snapshot()
+    return change
 
 
 def argv(prompt, options, workdir, deadline):

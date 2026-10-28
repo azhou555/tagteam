@@ -22,7 +22,7 @@ def parse(phase, p):
 def install(entry_cmd, stop_timeout, dry_run):
     def h(phase, t):
         return [{"type": "command", "bash": base.hook_cmd(entry_cmd, "copilot", phase), "timeoutSec": t}]
-    base.save(PATH, {"version": 1, "hooks": {"userPromptSubmitted": h("turn-start", 30),
+    return base.save(PATH, {"version": 1, "hooks": {"userPromptSubmitted": h("turn-start", 30),
                                              "postToolUse": h("touch", 30),
                                              "agentStop": h("turn-end", stop_timeout)}}, dry_run)
 

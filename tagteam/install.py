@@ -1,5 +1,8 @@
 """Install: each harness merges its hook config (every entry carries TAG so uninstall and re-install touch
 exactly ours; Orca's and other entries are left alone); this module adds the menu bar item and launcher."""
+import difflib
+import importlib.metadata
+import json
 import os
 import pathlib
 import select
@@ -9,7 +12,8 @@ import subprocess
 import sys
 import time
 
-from . import config, harnesses, resources, state
+from . import config, harnesses, live, resources, state
+from .harnesses import base
 
 H = pathlib.Path.home()
 SWIFTBAR_APP = pathlib.Path("/Applications/SwiftBar.app")
@@ -53,6 +57,18 @@ def check_agent(name):
     return r.returncode
 
 
+CHANGE, GOOD, ATTENTION, ERROR = (live.KINDS[k]["ansi"] for k in ("running", "passed", "unresolved", "blocked"))
+
+
+def _paint():
+    """Colors only on a terminal, and never with NO_COLOR set."""
+    return live.Paint(sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
+
+
+def _names(names, c):
+    return ", ".join(c.agent(n) for n in names)
+
+
 PICK_KEYS = {"\x1b[A": "up", "\x1b[B": "down", "k": "up", "j": "down", " ": "toggle", "\n": "done", "\r": "done"}
 
 
@@ -72,19 +88,23 @@ def _key(fd):
     return PICK_KEYS.get(ch)
 
 
-def _pick(detected, preselected):
+def _pick(detected, preselected, notes):
     """Arrow keys move, space selects, enter saves. A pick's number is its place in the review order."""
     import termios
     import tty
     fd, out = sys.stdin.fileno(), sys.stdout
-    cursor, chosen = 0, [detected.index(n) for n in preselected]
-    print("Pick the agents that may review your changes. Each one you pick receives your diffs.\n"
-          "↑/↓ move · space select · enter save. Numbers are the review order; pick none to save nothing.")
+    cursor, chosen, c = 0, [detected.index(n) for n in preselected], _paint()
+    print(c.bold("Pick the agents that may review your changes.") + " Each one you pick "
+          + c.bold(c.fg(ATTENTION, "receives your diffs")) + ".\n"
+          + c.dim("↑/↓ move · space select · enter save. Numbers are the review order; pick none to save nothing."))
+
+    def row(i, name):
+        mark = c.brand("›") if i == cursor else " "
+        num = c.bold(c.fg(GOOD, str(chosen.index(i) + 1))) if i in chosen else " "
+        return f"\x1b[2K{mark} [{num}] {c.agent(name, f'{name:8}')}{c.dim(notes.get(name, ''))}\n"
 
     def draw(first):
-        out.write(("" if first else f"\x1b[{len(detected)}F") + "".join(
-            f"\x1b[2K{'›' if i == cursor else ' '} [{chosen.index(i) + 1 if i in chosen else ' '}] {name}\n"
-            for i, name in enumerate(detected)))
+        out.write(("" if first else f"\x1b[{len(detected)}F") + "".join(row(i, n) for i, n in enumerate(detected)))
         out.flush()
     old = termios.tcgetattr(fd)
     try:
@@ -101,14 +121,16 @@ def _pick(detected, preselected):
     return [detected[i] for i in chosen]
 
 
-def ask_consent(detected, preselected):
+def ask_consent(detected, preselected, notes=None):
     """The picker on a terminal, else a numbered prompt on stdin. Returns the picked agents in order; none is []."""
+    notes = notes or {}
     if sys.stdin.isatty() and sys.stdout.isatty():
-        return _pick(detected, preselected)
-    print("These agents can review your changes. Each one you pick receives your diffs. "
-          "Pick reviewers in order (e.g. 2,1), or press Enter for none:")
+        return _pick(detected, preselected, notes)
+    c = _paint()
+    print("These agents can review your changes. Each one you pick " + c.bold(c.fg(ATTENTION, "receives your diffs"))
+          + ". Pick reviewers in order (e.g. 2,1), or press Enter for none:")
     for i, name in enumerate(detected, 1):
-        print(f"  {i}. [{'x' if name in preselected else ' '}] {name}")
+        print(f"  {i}. [{'x' if name in preselected else ' '}] {c.agent(name, f'{name:8}')}{c.dim(notes.get(name, ''))}")
     if preselected:
         print("  ([x] = enabled in your old config; type their numbers to keep them)")
     while True:
@@ -125,53 +147,261 @@ def ask_consent(detected, preselected):
         return list(dict.fromkeys(detected[n - 1] for n in nums))
 
 
-def set_consent(reviewers, authors, yes, dry_run=False):
-    """Save who may review (`reviewers.use`) and whose turns are reviewed. Never derived from detection:
-    the list comes from --reviewers or an answer at the prompt, and --yes alone saves none."""
+SIGN_IN = {True: "credentials found", None: "sign-in unknown", False: "signed out"}    # logged_in is never False today
+
+
+def reviewer_note(name, cfg):
+    """What a reviewer runs with, from config: `model sonnet · credentials found`."""
+    r = cfg.get("reviewers", {}).get(name, {})
+    bits = [f"model {r['model']}" if r.get("model") else "default model"]
+    if r.get("effort"):
+        bits.append(f"{r['effort']} effort")
+    return " · ".join(bits + [SIGN_IN[harnesses.get(name).logged_in()]])
+
+
+def choose_reviewers(reviewers, yes):
+    """The reviewer list to save as `reviewers.use`, or None to leave it as it is. Never derived from detection:
+    the list comes from --reviewers or an answer at the prompt, and --yes alone picks none."""
     found = [n for n in harnesses.detected() if harnesses.get(n).reviewer]
-    old, use = {}, None
+    use = None
     if reviewers is None and not yes and found:
-        old = config.load().get("reviewers", {})
+        cfg = config.load()
+        old = cfg.get("reviewers", {})
         use = old.get("use")                          # None: never saved; [] was saved on purpose
         reviewers = ask_consent(found, [n for n in use if n in found] if use is not None
-                                else [n for n in found if old.get(n, {}).get("enabled") is True])
+                                else [n for n in found if old.get(n, {}).get("enabled") is True],
+                                {n: reviewer_note(n, cfg) for n in found})
     if reviewers or (reviewers == [] and use):        # deselecting a saved list at the prompt clears it
-        saved = {"reviewers": ("reviewers", "use", reviewers)}
-    else:
-        saved = {}
-        print("no reviewer list saved: nothing is reviewed until you run "
+        return reviewers
+    return None
+
+
+def save_consent(reviewers, authors, dry_run=False):
+    """Save who may review (`reviewers.use`; None leaves it) and whose turns are reviewed (`authors.review`)."""
+    saved, c = {}, _paint()
+    if reviewers is not None:
+        saved["reviewers"] = ("reviewers", "use", reviewers)
+    elif not config.load().get("reviewers", {}).get("use"):
+        print(c.fg(ATTENTION, "no reviewer list saved: nothing is reviewed") + " until you run "
               "`tagteam install --reviewers codex,claude` (names in your preferred order)")
     if authors is not None:
         saved["authors"] = ("authors", "review", authors)
     for table, key, items in saved.values():
-        print(f"{'would save' if dry_run else 'saved'} {table}.{key} = {', '.join(items) or '(none): nothing is reviewed'}")
+        print(f"{'would save' if dry_run else 'saved'} {table}.{key} = "
+              + (_names(items, c) or c.fg(ATTENTION, "(none): nothing is reviewed")))
         if not dry_run:
             config.save_user(table, key, items)
 
 
-def install(agents, dry_run=False):
-    if config.migrate_routing(dry_run):
-        print(f"{'would keep' if dry_run else 'kept'} quota routing for your existing config (routing.mode = \"quota\")")
+def set_consent(reviewers, authors, yes, dry_run=False):
+    save_consent(choose_reviewers(reviewers, yes), authors, dry_run)
+
+
+def intro(c):
+    return (f"{c.bold(c.brand('tagteam'))} {c.dim(_version())}\n"
+            "When a coding agent finishes a turn that changed code, a plan or a design, a different agent reviews the "
+            "change,\nread-only. Large changes, plans and designs wait for the review; small ones are reviewed in the "
+            "background.\nReviews run on this machine through the agent apps you already use. "
+            + c.bold("Your diffs go only to the reviewers you pick.") + "\n")
+
+
+def _version():
+    try:
+        return importlib.metadata.version("tagteam")
+    except importlib.metadata.PackageNotFoundError:
+        return "(from a checkout)"
+
+
+def _tilde(p):
+    p = str(p)
+    return "~" + p[len(str(H)):] if p.startswith(str(H) + os.sep) else p
+
+
+def _has_hooks(p):
+    try:
+        return base.TAG in p.read_text(errors="ignore")
+    except OSError:
+        return False
+
+
+def agent_lines(c=None):
+    c = c or live.Paint(False)
+    for name, h in harnesses.ALL.items():
+        if not h.detect():
+            yield "  " + c.dim(f"{name:8}not installed")
+            continue
+        signed = h.logged_in()
+        sign_in = c.fg(GOOD, SIGN_IN[signed]) if signed else c.dim(SIGN_IN[signed])
+        hooks = c.fg(GOOD, "tagteam hooks in place") if _has_hooks(h.hooks_path()) else c.dim("no tagteam hooks yet")
+        yield f"  {c.agent(name, f'{name:8}')}installed · {sign_in} · {hooks}"
+
+
+def plan(agents):
+    """Everything install would change, worked out without writing: each agent's hook check, every hook file
+    rendered (name -> (path, old text, new text)), whether the routing migration applies, and the menu bar line."""
+    routing = config.migrate_routing(dry_run=True)
     cfg = config.load(note_legacy=True)
     stop_timeout = 2 * cfg["review"]["deadline_s"] + 60     # a wait for a background review, then our own
     entry_cmd = entry()
+    files = {}
     for name, h in harnesses.ALL.items():
         if name in agents and h.author:
             rc = check_agent(name)
             if rc:
-                print(f"{name}: kept existing hooks (check failed with exit {rc}; "
+                print(_paint().fg(ATTENTION, f"{name}: kept existing hooks") + f" (check failed with exit {rc}; "
                       f"`{entry_cmd} hook {name} turn-end --check` shows why)")
                 continue
-            h.author.install(entry_cmd, stop_timeout, dry_run)
-    install_swiftbar(dry_run)
-    if not dry_run:
-        from . import live
-        n = live.backfill()
-        if n:
-            print(f"seeded {n} past reviews into {state.path('runs.jsonl')}")
-    if "codex" in agents and not dry_run:
-        print("\nCodex: open `codex`, run /hooks, and approve the 3 tagteam hooks (Codex will not run "
-              "new hooks until you trust them).")
+            files[name] = h.author.install(entry_cmd, stop_timeout, True)
+    return {"entry": entry_cmd, "stop_timeout": stop_timeout, "files": files, "routing": routing,
+            "menubar": menubar_plan()}
+
+
+def _same(old, new):
+    try:
+        return json.loads(old) == json.loads(new)
+    except ValueError:
+        return False
+
+
+def describe(old, new):
+    """One line for a hook file's change: hooks added or updated, and the Claude status line taken over."""
+    try:
+        o = json.loads(old) if old.strip() else {}
+    except ValueError:
+        o = None
+    n = json.loads(new)
+
+    def rest(d):
+        return {k: v for k, v in d.items() if k != "statusLine"} if isinstance(d, dict) else d
+    what = []
+    if _same(old, new):
+        return "already up to date"
+    if rest(o) != rest(n):
+        what.append("create it with tagteam's hooks" if not old else
+                    "update tagteam's hooks" if base.TAG in old else "add tagteam's hooks")
+    if isinstance(o, dict) and o.get("statusLine") != n.get("statusLine"):
+        what.append("show tagteam in your status line (your own command still runs)")
+    return "; ".join(what) or "already up to date"
+
+
+def summary(p, reviewers, authors, c=None):
+    """What install will do, one row per file or setting. Changes stand out; what stays as it is is dimmed."""
+    c = c or live.Paint(False)
+
+    def change(text):
+        return c.dim(text) if text == "already up to date" or text.startswith("skipped") else c.fg(CHANGE, text)
+    rows = [(_tilde(path), change(describe(old, new))) for path, old, new in p["files"].values()]
+    current = config.load().get("reviewers", {}).get("use")
+    settings = [c.fg(CHANGE, 'routing.mode = "quota"') + " (keeps how your existing config routes reviews)"] \
+        if p["routing"] else []
+    settings.append(c.fg(CHANGE, "reviewers.use = ") + (_names(reviewers, c) or c.fg(ATTENTION, "(none): nothing is reviewed"))
+                    if reviewers is not None and reviewers != current
+                    else c.dim("reviewers.use stays ") + _names(current, c) if current
+                    else c.fg(ATTENTION, "reviewers.use not set: nothing is reviewed until you pick reviewers"))
+    if authors is not None:
+        settings.append(c.fg(CHANGE, "authors.review = ") + (_names(authors, c) or "(none)"))
+    rows += [(_tilde(state.HOME / "config.toml") if i == 0 else "", s) for i, s in enumerate(settings)]
+    rows.append(("menu bar", change(p["menubar"])))
+    w = max(len(label) for label, _ in rows) + 3
+    return ("\n" + c.bold("tagteam install will:") + "\n" + "".join(f"  {label:{w}}{text}\n" for label, text in rows)
+            + c.dim("Each file is copied beside itself as <name>.tagteam-bak-<time> before it changes."))
+
+
+def diffs(p, c=None):
+    c = c or live.Paint(False)
+    out = []
+    for path, old, new in p["files"].values():
+        out += difflib.unified_diff(old.splitlines(), new.splitlines(), str(path), f"{path} (after install)",
+                                    lineterm="")
+    return "\n".join(c.bold(ln) if ln.startswith(("---", "+++")) else c.fg(GOOD, ln) if ln.startswith("+")
+                     else c.fg(ERROR, ln) if ln.startswith("-") else c.dim(ln) if ln.startswith("@@") else ln
+                     for ln in out)
+
+
+def confirm():
+    print("\n" + _paint().bold("Apply? [Y/n] "), end="", flush=True)
+    return sys.stdin.readline().strip().lower() in ("", "y", "yes")
+
+
+def apply(p):
+    """Write what `plan` worked out: the routing migration, each hook file (atomic, backed up), then the menu bar.
+    A hook failure raises; a menu bar failure is reported and leaves the hooks in place."""
+    if p["routing"] and config.migrate_routing():
+        print('kept quota routing for your existing config (routing.mode = "quota")')
+    for name, (path, old, new) in p["files"].items():
+        if not _same(old, new):                           # an up-to-date file keeps its bytes and gets no backup
+            harnesses.get(name).author.install(p["entry"], p["stop_timeout"], False)
+    try:
+        install_swiftbar()
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(_paint().fg(ATTENTION, f"menu bar: failed ({e}).") + " Hooks are in place, so reviews still run; "
+              "re-run install to retry.")
+    n = live.backfill()
+    if n:
+        print(f"seeded {n} past reviews into {state.path('runs.jsonl')}")
+
+
+def install(agents):
+    """Hooks and menu bar for `agents`, with no prompts."""
+    apply(plan(agents))
+
+
+def next_steps(p):
+    cfg = config.load()
+    use, c = cfg.get("reviewers", {}).get("use") or [], _paint()
+    print("\n" + c.bold("Next:"))
+    codex = p["files"].get("codex")
+    if codex and codex[1] != codex[2]:
+        print("  - " + c.bold(c.fg(ATTENTION, "Action needed:")) + f" open {c.agent('codex')}, run /hooks, and "
+              "approve tagteam's 3 hooks. Codex runs no new hook until you do.")
+    author = next((a for a in p["files"] if a in cfg["authors"]["review"] and any(r != a for r in use)), None)
+    if author:
+        print(f"  - {c.bold('Try it:')} ask {c.agent(author)} for a change of {cfg['triggers']['min_changed_lines']}+ "
+              f"lines. When its turn ends, {' or '.join(c.agent(r) for r in use if r != author)} reviews it; "
+              "`tagteam watch` or the menu bar shows it live.")
+    elif not use:
+        print("  - " + c.fg(ATTENTION, "Nothing is reviewed yet:") + " run `tagteam install` again and pick reviewers.")
+    print(f"  - {c.bold('Settings:')} {_tilde(state.HOME / 'config.toml')} (`tagteam config` shows every value). "
+          "Re-run `tagteam install` to change reviewers; `tagteam uninstall` removes everything.")
+    from . import doctor
+    print("\n" + c.bold("Health check (`tagteam doctor`):"))
+    doctor.run(False, False)
+
+
+def run(agents, reviewers, authors, yes, dry_run):
+    """`tagteam install`: say what tagteam is, choose reviewers, show the plan, confirm, apply, say what's next.
+    Nothing is written before the confirm. Returns the exit code."""
+    c = _paint()
+    print(intro(c))
+    print("\n".join(agent_lines(c)) + "\n")
+    found = harnesses.detected()
+    if len(found) < 2:
+        print(c.fg(ERROR, "tagteam needs two agents: one writes, a different one reviews.")
+              + f" Installed: {_names(found, c) or 'none'}.\n"
+              f"Install and sign in to another of {_names(harnesses.ALL, c)}, then run `tagteam install` again.")
+        return 1
+    try:
+        use = choose_reviewers(reviewers, yes)
+        p = plan(agents)
+        print(summary(p, use, authors, c))
+        if dry_run:
+            print("\n" + (diffs(p, c) or c.dim("no hook file changes")) + "\n\n" + c.bold("(dry run: nothing was written)"))
+            return 0
+        if not yes and not confirm():
+            print(c.dim("nothing was changed"))
+            return 1
+    except KeyboardInterrupt:
+        print("\n" + c.dim("cancelled: nothing was changed"))
+        return 130
+    try:
+        apply(p)
+    except (OSError, ValueError) as e:
+        print("\n" + c.bold(c.fg(ERROR, f"install stopped: {e}")) + "\nFiles updated above were backed up first (names shown). Fix the cause and "
+              "run `tagteam install` again; it replaces only tagteam's own entries.")
+        return 1
+    save_consent(use, authors)
+    next_steps(p)
+    return 0
 
 
 def _swiftbar_dir():
@@ -200,32 +430,47 @@ def _ours_plugin(p):
         return False
 
 
-def install_swiftbar(dry_run=False):
+def _menubar():
+    """Where the plugin goes, as (folder, SwiftBar's current folder or None), or why the menu bar is skipped."""
+    if state.extras_off():
+        return "skipped (TAGTEAM_NO_MACOS_EXTRAS is set)"
+    if not SWIFTBAR_APP.exists():
+        return "skipped. SwiftBar isn't installed (macOS only: brew install --cask swiftbar, then re-run install)"
+    current = _swiftbar_dir()
+    legacy = current == SWIFTBAR_OLD_DIR
+    if current and not legacy and any(part.startswith(".") for part in current.parts):
+        return (f"skipped. SwiftBar ignores hidden folders, and its plugin folder {current} is inside one; "
+                "pick a visible folder in SwiftBar's preferences, then re-run install")
+    target = SWIFTBAR_DIR if current is None or legacy else current
+    plugin = target / SWIFTBAR_PLUGIN
+    if plugin.exists() and not _ours_plugin(plugin):
+        return f"skipped. {plugin} exists and isn't tagteam's"
+    return target, current
+
+
+def menubar_plan():
+    m = _menubar()
+    if isinstance(m, str):
+        return m
+    target, current = m
+    return (f"write {_tilde(target / SWIFTBAR_PLUGIN)}"
+            + (" and restart SwiftBar so it loads that folder" if target != current else "")
+            + f"; add {_tilde(LAUNCHER)} so Spotlight finds tagteam")
+
+
+def install_swiftbar():
     """Menu bar item via SwiftBar, if it's installed. Uses the user's plugin folder, or ~/SwiftBar if none.
 
     Order matters: the plugin is written before SwiftBar is repointed or the legacy copy is removed, so a
     failure leaves the previous setup working.
     """
-    if state.extras_off():
-        print("menu bar: skipped (TAGTEAM_NO_MACOS_EXTRAS is set)")
+    m = _menubar()
+    if isinstance(m, str):
+        print(f"menu bar: {m}")
         return
-    if not SWIFTBAR_APP.exists():
-        print("menu bar: skipped. SwiftBar isn't installed (macOS only: brew install --cask swiftbar, then re-run install)")
-        return
-    current = _swiftbar_dir()
+    target, current = m
     legacy = current == SWIFTBAR_OLD_DIR
-    if current and not legacy and any(part.startswith(".") for part in current.parts):
-        print(f"menu bar: skipped. SwiftBar ignores hidden folders, and its plugin folder {current} is inside one; "
-              "pick a visible folder in SwiftBar's preferences, then re-run install")
-        return
-    target = SWIFTBAR_DIR if current is None or legacy else current
     plugin = target / SWIFTBAR_PLUGIN
-    if plugin.exists() and not _ours_plugin(plugin):
-        print(f"menu bar: skipped. {plugin} exists and isn't tagteam's")
-        return
-    if dry_run:
-        print(f"--- {plugin} (dry run)\n{swiftbar_plugin()}")
-        return
     target.mkdir(parents=True, exist_ok=True)
     plugin.write_text(swiftbar_plugin())
     plugin.chmod(0o755)

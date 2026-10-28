@@ -31,17 +31,28 @@ into your agents' config calls that installed command by absolute path.
 tagteam install
 ```
 
-`install` does two things:
+`install` first says what tagteam is and lists the agents it found (installed, credentials found, tagteam
+hooks in place). It needs at least two. Then it asks, shows what it will change, and writes nothing until
+you confirm:
 
-1. **Hooks.** It adds tagteam's hooks to each agent's own config (`~/.claude/settings.json`,
+1. **Consent.** It lists the agents that could review, each with the model it reviews with, and says that
+   each one **receives your diffs**. You pick which may review and in what order (↑/↓, space, enter). Your
+   saved list is preselected; picking none saves none.
+2. **Summary.** One line per file: tagteam's hooks added, updated or already up to date, the Claude status
+   line taken over (your own command still runs), the config keys it will save, and the menu bar item.
+   `Apply? [Y/n]`. `--dry-run` prints the same summary plus a diff of each file, and stops.
+3. **Hooks.** It adds tagteam's hooks to each agent's own config (`~/.claude/settings.json`,
    `~/.codex/hooks.json`, `~/.copilot/hooks/tagteam.json`, `~/.gemini/config/hooks.json`). It only merges:
-   every entry it adds is tagged, your own hooks and status line are untouched, and a backup is saved next
-   to each file as `*.tagteam-bak-<time>` each time it writes one. Re-running replaces only tagteam's own
-   entries (with the same ones, if nothing changed) and saves another backup. It wires only the agents
-   it finds installed and prints the rest (`copilot: not installed, skipped`); `--agents claude,codex`
-   names them explicitly. `--dry-run` shows the changes without making them.
-2. **Consent.** It lists the agents that could review and says that each one **receives your diffs**. You
-   pick which may review and in what order. Nothing is preselected, and pressing Enter picks none.
+   every entry it adds is tagged, your own hooks are untouched, and a backup is saved next to each file as
+   `*.tagteam-bak-<time>` each time it writes one (the `updated` line names it). Each file is replaced in
+   one step, so a failed write leaves it as it was. Re-running replaces only tagteam's own entries, so after
+   any failure, fix the cause and run `tagteam install` again. It wires only the agents it finds installed;
+   `--agents claude,codex` names them explicitly.
+4. **Next steps.** Codex approval if needed, a first change to try, and `tagteam doctor`'s health check.
+
+On a terminal each agent has its own color (claude orange, codex mint, copilot lavender, agy blue), what
+will change is highlighted, and what stays as it is is dimmed. Set `NO_COLOR=1` for plain text; piped
+output is always plain.
 
 tagteam never sends code to an agent just because it is installed. The list is saved as `reviewers.use`
 in `~/.tagteam/config.toml`, and **with no list, nothing is reviewed**: hooks run, turns are allowed, and
@@ -51,7 +62,7 @@ Non-interactive installs (scripts, CI images) give the consent on the command li
 
 ```sh
 tagteam install --yes --reviewers codex,claude        # in preference order
-tagteam install --yes                                 # hooks only; saves no reviewer list, so no reviews
+tagteam install --yes                                 # no prompt or confirm; keeps your saved reviewer list
 tagteam install --authors claude,codex                # limit whose turns get reviewed
 ```
 
