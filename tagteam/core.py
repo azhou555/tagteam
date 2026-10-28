@@ -37,6 +37,11 @@ def turn_start(ev, cfg):
             "carried": bool(prior), "owed": prev.get("owed"), "plan_rounds": 0, "plan_prior": [],
             "outside_touched": [p for p in touched if not changes.in_repo(p, repo)], "reverted_prior": [],
         })
+    advise = verdict.gated(prior, "advise")
+    if advise:
+        return {"action": "context", "message": "\n".join(
+            [f"{MARKER} Open suggestions from an earlier cross-review, not blocking; fix when convenient:"]
+            + verdict.items(advise))}
     return None
 
 

@@ -54,5 +54,6 @@ def usage(stdout, workdir):
 
 AUTHOR = base.Author(
     parse=parse, encode=lambda phase, verdict: base.encode(phase, verdict, notice=False),
-    install=install, uninstall=uninstall, can_block_at_stop=True, can_notice=False, has_plan_gate=False)
+    install=install, uninstall=uninstall, can_block_at_stop=True, can_notice=False, has_plan_gate=False,
+    can_add_context=False)      # GitHub hooks reference: config-file userPromptSubmitted output is dropped
 REVIEWER = base.Reviewer(argv=argv, parse=lambda stdout, out_file: base.parse_wrapped(stdout, out_file), usage=usage)

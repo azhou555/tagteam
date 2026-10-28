@@ -96,9 +96,10 @@ def argv(prompt, options, workdir, deadline):
 
 AUTHOR = base.Author(
     parse=lambda phase, payload: parse_claude_shaped("codex", payload),
-    encode=lambda phase, verdict: base.encode(phase, verdict, notice=True),
+    encode=lambda phase, verdict: base.encode(phase, verdict, notice=True, context=True),
     install=install,
     uninstall=lambda: uninstall_claude_shaped(PATH),
-    can_block_at_stop=True, can_notice=True, has_plan_gate=False)
+    can_block_at_stop=True, can_notice=True, has_plan_gate=False,
+    can_add_context=True)       # codex-rs hooks output_parser.rs: parse_user_prompt_submit reads additionalContext
 REVIEWER = base.Reviewer(argv=argv, parse=lambda stdout, out_file: base.parse_wrapped(stdout, out_file),
                          usage=base.no_usage)

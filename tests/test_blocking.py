@@ -11,7 +11,7 @@ from unittest import mock
 
 from tests.helpers import CFG, REAL_DETACH, ROOT, HookRig, finding, sh, state, use_toml, write_user_config
 
-from tagteam import core, limits, live, runner, sandbox, verdict
+from tagteam import adapters, core, limits, live, runner, sandbox, verdict
 
 BUG = finding(file="feature.py", line=1, claim="the loop skips the last item")
 
@@ -168,6 +168,20 @@ class Background(HookRig, unittest.TestCase):
             out = self.stop(BUG)
         self.assertEqual(out["systemMessage"].split(" · ")[0], "[tagteam] ● Suggestions: 1 issue, not blocking")
         self.assertEqual((len(self.calls), list(state.path("jobs", "x").parent.iterdir())), (1, []))
+
+    def test_the_next_prompt_gets_open_suggestions_as_context(self):
+        self.start()
+        self.stop(BUG)
+        context = ("[tagteam] Open suggestions from an earlier cross-review, not blocking; fix when convenient:\n"
+                   "1. [major] feature.py:1: the loop skips the last item  (copilot)\n   Evidence: e\n   Fix: f")
+        self.assertEqual(self.start("next"), {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                                                     "additionalContext": context}})
+        sent = {"action": "context", "message": context}
+        self.assertEqual({a: json.loads(adapters.encode(a, "turn-start", sent)) for a in ("codex", "copilot", "agy")},
+                         {"codex": {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}},
+                          "copilot": {}, "agy": {}})
+        self.stop(lines=19)                                  # fixed: re-checked in the background, nothing left
+        self.assertEqual(self.start("after"), {})
 
     def test_a_large_change_still_blocks(self):
         self.start()
