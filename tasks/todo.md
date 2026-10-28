@@ -186,3 +186,60 @@ run, leaves `prior` set.
       four runs with correct outcome/summary.
 - [x] Change snapshots skip untracked nested git repos (they became gitlinks, seen with `.claude/worktrees/`);
   tracked submodules still diff. Unit test plus a live snapshot of this checkout with a nested repo dropped in.
+
+## Phase 10: Blocking and non-blocking reviews (plan, 2026-10-27)
+Goal: faster development. An issue in a large change, a plan or a design blocks. A small error in code logic doesn't
+make the agent wait or send it back. Users and agents can always tell which kind they're looking at.
+
+Data shape: one `tier(kind, artifacts, rv)` → `small | large | high_risk | docs` replaces the branching in
+`router.needed`; per-change reviewer counts and `review.blocking` both look it up. Each run records
+`mode = "block" | "advise"`. Each open issue in `prior` carries a `gate = "block" | "advise"`.
+
+Gate of each finding a review returns (computed in `verdict.decide`, before the blocking set is formed):
+1. `severity == "blocker"` → `block`, in any tier. A blocker is not a small error; it blocks the next Stop if the
+   review that found it was a background one.
+2. Else, if it matches a carried `advise` issue (the same file, line and claim test `dedupe` uses) → `advise`.
+3. Else → the review's own mode.
+The rules apply in order; the first that matches wins. Only `block`-gated findings at or above `block_at` enter
+the blocking set; `advise` ones are shown as suggestions. So a re-checked suggestion stays a suggestion unless a
+reviewer now rates it a blocker, in which case it is upgraded to `block`. A new distinct issue in a blocking review
+still blocks.
+
+- [ ] Config: `review.blocking = { small = false, large = true, high_risk = true, docs = true }`. A repo
+      `.tagteam.toml` may only switch a tier to true (adds scrutiny). The plan gate is always the blocking kind;
+      the existing round limit and confirm round still apply to it, as they do to every blocking review.
+- [ ] Non-blocking turn end: snapshot, start the review as a detached process (own session, like `on_review`),
+      return allow immediately with a notice ("Reviewing in the background; results appear in the status line").
+      Its deadline no longer has to fit the Stop hook timeout.
+- [ ] The background review writes its findings to `prior` through `_write_back` (finishing after a new turn has
+      started becomes the normal path; test it fully). It uses none of the turn's blocking rounds. If it left
+      any `block`-gated issue (a blocker), the next Stop blocks with it as round 1, even when that turn changed
+      nothing, and the usual round limit and confirm round follow.
+- [ ] Session lock: the background review holds the session lock for its whole run, as reviews do today, and
+      writes back under it, so two reviews of one session never overlap. It has its own deadline, so it can't
+      hold the lock forever; a killed one releases the flock and is recorded as `Review interrupted`.
+      The next Stop waits for the lock (up to `deadline_s`) instead of skipping, then reviews its own turn.
+      If the lock is still held at the deadline, it starts no review: it records `⚠ Not reviewed: earlier review
+      still running` and keeps its turn's baseline as `pending_baseline`; the next `turn_start` uses that as the
+      baseline, so the following review covers both turns' changes.
+- [ ] Delivery to the agent: turn start adds open non-blocking issues to the prompt as context, labelled "not
+      blocking; fix when convenient". Verify per harness which turn-start hooks accept added context (Claude does;
+      Codex, Copilot and agy are unchecked). Where a harness can't, the issues still show in the status surfaces.
+- [ ] Awareness for users, distinct on every surface (status line, menu bar, `tagteam watch`, `tagteam status`):
+      - running: `⟳ Reviewing in background` vs `⟳ Reviewing` (agent waiting)
+      - findings: `✗ Changes requested` (blocking, red) vs a new `● Suggestions: N issues, not blocking` (blue)
+      - the menu bar lists open issues grouped as Blocking / Not blocking; each run row shows its mode
+      - the block message and the injected context both say which kind they are
+      - `on_review` gets `TAGTEAM_MODE`
+- [ ] README: the two kinds, the defaults, how to change them.
+- [ ] Tests: tier lookup; repo file can't lower a tier; a small change returns allow at once and its findings
+      land in `prior` with `gate=advise`; a carried advise issue re-checked at major stays `advise` and doesn't
+      block, while the same issue re-checked as a blocker is upgraded to `block` and blocks; the next Stop waits for a running
+      background review; at the lock deadline it records `Not reviewed` and the next review covers both turns;
+      a blocker from a background review blocks the next Stop; a killed background review records
+      `Review interrupted`; surface strings per kind.
+- [ ] Live: headless Claude in a throwaway repo. A small buggy edit ends the turn at once, the status line shows
+      background then `● Suggestions`, the next prompt gets the issues as context. A large change still blocks.
+
+Decided: a blocker-severity finding blocks in any tier (gate rule 1). The severity label has to mean something,
+and a line count can't vouch for a change being safe.
