@@ -4,7 +4,9 @@ import os
 import shutil
 import pathlib
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -57,12 +59,39 @@ class Checkout(unittest.TestCase):
         self.assertFalse(os.path.exists(path))
         self.assertEqual(len(worktrees(repo)), 1)
 
+    def test_worktrees_wait_for_another_process_holding_the_repos_lock(self):
+        repo = make_repo()
+        tree = changes.snapshot(repo)
+        lock = state.path("locks", sandbox._registry_lock(repo) + ".lock")
+        holder = subprocess.Popen([sys.executable, "-c", "import fcntl, sys; f = open(sys.argv[1], 'w'); "
+                                   "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.read()", lock],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.kill)                                  # a failed assert must not leave the lock held
+        self.assertEqual(holder.stdout.readline(), "held\n")
+        got = {}
+
+        def review():
+            with sandbox.checkout(repo, tree, cwd=repo) as path:
+                got["path"] = path
+        t = threading.Thread(target=review, daemon=True)
+        t.start()
+        time.sleep(0.5)
+        self.assertEqual((len(worktrees(repo)), got), (1, {}))       # nothing registered while the other holds it
+        holder.stdin.close()
+        holder.wait()
+        t.join(10)
+        self.assertNotEqual(got["path"], repo)
+        self.assertEqual(len(worktrees(repo)), 1)
+        linked = os.path.join(tempfile.mkdtemp(), "linked")
+        sh(repo, "git", "worktree", "add", "-q", "--detach", linked)
+        self.assertEqual(sandbox._registry_lock(linked), sandbox._registry_lock(repo))   # one .git/worktrees, one lock
+
     def test_worktree_failure_falls_back_to_cwd(self):
         repo = make_repo()
         with sandbox.checkout(repo, "0" * 40, cwd=repo) as path:
             self.assertEqual(path, repo)
 
-    def test_worktrees_are_made_in_parallel_and_all_removed_if_one_fails(self):
+    def test_each_name_gets_its_own_worktree_and_all_are_removed_if_one_fails(self):
         repo = make_repo()
         tree = changes.snapshot(repo)
         with sandbox.checkouts(repo, tree, ["a", "b", "c"], cwd=repo) as m:
@@ -76,6 +105,15 @@ class Checkout(unittest.TestCase):
                 raise RuntimeError("boom")
             return real(r, c)
         with mock.patch.object(sandbox, "_worktree", flaky), sandbox.checkouts(repo, tree, ["a", "b", "c"], cwd=repo) as m:
+            self.assertEqual(set(m.values()), {repo})
+        self.assertEqual(len(worktrees(repo)), 1)
+        real_populate, n = sandbox._populate, itertools.count()
+
+        def flaky_populate(p):
+            if next(n) == 1:
+                raise RuntimeError("boom")
+            return real_populate(p)
+        with mock.patch.object(sandbox, "_populate", flaky_populate), sandbox.checkouts(repo, tree, ["a", "b", "c"], cwd=repo) as m:
             self.assertEqual(set(m.values()), {repo})
         self.assertEqual(len(worktrees(repo)), 1)
 

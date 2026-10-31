@@ -212,6 +212,7 @@ class Install(unittest.TestCase):
         self.assertFalse(theirs.exists())
         self.assertFalse((home / "SwiftBar").exists())
 
+    @unittest.skipUnless(sys.platform == "darwin", "osacompile is macOS-only")
     def test_launcher_built_owned_and_removed(self):
         apps = pathlib.Path(tempfile.mkdtemp())
         launcher = apps / "tagteam.app"
