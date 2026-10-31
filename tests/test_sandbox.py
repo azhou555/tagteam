@@ -62,7 +62,7 @@ class Checkout(unittest.TestCase):
         with sandbox.checkout(repo, "0" * 40, cwd=repo) as path:
             self.assertEqual(path, repo)
 
-    def test_worktrees_are_made_in_parallel_and_all_removed_if_one_fails(self):
+    def test_each_name_gets_its_own_worktree_and_all_are_removed_if_one_fails(self):
         repo = make_repo()
         tree = changes.snapshot(repo)
         with sandbox.checkouts(repo, tree, ["a", "b", "c"], cwd=repo) as m:
@@ -76,6 +76,15 @@ class Checkout(unittest.TestCase):
                 raise RuntimeError("boom")
             return real(r, c)
         with mock.patch.object(sandbox, "_worktree", flaky), sandbox.checkouts(repo, tree, ["a", "b", "c"], cwd=repo) as m:
+            self.assertEqual(set(m.values()), {repo})
+        self.assertEqual(len(worktrees(repo)), 1)
+        real_populate, n = sandbox._populate, itertools.count()
+
+        def flaky_populate(p):
+            if next(n) == 1:
+                raise RuntimeError("boom")
+            return real_populate(p)
+        with mock.patch.object(sandbox, "_populate", flaky_populate), sandbox.checkouts(repo, tree, ["a", "b", "c"], cwd=repo) as m:
             self.assertEqual(set(m.values()), {repo})
         self.assertEqual(len(worktrees(repo)), 1)
 

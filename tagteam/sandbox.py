@@ -44,17 +44,23 @@ def _clear_stale(repo, stale_s):
 
 
 def _worktree(repo, commit):
+    """Register an empty worktree. Run these one at a time: `worktree add` reads every sibling's admin files,
+    and a concurrent add can catch one half-written ("failed to read .git/worktrees/<name>/commondir")."""
     path = os.path.realpath(tempfile.mkdtemp(prefix=PREFIX))
     if changes.in_repo(path, repo):
         shutil.rmtree(path, ignore_errors=True)
         raise OSError(f"temp dir {path} is inside the repo")
     try:
-        changes.git(repo, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", path, commit,
-                    env={"GIT_LFS_SKIP_SMUDGE": "1"})
+        changes.git(repo, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--no-checkout", "--detach", path, commit)
     except (RuntimeError, OSError):
         shutil.rmtree(path, ignore_errors=True)
         raise
     return path
+
+
+def _populate(path):
+    """Check out the files; touches only this worktree's index and tree, so these run in parallel."""
+    changes.git(path, "-c", "core.hooksPath=/dev/null", "reset", "-q", "--hard", env={"GIT_LFS_SKIP_SMUDGE": "1"})
 
 
 @contextlib.contextmanager
@@ -68,12 +74,10 @@ def checkouts(repo, tree, names, cwd=None, stale_s=7200):
             try:
                 _clear_stale(repo, stale_s)
                 commit = changes.git(repo, "commit-tree", tree, "-m", "tagteam-review", env=_GIT_ENV).strip()
+                for _ in names:
+                    made.append(_worktree(repo, commit))
                 with cf.ThreadPoolExecutor(max_workers=max(1, len(names))) as ex:
-                    futs = [ex.submit(_worktree, repo, commit) for _ in names]
-                made = [f.result() for f in futs if not f.exception()]
-                err = next((f.exception() for f in futs if f.exception()), None)
-                if err:
-                    raise err
+                    list(ex.map(_populate, made))
             except (RuntimeError, OSError) as e:
                 state.log("sandbox unavailable, reviewing in place", repo=repo, error=repr(e))
                 for p in made:
