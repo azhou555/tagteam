@@ -1,6 +1,7 @@
 """Run each reviewer in its own disposable checkout of the turn's snapshot, and detect writes that escape it."""
 import concurrent.futures as cf
 import contextlib
+import hashlib
 import os
 import shutil
 import tempfile
@@ -68,25 +69,38 @@ def checkouts(repo, tree, names, cwd=None, stale_s=7200):
     """Yield {name: path}: one throwaway worktree of `tree` per name, all removed on exit whatever happens.
     Without a repo, or if worktrees can't be made, every name gets `cwd` (flags plus `Watch` only)."""
     cwd = cwd or os.getcwd()
-    made = []
+    made, lock = [], None
     try:
         if repo and tree:
             try:
-                _clear_stale(repo, stale_s)
-                commit = changes.git(repo, "commit-tree", tree, "-m", "tagteam-review", env=_GIT_ENV).strip()
-                for _ in names:
-                    made.append(_worktree(repo, commit))
+                lock = _registry_lock(repo)
+                with state.locked(lock):
+                    _clear_stale(repo, stale_s)
+                    commit = changes.git(repo, "commit-tree", tree, "-m", "tagteam-review", env=_GIT_ENV).strip()
+                    for _ in names:
+                        made.append(_worktree(repo, commit))
                 with cf.ThreadPoolExecutor(max_workers=max(1, len(names))) as ex:
                     list(ex.map(_populate, made))
             except (RuntimeError, OSError) as e:
                 state.log("sandbox unavailable, reviewing in place", repo=repo, error=repr(e))
-                for p in made:
-                    _remove(repo, p)
+                _remove_all(repo, lock, made)
                 made = []
         yield dict(zip(names, made)) if made else {n: cwd for n in names}
     finally:
-        for p in made:
-            _remove(repo, p)
+        _remove_all(repo, lock, made)
+
+
+def _registry_lock(repo):
+    """Lock name for `repo`'s .git/worktrees. Other tagteam processes (another session, a background review) add
+    and remove worktrees of the same repo, and git doesn't make that safe: see `_worktree`."""
+    return "worktrees-" + hashlib.sha256(os.path.realpath(_common_dir(repo)).encode()).hexdigest()[:16]
+
+
+def _remove_all(repo, lock, paths):
+    if paths:
+        with state.locked(lock):
+            for p in paths:
+                _remove(repo, p)
 
 
 @contextlib.contextmanager
@@ -95,10 +109,14 @@ def checkout(repo, tree, cwd=None):
         yield m["_"]
 
 
+def _common_dir(repo):
+    common = changes.git(repo, "rev-parse", "--git-common-dir").strip()
+    return common if os.path.isabs(common) else os.path.join(repo, common)
+
+
 def _git_files(repo):
     """Digests of the shared git dir's config and hooks: what a sandboxed `git config` or hook install changes."""
-    common = changes.git(repo, "rev-parse", "--git-common-dir").strip()
-    common = common if os.path.isabs(common) else os.path.join(repo, common)
+    common = _common_dir(repo)
     paths = [os.path.join(common, "config")]
     for root, _, files in os.walk(os.path.join(common, "hooks")):
         paths += [os.path.join(root, f) for f in files]
