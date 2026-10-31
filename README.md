@@ -18,9 +18,12 @@ You need Python 3.11+, `git`, [`uv`](https://docs.astral.sh/uv/) (or `pipx`), an
 supported agents installed and logged in with your own account: one to write, one to review.
 
 ```sh
-uv tool install git+https://github.com/azhou555/tagteam
+uv tool install git+https://github.com/azhou555/tagteam@v0.2.0
 # or, from a clone:  uv tool install ./tagteam
 ```
+
+`@v0.2.0` pins a tested release; [tags](https://github.com/azhou555/tagteam/tags) lists newer ones. Drop the
+`@…` to track `main`.
 
 This puts a `tagteam` command on your PATH (`uv tool update-shell` if it isn't). Everything tagteam writes
 into your agents' config calls that installed command by absolute path.
@@ -300,7 +303,7 @@ and 1 otherwise, and prints the fix in plain words.
 
 ## Upgrading
 
-**tagteam itself:** run the install command above again with `--reinstall`. The
+**tagteam itself:** run the install command above again with the new tag and `--reinstall`. The
 hooks call the stable `tagteam` path, so they need no rewrite. Afterwards `tagteam doctor` shows anything
 that needs attention. Coming from a version without background reviews, run `tagteam install` once more:
 it raises the Stop hook timeout so a turn can wait for a background review (and in Codex,
