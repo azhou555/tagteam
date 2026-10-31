@@ -36,7 +36,7 @@ mkdir -p "$T/before"
 cp "$HOME/.claude/settings.json" "$T/before/claude.json"
 cp "$HOME/.codex/hooks.json" "$T/before/codex.json"
 
-uv tool install --quiet "git+file://$SRC" || fail "uv tool install"
+uv tool install --quiet "git+file://$SRC@$(git -C "$SRC" rev-parse HEAD)" || fail "uv tool install"   # by commit: a CI checkout is a detached HEAD with no default branch
 ENTRY="$UV_TOOL_BIN_DIR/tagteam"
 [ -x "$ENTRY" ] || fail "no tagteam executable at $ENTRY"
 [ "$(command -v tagteam)" = "$ENTRY" ] || fail "tagteam on PATH is not the installed one"

@@ -55,9 +55,11 @@ def sh(cwd, *cmd):
 def make_repo():
     d = tempfile.mkdtemp()
     sh(d, "git", "init", "-q")
+    sh(d, "git", "config", "user.email", "t@t")          # later commits in the repo need it too (CI has no identity)
+    sh(d, "git", "config", "user.name", "t")
     pathlib.Path(d, "a.py").write_text("x = 1\n")
     sh(d, "git", "add", "-A")
-    sh(d, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+    sh(d, "git", "commit", "-qm", "init")
     return os.path.realpath(d)
 
 
