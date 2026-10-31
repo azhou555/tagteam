@@ -16,4 +16,4 @@ for i in range(150):
     repo = make_repo(); tree = changes.snapshot(repo)
     with sandbox.checkouts(repo, tree, ["a", "b", "c", "d"], cwd=repo) as m:
         fails += len(set(m.values())) != 4
-print("fallbacks:", fails, "/ 60"); [print(n, e) for e, n in errs.items()]
+print("fallbacks:", fails, "/ 150"); [print(n, e) for e, n in errs.items()]
