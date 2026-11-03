@@ -267,14 +267,15 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
                             "prior": run["prior"], "mode": mode, "background": bool(pinned), "started": now,
                             "expires": now + deadline + 60}) as update:
             outcomes = runner.run_all(jobs, cfg, works, run_dir, deadline, on_done=update)
-        guilty = {r: "wrote in its sandbox" for r in plan if works[r] != (repo or ev.cwd) and sandbox.dirty(works[r], before)}
+        wrote = {r: sandbox.dirty(works[r], before) for r in plan if works[r] != (repo or ev.cwd)}
+        guilty = {r: f"wrote in its sandbox: {', '.join(w[:5])}" for r, w in wrote.items() if w}
     seen = watch.after()
     in_place = any(works[r] == (repo or ev.cwd) for r in plan)
     if seen["git"]:                                  # a security signal; users rarely edit these mid-review
-        guilty = {r: "git config/hooks changed" for r in plan}
+        guilty = {r: f"git config/hooks changed: {', '.join(seen['git'][:5])}" for r in plan}
     elif in_place and (seen["repo"]["tree"] or seen["outside"]):   # no sandbox to prove who wrote: postcondition decides
         guilty = {r: "real tree or touched files changed with no sandbox" for r in plan}
-    changed = [] if pinned else seen["repo"]["tree"] + seen["repo"]["refs"] + seen["outside"]
+    changed = [] if pinned else seen["repo"]["tree"] + seen["repo"]["refs"] + seen["repo"]["config"] + seen["outside"]
     if guilty:
         state.log("REVIEWER WROTE OUTSIDE READ-ONLY; disabled", run_id=run_id, reviewers=list(guilty),
                   why=guilty, git=seen["git"], outside=seen["outside"], tree=seen["repo"]["tree"][:50],
@@ -284,7 +285,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         run["disabled"] = list(guilty)
     if changed:
         state.log("repo changed during review", run_id=run_id, blamed=list(guilty), tree=seen["repo"]["tree"][:50],
-                  refs=seen["repo"]["refs"], outside=seen["outside"])
+                  refs=seen["repo"]["refs"], config=seen["repo"]["config"], outside=seen["outside"])
         run["real_repo_changed"] = changed
     warn = ""
     if guilty:

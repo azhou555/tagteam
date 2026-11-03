@@ -223,6 +223,24 @@ class EndToEnd(HookRig, unittest.TestCase):
         self.assertEqual(subprocess.run(["git", "-C", self.repo, "config", "core.hooksPath"], capture_output=True,
                                         text=True).stdout.strip(), "/evil")
 
+    def test_git_config_change_is_logged_by_key(self):
+        self.stop_two("git config core.hooksPath /evil")
+        entry = [e for e in state.read_jsonl(state.path("tagteam.log")) if e["msg"].startswith("REVIEWER WROTE")][-1]
+        self.assertIn("+core.hookspath=/evil", entry["git"])
+        self.assertIn("core.hookspath", limits.disabled()["copilot"]["reason"])
+
+    def test_branch_tracking_config_change_disables_nobody_but_warns(self):
+        out = self.stop("git config branch.main.vscode-merge-base origin/main; "
+                        "git config branch.feature.remote origin; git config branch.feature.merge refs/heads/feature")
+        self.assertEqual(limits.disabled(), {})
+        run = state.read_jsonl(state.path("runs.jsonl"))[-1]
+        self.assertIn("+branch.feature.remote=origin", run["real_repo_changed"])
+        self.assertIn("⚠ your repo changed during review (see tagteam.log)", out["systemMessage"])
+
+    def test_sandbox_write_is_logged_by_file(self):
+        self.stop("echo x > pwned.txt")
+        self.assertIn("pwned.txt", limits.disabled()["copilot"]["reason"])
+
     def test_hook_install_in_shared_git_dir_disables_every_reviewer(self):
         self.stop_two("echo x > $(git rev-parse --git-common-dir)/hooks/pre-commit")
         self.assertEqual(sorted(limits.disabled()), ["codex", "copilot"])
