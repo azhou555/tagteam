@@ -9,7 +9,7 @@ from unittest import mock
 
 from tests.helpers import ROOT, HookRig, finding, sh, state, use_toml
 
-from tagteam import limits, live, runner
+from tagteam import core, limits, live, runner
 
 PLAN = {"hook_event_name": "PreToolUse", "tool_name": "ExitPlanMode", "session_id": "sess1"}
 
@@ -74,8 +74,7 @@ class FollowThrough(HookRig, unittest.TestCase):
         self.assertIn("✗ Changes requested: 2 issues still open after fixes (round 2/2)", self.seg())
         out = self.stop(issues(1))
         self.assertEqual(len(self.calls), 3)
-        self.assertNotIn("decision", out)
-        self.assertIn("⚠ Unresolved: 1 issue still open after 2 fix rounds", out["systemMessage"])
+        self.assertEqual(out, {"systemMessage": core.BACKGROUND})   # the confirm can't block: the author doesn't wait
         self.assertIn("⚠ Unresolved: 1 issue still open after 2 fix rounds", self.seg())
         self.stop(issues(1))
         self.assertEqual(len(self.calls), 3)                 # a fourth Stop spawns nothing
@@ -211,7 +210,8 @@ class FollowThrough(HookRig, unittest.TestCase):
             self.assertIn(s, p)
         again = self.stop(issues(1), change=False, message=reply)       # round 3 is the confirm round, and a repeat
         self.assertEqual(len(self.calls), 2)                            # of the same rebuttal re-issues, not re-spends
-        self.assertIn("⚠ Unresolved: 1 issue still open after 2 fix rounds", again["systemMessage"])
+        self.assertEqual(again, {"systemMessage": core.BACKGROUND})
+        self.assertIn("⚠ Unresolved: 1 issue still open after 2 fix rounds", self.seg())
 
     def test_repeated_rebuttal_reissues_without_a_review(self):
         from tests.helpers import write_user_config

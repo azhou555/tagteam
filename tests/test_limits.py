@@ -251,7 +251,8 @@ class Guards(HookRig, unittest.TestCase):
         self.assertEqual(state.read_json(sf)["round"], 2)
         self.rewind()
         third = self.stop(self.blocker(), change=False)                    # round 3 is the confirm round: no spawn, no block
-        self.assertEqual(third, {"systemMessage": "[tagteam] ⚠ Unresolved: 1 issue still open after 2 fix rounds"})
+        self.assertEqual(third, {"systemMessage": self.core.BACKGROUND})
+        self.assertIn("⚠ Unresolved: 1 issue still open after 2 fix rounds", live.segment("claude", "sess1"))
         self.assertEqual(len(self.calls), 1)
         last = state.read_jsonl(state.path("runs.jsonl"))[-1]
         self.assertEqual((last["confirm"], last["reviewers"], last["blocking"]), (True, [], 1))

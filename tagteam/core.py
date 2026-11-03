@@ -418,8 +418,11 @@ def _turn_end(ev, cfg, lock, fd):
     if not wanted(ev, cfg, artifacts):
         return None
     mode = _mode(cfg, artifacts, prior)
-    if (mode == "advise" and s.get("repo") and head and lock == limits.HELD and cfg["reviewers"].get("use")
-            and _start_background(ev, cfg, s, artifacts, head, rebuttal, fd)):
+    # A confirm can't block either, so the author doesn't wait for it; it still spends its round.
+    if ((mode == "advise" or confirm) and s.get("repo") and head and lock == limits.HELD and cfg["reviewers"].get("use")
+            and _start_background(ev, cfg, s, artifacts, head, rebuttal, fd, round_no if confirm else None, mode)):
+        if confirm:
+            _write_back(sf, s.get("turn_id"), lambda cur: cur.update(round=round_no))
         return {"action": "allow", "message": BACKGROUND if _has_status_line(ev.agent) else BACKGROUND_NEXT}
     action, msg, run_dir, open_issues = review(ev, cfg, s, artifacts, round_no, "turn", lock, confirm, rebuttal, started,
                                                mode)
@@ -462,12 +465,14 @@ def _detach(argv, fd):
                      start_new_session=True, pass_fds=(fd,))
 
 
-def _start_background(ev, cfg, s, artifacts, head, rebuttal, fd):
-    """Hand the review to a detached `tagteam background`. False if it couldn't start: review in the foreground."""
+def _start_background(ev, cfg, s, artifacts, head, rebuttal, fd, confirm_round=None, mode="advise"):
+    """Hand the review to a detached `tagteam background`. False if it couldn't start: review in the foreground.
+    `confirm_round` makes it the turn's confirm round (the last word on a blocking cycle, which can't block)."""
     job = state.path("jobs", f"{_session_file(ev).stem}-{uuid.uuid4().hex[:8]}.json")
     try:
         state.write_json(job, {"ev": dataclasses.asdict(ev), "cfg": cfg, "session": s, "artifacts": artifacts,
-                               "pinned": [head, _git_activity(s)], "rebuttal": rebuttal})
+                               "pinned": [head, _git_activity(s)], "rebuttal": rebuttal,
+                               "confirm_round": confirm_round, "mode": mode})
         _detach([sys.executable, "-m", "tagteam", "background", str(job)], fd)
     except OSError as e:
         state.log("background review not started; reviewing now", error=repr(e))
@@ -477,8 +482,8 @@ def _start_background(ev, cfg, s, artifacts, head, rebuttal, fd):
 
 
 def background(path, alarm=False):
-    """The detached half of a non-blocking turn end. It holds the session lock it was handed for its whole run
-    and spends none of the turn's rounds. `alarm` ends a run that overstays its deadline: the lock is freed and
+    """The detached half of a non-blocking turn end. It holds the session lock it was handed for its whole run.
+    An advise review spends none of the turn's rounds; a confirm round's was spent when it started. `alarm` ends a run that overstays its deadline: the lock is freed and
     the run shows as interrupted."""
     job = state.read_json(path)
     pathlib.Path(path).unlink(missing_ok=True)
@@ -487,8 +492,12 @@ def background(path, alarm=False):
     cfg, s, ev = job["cfg"], job["session"], HookEvent(**job["ev"])
     if alarm:
         signal.alarm(int(cfg["review"]["deadline_s"]) + 120)
-    action, msg, run_dir, open_issues = review(ev, cfg, s, job["artifacts"], 1, "turn", limits.HELD,
-                                               rebuttal=job["rebuttal"], mode="advise", pinned=tuple(job["pinned"]))
+    confirm_round = job.get("confirm_round")
+    action, msg, run_dir, open_issues = review(ev, cfg, s, job["artifacts"], confirm_round or 1, "turn", limits.HELD,
+                                               bool(confirm_round), job["rebuttal"], mode=job.get("mode", "advise"),
+                                               pinned=tuple(job["pinned"]))
+    if confirm_round and open_issues is not None:  # the last word on the blocking cycle: only suggestions stay open
+        open_issues = verdict.gated(open_issues, "advise")
     verdict_in = open_issues is not None and (run_dir is not None or msg)   # not: no verdict, or already reviewed
     notice = msg if msg and action != "block" and not _has_status_line(ev.agent) else None   # a blocker blocks instead
     if not (verdict_in or notice):

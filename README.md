@@ -96,7 +96,8 @@ blocking = { small = false, large = true, high_risk = true, docs = true }   # th
 
 - **Blocking review.** The turn ends only after the review. Issues at or above `review.block_at` are sent
   back to the author (`✗ Changes requested`), who fixes them or says why not, for up to
-  `limits.max_rounds_per_turn` rounds plus a last confirm review.
+  `limits.max_rounds_per_turn` rounds plus a last confirm review. The confirm review can't block, so it runs
+  in the background and its result shows in the status line.
 - **Non-blocking review.** The turn ends at once with `⟳ Reviewing in the background; results appear in
   the status line`. The review runs on its own, against the tree the turn ended with, and spends none of the
   turn's rounds. Its issues become suggestions (`● Suggestions: N issues, not blocking`). At the start of the
@@ -268,7 +269,7 @@ defaults:
 | Stop | Default | What happens |
 |---|---|---|
 | Reviewers don't trigger reviews | always | Reviewer processes carry `TAGTEAM_DEPTH`; hooks inside them do nothing |
-| Rounds per turn | `limits.max_rounds_per_turn = 2` | After two blocking rounds, one last confirm review runs that cannot block; then the turn is always allowed |
+| Rounds per turn | `limits.max_rounds_per_turn = 2` | After two blocking rounds, one last confirm review runs in the background (it cannot block); then the turn is always allowed |
 | Reviews per hour | `limits.max_reviews_per_hour = 30` | Across all sessions and agents; past it you see `review limit reached (30 per hour)` and turns are allowed unreviewed. A crashed run still counts |
 | No repeat reviews | always | A diff already approved is not reviewed again; a diff already blocked gets the same block re-issued without spending a review |
 | One review at a time | always | A second trigger in the same session waits for the running review, up to `review.deadline_s`; past that, the turn is allowed with `⚠ Not reviewed: earlier review still running` and the next review covers it |
