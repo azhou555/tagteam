@@ -540,7 +540,10 @@ Evidence: 125 past verdicts; median finding confidence 0.98, none under 0.6 (`mi
       every sandbox gets `.github/copilot/settings.local.json` with disableAllHooks (merged into an existing
       one, skipped if a symlink would take it outside), and dirty() ignores that file. Re-probe: no hook ran
       in any of the five, all exited 0. In-place reviews (no sandbox) still can run Copilot's repo hooks; Watch
-      catches what they write.
+      catches what they write. A repo's committed .github/copilot/settings.json with disableAllHooks false and
+      inline hooks: hooks ran without the fix, none with it (local wins). A symlinked .github leaves them on.
+- [ ] Not probed: repo MCP servers, plugins and skills, which Copilot loads in a trusted folder, and whether
+      Claude with --setting-sources user still loads a project .mcp.json. MCP servers are processes they start.
 - [x] Reviewer order agy, opencode, copilot, codex, claude; opencode pinned to free opencode/big-pickle
 - [x] Reviewer order agy, copilot, opencode, codex, claude: a blocking round waits for its slowest reviewer (agy
       ~128s, opencode ~166s and 2/7 timeouts vs copilot ~30s), so copilot pairs with agy on large changes

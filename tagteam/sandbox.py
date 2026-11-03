@@ -62,7 +62,7 @@ def _worktree(repo, commit):
 
 
 def _no_hooks(path):
-    """Turn off the reviewed repo's agent hooks in this sandbox: a reviewer runs no code the repo asks it to."""
+    """Turn off Copilot's hooks in this sandbox, the reviewed repo's included (its own settings.json can't undo it)."""
     p = os.path.join(path, COPILOT_SETTINGS)
     if not os.path.realpath(p).startswith(path + os.sep):       # a symlink in the repo would write outside
         state.log("copilot hooks left on in sandbox: settings path leaves it", path=path)
