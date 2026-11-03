@@ -126,7 +126,8 @@ def logged_in():
 def argv(prompt, options, workdir, deadline):
     model = options.get("model")
     out = ["claude", "-p", "--output-format", "json", "--json-schema", base.schema_path().read_text(),
-           "--permission-mode", "plan", "--disallowedTools", "Write", "Edit", "NotebookEdit"]
+           "--permission-mode", "plan", "--disallowedTools", "Write", "Edit", "NotebookEdit",
+           "--setting-sources", "user"]           # not the reviewed repo's settings, which can carry hooks
     return out + (["--model", model] if model else []), prompt, None
 
 

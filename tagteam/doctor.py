@@ -102,7 +102,7 @@ def probe_one(name, cfg):
             if after["git"] or after["outside"] or after["repo"]["tree"] or after["repo"]["refs"]:
                 return "wrote-files"
             try:
-                if changes.snapshot(work) != tree:
+                if sandbox.written(work, tree):
                     return "wrote-files"
             except (RuntimeError, OSError):
                 return "unknown (could not re-check the checkout)"

@@ -27,7 +27,7 @@ class Registry(unittest.TestCase):
         want = {
             "claude": (["claude", "-p", "--output-format", "json", "--json-schema", resources.text("findings.schema.json"),
                         "--permission-mode", "plan", "--disallowedTools", "Write", "Edit", "NotebookEdit",
-                        "--model", "m"], "P", None),
+                        "--setting-sources", "user", "--model", "m"], "P", None),
             "codex": (["codex", "exec", "-s", "read-only", "-c", 'approval_policy="never"', "--skip-git-repo-check",
                        "--output-schema", SCHEMA, "-o", "/w/out.json", "-m", "m", "-"], "P", "/w/out.json"),
             "copilot": (["copilot", "-p", "P", "-s", "--no-ask-user", "--allow-all-tools", "--deny-tool", "write",

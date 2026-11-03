@@ -1,5 +1,6 @@
 import dataclasses
 import itertools
+import json
 import os
 import shutil
 import pathlib
@@ -56,6 +57,26 @@ class Checkout(unittest.TestCase):
                 raise RuntimeError("boom")
         self.assertFalse(os.path.exists(path))
         self.assertEqual(len(worktrees(repo)), 1)
+
+    def test_sandbox_turns_off_copilots_repo_hooks_without_counting_as_a_write(self):
+        repo = make_repo()
+        pathlib.Path(repo, ".github/copilot").mkdir(parents=True)
+        pathlib.Path(repo, ".github/copilot/settings.local.json").write_text('{"model": "x", "disableAllHooks": false}')
+        tree = changes.snapshot(repo)
+        with sandbox.checkout(repo, tree) as path:
+            got = json.loads(pathlib.Path(path, sandbox.COPILOT_SETTINGS).read_text())
+            self.assertEqual(got, {"model": "x", "disableAllHooks": True})
+            self.assertEqual(sandbox.dirty(path, tree), [])
+            pathlib.Path(path, "a.py").write_text("x = 2\n")
+            self.assertEqual(sandbox.dirty(path, tree), ["a.py"])
+
+    def test_sandbox_never_writes_through_a_symlink_out_of_it(self):
+        repo, outside = make_repo(), tempfile.mkdtemp()
+        os.symlink(outside, os.path.join(repo, ".github"))
+        tree = changes.snapshot(repo)
+        with sandbox.checkout(repo, tree) as path:
+            self.assertNotEqual(os.path.realpath(path), repo)
+        self.assertEqual(os.listdir(outside), [])
 
     def test_worktree_failure_falls_back_to_cwd(self):
         repo = make_repo()

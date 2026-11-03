@@ -1,6 +1,7 @@
 """Run each reviewer in its own disposable checkout of the turn's snapshot, and detect writes that escape it."""
 import concurrent.futures as cf
 import contextlib
+import json
 import os
 import shutil
 import tempfile
@@ -9,6 +10,8 @@ import time
 from . import changes, state
 
 PREFIX = "tagteam-review-"
+# Copilot runs a trusted repo's own hooks (.claude/settings.json, .github/hooks), even in -p and in a worktree of it.
+COPILOT_SETTINGS = ".github/copilot/settings.local.json"
 _GIT_ENV = {"GIT_AUTHOR_NAME": "tagteam", "GIT_COMMITTER_NAME": "tagteam",
             "GIT_AUTHOR_EMAIL": "tagteam@localhost", "GIT_COMMITTER_EMAIL": "tagteam@localhost",
             "GIT_AUTHOR_DATE": "@0 +0000", "GIT_COMMITTER_DATE": "@0 +0000"}
@@ -54,7 +57,24 @@ def _worktree(repo, commit):
     except (RuntimeError, OSError):
         shutil.rmtree(path, ignore_errors=True)
         raise
+    _no_hooks(path)
     return path
+
+
+def _no_hooks(path):
+    """Turn off the reviewed repo's agent hooks in this sandbox: a reviewer runs no code the repo asks it to."""
+    p = os.path.join(path, COPILOT_SETTINGS)
+    if not os.path.realpath(p).startswith(path + os.sep):       # a symlink in the repo would write outside
+        state.log("copilot hooks left on in sandbox: settings path leaves it", path=path)
+        return
+    try:
+        with open(p) as f:
+            cur = json.load(f)
+    except (OSError, ValueError):
+        cur = {}
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f:
+        json.dump({**(cur if isinstance(cur, dict) else {}), "disableAllHooks": True}, f)
 
 
 @contextlib.contextmanager
@@ -123,11 +143,20 @@ def _refs(repo):
     return {k: v for k, v in changes.refs(repo).items() if not k.startswith("refs/remotes/")}
 
 
+def written(path, tree):
+    """The paths in which a sandbox no longer matches `tree` (tagteam's own Copilot settings aside); raises if
+    git can't tell."""
+    now = changes.snapshot(path)
+    if now == tree:
+        return []
+    wrote = changes.git(path, "diff", "--name-only", tree, now).split()
+    return [p for p in wrote if p != COPILOT_SETTINGS] if wrote else ["(tree changed)"]
+
+
 def dirty(path, tree):
-    """The paths in which a sandbox no longer matches `tree`; empty if it does."""
+    """`written`, but empty (and logged) if git can't tell."""
     try:
-        now = changes.snapshot(path)
-        return [] if now == tree else changes.git(path, "diff", "--name-only", tree, now).split() or ["(tree changed)"]
+        return written(path, tree)
     except (RuntimeError, OSError) as e:
         state.log("sandbox not re-checked", path=path, error=repr(e))
         return []

@@ -532,11 +532,15 @@ Evidence: 125 past verdicts; median finding confidence 0.98, none under 0.6 (`mi
       Claude-format hooks from the sandbox's .claude/settings.json; its session log shows agentStop at 15:44:39,
       and the orphan commit 4f4c9a1 "ai_log: record session 2026-11-01_15-44-40_de821b24" carries that Copilot
       session's id. log_ai.py wrote ai_log/*.md in the sandbox and committed it there.
-- [ ] Reviewers must not run the reviewed repo's own hooks: any repo with a Claude-format Stop/prompt hook that
-      writes files gets its reviewers disabled, and a repo hook is code from the reviewed change running outside
-      the read-only flags. Per agent: Copilot has a `disableAllHooks` setting (no CLI flag; user settings would
-      also turn off tagteam's own Copilot hooks), Claude `--setting-sources user`, OpenCode already sets
-      OPENCODE_DISABLE_PROJECT_CONFIG; agy and Codex to check. Verify each on a repo with a writing Stop hook.
+- [x] Reviewers don't run the reviewed repo's own hooks. Probed live (2026-11-03): a repo with hooks in
+      .claude/settings{,.local}.json, .github/hooks, .codex/hooks.json, .gemini/, .agents/, run through each
+      reviewer's real argv in a tagteam sandbox. From an untrusted folder only Claude ran them; from under
+      ~/Coding (trusted by Copilot and Codex) Copilot ran both .claude/settings.json and .github/hooks too (trust
+      follows the worktree's main repo). Codex, agy, OpenCode ran none. Fix: Claude `--setting-sources user`;
+      every sandbox gets `.github/copilot/settings.local.json` with disableAllHooks (merged into an existing
+      one, skipped if a symlink would take it outside), and dirty() ignores that file. Re-probe: no hook ran
+      in any of the five, all exited 0. In-place reviews (no sandbox) still can run Copilot's repo hooks; Watch
+      catches what they write.
 - [x] Reviewer order agy, opencode, copilot, codex, claude; opencode pinned to free opencode/big-pickle
 - [x] Reviewer order agy, copilot, opencode, codex, claude: a blocking round waits for its slowest reviewer (agy
       ~128s, opencode ~166s and 2/7 timeouts vs copilot ~30s), so copilot pairs with agy on large changes
