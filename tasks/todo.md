@@ -346,3 +346,45 @@ terminal, and its turn-end notice pointed at a status line Codex doesn't have.
 - [x] Tests: once-only, suggestions carry both fields, blocker gets none, Claude gets none, Codex text. All seven
       mutations caught. 296 OK.
 - [ ] Live check in the Codex TUI: a small change, then the next prompt shows the result.
+
+## Reviewer prompt tuning (2026-11-03)
+Evidence: 125 past verdicts; median finding confidence 0.98, none under 0.6 (`min_confidence` never fires);
+88 major / 21 blocker / 19 minor / 0 nit; 46% of reviews blocked.
+- [x] runner.run_one saves `prompt.txt` per reviewer so future rubric changes can be replayed exactly
+- [x] scripts/rubric_eval.py: recover past Copilot prompts from ~/.copilot/session-state, re-run old vs new
+      rubric on the review-time snapshot (unreachable `tagteam-review` commit) or HEAD, report + labels.md
+- [x] Replayed 10 past blocking cases. User labeled 14/15 recorded findings real. Stricter rubric (calibrated
+      confidence, "minor at most without a named trigger", review-the-change) dropped real findings instead of
+      downgrading them, and confidence stayed ~0.99. Reverted. For Copilot, the problem is recall/consistency (a
+      re-run of the same old prompt re-found 5/13 real findings), not noise; agy and OpenCode were not replayed.
+- [x] Intent: strip IDE context prefixes (ide_opened_file, ide_selection, browser_instruction, system-reminder);
+      task-notification / agent-message turns keep the previous request (44/152 past intents were affected)
+- [x] Read-only check false positives (all 4 reviewers disabled in math-quiz): .git/config compared by entry,
+      branch.* tracking entries (VS Code, push -u) only warn; disable reasons and the log name the changed keys
+      and sandbox files. The user suspected course/project hooks; checked: the only project hook is
+      .claude/settings.json -> .claude/hooks/log_ai.py (prompt: writes a temp file; Stop, async: writes
+      ai_log/*.md, then git add + commit). It never writes .git/config or .git/hooks; replaying its commit during
+      a review on a copy changed neither, and the disabling runs logged no ref/tree change, so its commit had
+      already finished. No installed .git/hooks, no core.hooksPath, no husky/lefthook/pre-commit, no
+      .vscode/tasks.json. Both git-triggered disables logged `.git/config` only, never a hook file, so hook
+      changes stay a hard disable (a hook is code that runs on the user's next git command). Root cause of the
+      config change is still unknown; the next one is named in tagteam.log.
+      Copilot's "wrote in its sandbox" disable (run 20261101T154350-b209) IS the project hook: Copilot runs
+      Claude-format hooks from the sandbox's .claude/settings.json; its session log shows agentStop at 15:44:39,
+      and the orphan commit 4f4c9a1 "ai_log: record session 2026-11-01_15-44-40_de821b24" carries that Copilot
+      session's id. log_ai.py wrote ai_log/*.md in the sandbox and committed it there.
+- [ ] Reviewers must not run the reviewed repo's own hooks: any repo with a Claude-format Stop/prompt hook that
+      writes files gets its reviewers disabled, and a repo hook is code from the reviewed change running outside
+      the read-only flags. Per agent: Copilot has a `disableAllHooks` setting (no CLI flag; user settings would
+      also turn off tagteam's own Copilot hooks), Claude `--setting-sources user`, OpenCode already sets
+      OPENCODE_DISABLE_PROJECT_CONFIG; agy and Codex to check. Verify each on a repo with a writing Stop hook.
+- [x] Reviewer order agy, opencode, copilot, codex, claude; opencode pinned to free opencode/big-pickle
+- [x] Reviewer order agy, copilot, opencode, codex, claude: a blocking round waits for its slowest reviewer (agy
+      ~128s, opencode ~166s and 2/7 timeouts vs copilot ~30s), so copilot pairs with agy on large changes
+- [x] A turn-end confirm round (round max+1) runs in the background, so the author no longer waits ~4 min. It still
+      can't block: decide() never blocks past max rounds, so the worker carries only suggestions and sets no `owed`
+      (test asserts owed None). Falls back to the foreground when the background can't start (no repo or snapshot,
+      lock not held, no reviewers, spawn failed). The plan gate's confirm stays in the foreground: the user is
+      waiting to approve that plan.
+- [ ] Recall: consider 2 reviewers for small changes, or a second pass, now that agy/opencode are free
+- [ ] Later: round-2 header says "Round 2" on round 3; prior findings JSON carries internal fields
