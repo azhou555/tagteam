@@ -26,6 +26,21 @@ def _session_file(ev):
     return state.path("sessions", f"{limits.safe_session_key(ev.agent, ev.session_id)}.json")
 
 
+IDE_CONTEXT = re.compile(r"\s*<(ide_opened_file|ide_selection|browser_instruction|system-reminder)\b[^>]*>.*?</\1>",
+                         re.S)
+NOT_FROM_USER = re.compile(r"\s*<(task-notification|agent-message)\b")
+
+
+def intent(prompt, previous):
+    """What the user asked, for reviewers: the harness's IDE context prefixes stripped, and a turn the harness
+    started (a background task finishing, a subagent reporting back) keeps the previous request."""
+    if NOT_FROM_USER.match(prompt):
+        return previous
+    while m := IDE_CONTEXT.match(prompt):
+        prompt = prompt[m.end():]
+    return prompt.strip()
+
+
 def turn_start(ev, cfg):
     if ev.prompt.lstrip().startswith(MARKER):      # Copilot re-submits our block message as a prompt
         return None
@@ -41,7 +56,7 @@ def turn_start(ev, cfg):
             "turn_id": ev.turn_id or uuid.uuid4().hex[:12], "started": time.time(), "cwd": ev.cwd,
             "repo": repo, "baseline": base, "turn_baseline": base,    # baseline advances each round; turn_baseline never
             "refs": changes.refs(repo) if repo else {},
-            "prompt": ev.prompt, "round": 0, "touched": touched, "reviewed_digests": {}, "prior": prior,
+            "prompt": intent(ev.prompt, prev.get("prompt", "")), "round": 0, "touched": touched, "reviewed_digests": {}, "prior": prior,
             "carried": bool(prior), "owed": prev.get("owed"), "plan_rounds": 0, "plan_prior": [],
             "outside_touched": [p for p in touched if not changes.in_repo(p, repo)], "reverted_prior": [],
         })
