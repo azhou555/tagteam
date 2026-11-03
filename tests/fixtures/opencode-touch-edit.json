@@ -1,0 +1,10 @@
+{
+ "sessionID": "ses_e6b0d6decffekHf2z3qfod1Rg8",
+ "cwd": "/tmp/spike/ws-opencode",
+ "tool": "edit",
+ "args": {
+  "filePath": "/tmp/spike/ws-opencode/m.py",
+  "oldString": "def add(a, b):\n    return a + b",
+  "newString": "def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b"
+ }
+}

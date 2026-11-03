@@ -118,7 +118,8 @@ def _on_review(run):
             return
         kind = outcome(run)[0]
         env = {**os.environ, "TAGTEAM_OUTCOME": kind, "TAGTEAM_SUMMARY": summary(run),
-               "TAGTEAM_MODE": run.get("mode", "block"), "TAGTEAM_DEPTH": "1"}
+               "TAGTEAM_MODE": run.get("mode", "block"), "TAGTEAM_AUTHOR": run.get("author", ""),
+               "TAGTEAM_DEPTH": "1"}
         p = subprocess.Popen(["sh", "-c", cmd], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True, env=env)
         with contextlib.suppress(BrokenPipeError), p.stdin:     # a command may exit without reading it
@@ -182,7 +183,8 @@ BRAND = {"ansi": 108, "hex": "#5E8C61,#A3C9A8", "sf": "person.2.fill"}          
 AGENTS = {"claude": {"ansi": 215, "hex": "#C8692E,#FFB87A"},                         # orange
           "codex": {"ansi": 151, "hex": "#3E9670,#AEE6C4"},                          # mint
           "copilot": {"ansi": 183, "hex": "#8A5CC2,#D9B8FF"},                        # lavender
-          "agy": {"ansi": 111, "hex": "#3F72C4,#8FB8FF"}}                            # blue
+          "agy": {"ansi": 111, "hex": "#3F72C4,#8FB8FF"},                            # blue
+          "opencode": {"ansi": 186, "hex": "#8C8A2E,#E6E39A"}}                       # khaki
 DOT = ":circle.fill:"                                # SwiftBar colors a whole line's text, so an agent gets a dot
 KINDS = {
     "running": {"icon": "⟳", "label": "Reviewing", "ansi": 223, "sf": "arrow.triangle.2.circlepath",

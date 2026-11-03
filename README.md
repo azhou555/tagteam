@@ -3,7 +3,7 @@
 When a coding agent finishes a turn that changed code, a design doc, or a plan, a *different* agent
 reviews the change, read-only. For a large change, a plan or a design, the author waits for the review and
 is told to fix any real problem before the turn ends. A small code change is reviewed in the background
-instead, and its findings come back as suggestions. Works with Claude Code, Codex, Copilot CLI, and Antigravity (`agy`). Hooks fail open: if
+instead, and its findings come back as suggestions. Works with Claude Code, Codex, Copilot CLI, Antigravity (`agy`), and OpenCode. Hooks fail open: if
 tagteam breaks, your agent is never blocked.
 
 Everything stays on your machine. tagteam calls the agent apps you already have installed and logged in;
@@ -44,7 +44,8 @@ you confirm:
    line taken over (your own command still runs), the config keys it will save, and the menu bar item.
    `Apply? [Y/n]`. `--dry-run` prints the same summary plus a diff of each file, and stops.
 3. **Hooks.** It adds tagteam's hooks to each agent's own config (`~/.claude/settings.json`,
-   `~/.codex/hooks.json`, `~/.copilot/hooks/tagteam.json`, `~/.gemini/config/hooks.json`). It only merges:
+   `~/.codex/hooks.json`, `~/.copilot/hooks/tagteam.json`, `~/.gemini/config/hooks.json`, and for OpenCode a
+   plugin, `~/.config/opencode/plugins/tagteam.js`, that leaves your other plugins alone). It only merges:
    every entry it adds is tagged, your own hooks are untouched, and a backup is saved next to each file as
    `*.tagteam-bak-<time>` each time it writes one (the `updated` line names it). Each file is replaced in
    one step, so a failed write leaves it as it was. Re-running replaces only tagteam's own entries, so after
@@ -52,7 +53,8 @@ you confirm:
    `--agents claude,codex` names them explicitly.
 4. **Next steps.** Codex approval if needed, a first change to try, and `tagteam doctor`'s health check.
 
-On a terminal each agent has its own color (claude orange, codex mint, copilot lavender, agy blue), what
+On a terminal each agent has its own color (claude orange, codex mint, copilot lavender, agy blue,
+opencode khaki), what
 will change is highlighted, and what stays as it is is dimmed. Set `NO_COLOR=1` for plain text; piped
 output is always plain.
 
@@ -101,12 +103,21 @@ blocking = { small = false, large = true, high_risk = true, docs = true }   # th
 - **Non-blocking review.** The turn ends at once with `⟳ Reviewing in the background; results appear in
   the status line`. The review runs on its own, against the tree the turn ended with, and spends none of the
   turn's rounds. Its issues become suggestions (`● Suggestions: N issues, not blocking`). At the start of the
-  next prompt, Claude Code and Codex get the open suggestions as context labelled "not blocking; fix when
+  next prompt, Claude Code, Codex and OpenCode get the open suggestions as context labelled "not blocking; fix when
   convenient". Copilot and agy can't take added context at that point, so there the suggestions show only
   in the status line and the menu bar.
   Codex has no status line tagteam can use, so there the turn ends with `the result shows at your next
   prompt (live: tagteam watch)`, and your next prompt shows the result once as `↳ Hook · [tagteam] …`
   (a blocker instead stops the next turn, as above).
+
+**OpenCode.** OpenCode has no hook that holds a turn open, so its plugin reviews when the session goes idle.
+On a block it sends the findings back as your next prompt (`[tagteam] Cross-review by …`), and OpenCode starts
+a new turn to fix them; the rounds and the confirm review work as above. If you send a prompt of your own
+before the review finishes, the findings aren't sent and stay open for the next turn instead. Notices, such as
+the background-review line, appear as a toast in the TUI. A subagent's edits count toward the turn of the
+session that started it. Headless `opencode run` exits as soon as the session is idle, so the plugin does
+nothing there; `opencode run --attach` to a running `opencode serve` is reviewed like the TUI. As a reviewer,
+OpenCode runs with the repo's own `opencode.json` ignored and edit, shell, subagent and web tools denied.
 
 Three rules decide each issue's kind, in this order: a `blocker` always blocks, in any tier (a background
 review's blocker blocks the next Stop as round 1, even if that turn changed nothing); an issue that was
@@ -170,8 +181,9 @@ line under it: `tagteam` in sage green, then the latest result. It updates every
 restores your original.
 
 **Menu bar (macOS).** With [SwiftBar](https://github.com/swiftbar/SwiftBar) installed
-(`brew install --cask swiftbar`), `install` adds a menu bar item covering all four agents: a sage
-two-person icon, a status icon, and today's review count (or the elapsed time while a review runs). The
+(`brew install --cask swiftbar`), `install` adds a menu bar item covering every agent: a sage
+two-person icon, a status icon, and today's review count (or the elapsed time while a review runs), updated
+every second. The
 dropdown lists running reviews, open issues grouped as Blocking and Not blocking, counts, and recent
 reviews with each one's kind; click one to open its run folder. If SwiftBar
 has no plugin folder yet, `install` uses `~/SwiftBar`. `install` also adds `~/Applications/tagteam.app`, so
@@ -189,7 +201,7 @@ Defaults work with no config beyond the reviewer list. Put your changes in `~/.t
 | Key | Default | Meaning |
 |---|---|---|
 | `reviewers.use` | none | Agents that may review your code, in preference order. Set by `tagteam install` |
-| `authors.review` | all four | Whose turns get reviewed |
+| `authors.review` | every agent | Whose turns get reviewed |
 | `triggers.kinds` | `["code", "plan", "design"]` | Which kinds of change start a review |
 | `triggers.min_changed_lines` | `5` | Smaller code changes are skipped in round 1 |
 | `review.per_change` | `small=1, large=2, high_risk=2, docs=2` | Reviewers per change |
@@ -202,6 +214,7 @@ Defaults work with no config beyond the reviewer list. Put your changes in `~/.t
 | `review.ignore` | lockfiles, build output, minified files | Paths never sent for review |
 | `reviewers.<agent>.model` | claude `sonnet`; others the CLI default | Model each reviewer runs |
 | `reviewers.agy.effort` | `medium` | Thinking effort for `agy` |
+| `reviewers.opencode.model`, `.effort` | OpenCode's default | `provider/model`, and the model's variant (e.g. `high`; needs a model) |
 | `limits.*` | see [Limits](#limits) | Loop stops |
 | `routing.mode` | `ordered` | `ordered` takes the first available agents from `reviewers.use`; `quota` is for personal plans (below) |
 | `classify.plan`, `.design`, `.risk` | glob lists | Which paths count as plans, design docs, or high-risk code |
@@ -211,14 +224,15 @@ Defaults work with no config beyond the reviewer list. Put your changes in `~/.t
 time a review is recorded, including skipped and interrupted ones. The command gets the run as JSON on
 stdin, with two extra fields: `outcome` (`passed`, `blocked`, `resolved`, `unresolved`, `unreviewed`,
 `failed`, `interrupted`, `suggestions`) and `summary` (the status-line text). The same two values are in the
-environment as `TAGTEAM_OUTCOME` and `TAGTEAM_SUMMARY`, `TAGTEAM_MODE` is `block` or `advise` (the run's
-kind), and `TAGTEAM_DEPTH` is set, so an agent the command starts is not
-reviewed. tagteam never waits for the command, and a failure is only logged. Only `~/.tagteam/config.toml`
-can set it. For example, a macOS notification:
+environment as `TAGTEAM_OUTCOME` and `TAGTEAM_SUMMARY`, `TAGTEAM_MODE` is `block` or `advise` (`advise`:
+a background review), `TAGTEAM_AUTHOR` is the agent whose turn was reviewed, and `TAGTEAM_DEPTH` is set, so an
+agent the command starts is not reviewed. tagteam never waits for the command, and a failure is only logged.
+Only `~/.tagteam/config.toml` can set it. For example, a macOS notification when a background review finishes
+for an agent that can't show it until your next prompt (every agent but Claude, whose status line shows it):
 
 ```toml
 [hooks]
-on_review = 'osascript -e "display notification \"$TAGTEAM_SUMMARY\" with title \"tagteam\""'
+on_review = '[ "$TAGTEAM_MODE" = advise ] && [ "$TAGTEAM_AUTHOR" != claude ] && osascript -e "display notification \"$TAGTEAM_SUMMARY\" with title \"tagteam · $TAGTEAM_AUTHOR\""'
 ```
 
 **Quota mode.** If you are on personal plans and want to stretch their usage limits, set

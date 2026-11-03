@@ -3,7 +3,7 @@ import dataclasses
 import shutil
 from typing import Callable
 
-from . import agy, claude, codex, copilot
+from . import agy, claude, codex, copilot, opencode
 from .base import Author, Reviewer
 
 
@@ -24,7 +24,8 @@ def _on_path(cli):
 
 ALL = {name: Harness(name, _on_path(name), mod.AUTHOR, mod.REVIEWER, lambda m=mod: m.PATH, mod.logged_in,
                      getattr(mod, "hook_trust", None))
-       for name, mod in (("claude", claude), ("codex", codex), ("copilot", copilot), ("agy", agy))}
+       for name, mod in (("claude", claude), ("codex", codex), ("copilot", copilot), ("agy", agy),
+                         ("opencode", opencode))}
 
 
 def get(name):

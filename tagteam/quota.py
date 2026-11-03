@@ -4,7 +4,7 @@ Sources verified 2026-10-25:
   claude  - status line stdin `rate_limits.{five_hour,seven_day}.used_percentage`, cached by `tagteam statusline`
   codex   - `rate_limits.primary/secondary.used_percent` lines in ~/.codex/sessions rollout JSONL
   copilot - `gh api /copilot_internal/user` premium_interactions.percent_remaining (undocumented; self-meter fallback)
-  agy     - nothing exposed; self-metered runs per day
+  agy, opencode - nothing exposed; self-metered runs per day
 """
 import glob
 import json

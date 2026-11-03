@@ -17,6 +17,7 @@ from unittest import mock
 from tests.helpers import FIX, ROOT, USER_CONFIG, clear_user_config, state, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
 from tagteam import cli, config, doctor, harnesses, install  # noqa: E402
 from tagteam.harnesses import agy as agy_h, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
+from tagteam.harnesses import opencode as opencode_h  # noqa: E402
 
 
 
@@ -26,6 +27,7 @@ class Install(unittest.TestCase):
         self.settings = d / "settings.json"
         patches = [(claude_h, "PATH", self.settings), (codex_h, "PATH", d / "codex.json"),
                    (copilot_h, "PATH", d / "copilot.json"), (agy_h, "PATH", d / "agy.json"),
+                   (opencode_h, "PATH", d / "plugins" / "tagteam.js"),
                    (claude_h, "STATUSLINE_ORIG", d / "sl.orig"), (claude_h, "STATUSLINE_ORIG_REFRESH", d / "sl.refresh"),
                    (install, "SWIFTBAR_APP", d / "NoSwiftBar.app"), (install, "LAUNCHER", d / "tagteam.app"),
                    (install, "SWIFTBAR_DOMAIN", "invalid.tagteam-tests"), (install, "SWIFTBAR_DIR", d / "SwiftBar")]  # never the real plugin
@@ -88,6 +90,41 @@ class Install(unittest.TestCase):
         self.assertFalse(install._ours_plugin(plugin))
         with mock.patch.object(install.shutil, "which", return_value=None):
             self.assertIsNone(install._swiftbar_dir())                   # no `defaults`: SwiftBar is a no-op
+
+    def test_install_replaces_its_plugin_from_an_earlier_interval(self):
+        plugins = pathlib.Path(tempfile.mkdtemp())
+        old, users = plugins / install.OLD_PLUGINS[0], plugins / "tagteam.5s.sh"
+        old.write_text(install.swiftbar_plugin())
+        users.write_text("#!/bin/sh\necho mine\n")
+        with mock.patch.object(install, "SWIFTBAR_APP", pathlib.Path(tempfile.mkdtemp())), \
+                mock.patch.object(install, "_swiftbar_dir", return_value=plugins), mock.patch("builtins.print"), \
+                mock.patch.object(install, "install_launcher"), mock.patch.object(install.subprocess, "run"):
+            install.install_swiftbar()
+            self.assertEqual(sorted(p.name for p in plugins.iterdir()), [install.SWIFTBAR_PLUGIN, "tagteam.5s.sh"])
+            old.write_text(install.swiftbar_plugin())                 # an older install left both: uninstall takes both
+            install.uninstall()
+        self.assertEqual([p.name for p in plugins.iterdir()], ["tagteam.5s.sh"])
+
+    def test_opencode_plugin_round_trip_leaves_the_users_plugins_alone(self):
+        plugins = opencode_h.PATH.parent
+        plugins.mkdir()
+        (plugins / "theirs.js").write_text("export const Theirs = async () => ({})\n")
+        with mock.patch("builtins.print"):
+            install.install(["opencode"])
+            p = install.plan(["opencode"], menubar=False)
+            self.assertEqual(install.describe(*p["files"]["opencode"][1:]), "already up to date")
+            self.assertEqual(doctor.hook_entries(opencode_h.PATH), [["/opt/bin/tagteam"]] * 3)
+            install.uninstall()
+        self.assertEqual(sorted(f.name for f in plugins.iterdir()), ["theirs.js"])
+        opencode_h.PATH.write_text("export const Mine = async () => ({})\n")    # same name, not tagteam's
+        with mock.patch("builtins.print"):
+            install.uninstall()
+        self.assertEqual(sorted(f.name for f in plugins.iterdir()), ["tagteam.js", "theirs.js"])
+
+    def test_opencode_install_describes_its_plugin(self):
+        p = install.plan(["opencode"], menubar=False)
+        self.assertEqual(install.describe(*p["files"]["opencode"][1:]), "create it with tagteam's hooks")
+        self.assertFalse(opencode_h.PATH.exists())                       # plan writes nothing
 
     def test_no_macos_extras_leaves_menu_bar_launcher_and_status_line_alone(self):
         self.settings.write_text(json.dumps({"statusLine": {"type": "command", "command": "ponytail"}}))
@@ -402,8 +439,8 @@ class Guided(unittest.TestCase):
 
     def test_summary_says_whose_turns_are_reviewed(self):
         shown = self.run_install(dry_run=True)[1]
-        self.assertIn("authors.review stays claude, codex, copilot, agy", shown)
-        same = install.summary({"files": {}, "routing": False, "menubar": "x"}, None, ["claude", "codex", "copilot", "agy"])
+        self.assertIn("authors.review stays claude, codex, copilot, agy, opencode", shown)
+        same = install.summary({"files": {}, "routing": False, "menubar": "x"}, None, ["claude", "codex", "copilot", "agy", "opencode"])
         self.assertIn("authors.review stays", same)                  # --authors with the saved list changes nothing
 
     def pick_authors(self, picked, current=None, agents=("claude", "codex")):
@@ -419,7 +456,7 @@ class Guided(unittest.TestCase):
         self.assertIsNone(got)                                       # unchanged: nothing to save
         self.assertEqual(shown, (["claude", "codex"], ["claude", "codex"], {}))
         got, _ = self.pick_authors(["claude"])
-        self.assertEqual(got, ["claude", "copilot", "agy"])          # agents not wired now keep their setting
+        self.assertEqual(got, ["claude", "copilot", "agy", "opencode"])   # agents not wired now keep their setting
         got, shown = self.pick_authors(["codex"], current=["claude", "agy"])
         self.assertEqual(shown[1], ["claude"])                       # preselects the saved list
         self.assertEqual(got, ["codex", "agy"])
@@ -430,8 +467,8 @@ class Guided(unittest.TestCase):
         with mock.patch.object(install, "_pick", return_value=[]), mock.patch.object(install, "install_swiftbar"):
             rc, shown = self.run_install("y\n", tty=True)
         self.assertEqual(rc, 0)
-        self.assertEqual(config.load()["authors"]["review"], ["codex", "copilot", "agy"])   # claude unpicked
-        self.assertIn("authors.review = codex, copilot, agy", re.sub(r"\x1b\[[0-9;]*m", "", shown))
+        self.assertEqual(config.load()["authors"]["review"], ["codex", "copilot", "agy", "opencode"])   # claude unpicked
+        self.assertIn("authors.review = codex, copilot, agy, opencode", re.sub(r"\x1b\[[0-9;]*m", "", shown))
 
     def test_authors_picker_only_on_a_terminal_and_without_flags(self):
         with mock.patch.object(install, "_pick", side_effect=AssertionError("prompted")):

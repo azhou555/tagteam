@@ -20,7 +20,8 @@ SWIFTBAR_APP = pathlib.Path("/Applications/SwiftBar.app")
 SWIFTBAR_DOMAIN = "com.ameba.SwiftBar"
 SWIFTBAR_DIR = H / "SwiftBar"                                       # used only if SwiftBar has no folder yet
 SWIFTBAR_OLD_DIR = state.HOME / "swiftbar"                          # earlier default; SwiftBar skips hidden dirs
-SWIFTBAR_PLUGIN = "tagteam.2s.sh"                                   # SwiftBar reads the refresh interval from the name
+SWIFTBAR_PLUGIN = "tagteam.1s.sh"                                   # SwiftBar reads the refresh interval from the name
+OLD_PLUGINS = ("tagteam.2s.sh",)                                    # earlier intervals; install replaces them
 SWIFTBAR_ENABLE = "swiftbar://enableplugin?name=tagteam"           # undoes a "Disable Plugin" SwiftBar remembers
 LAUNCHER = H / "Applications" / "tagteam.app"                       # Spotlight: type "tagteam" to open the menu bar item
 LAUNCHER_MARK = "Contents/Resources/tagteam-launcher"               # ownership marker inside the bundle
@@ -281,7 +282,7 @@ def _same(old, new):
     try:
         return json.loads(old) == json.loads(new)
     except ValueError:
-        return False
+        return old == new                                 # a plugin file, not JSON
 
 
 def describe(old, new):
@@ -290,7 +291,10 @@ def describe(old, new):
         o = json.loads(old) if old.strip() else {}
     except ValueError:
         o = None
-    n = json.loads(new)
+    try:
+        n = json.loads(new)
+    except ValueError:
+        n = new
 
     def rest(d):
         return {k: v for k, v in d.items() if k != "statusLine"} if isinstance(d, dict) else d
@@ -300,7 +304,7 @@ def describe(old, new):
     if rest(o) != rest(n):
         what.append("create it with tagteam's hooks" if not old else
                     "update tagteam's hooks" if base.TAG in old else "add tagteam's hooks")
-    if isinstance(o, dict) and o.get("statusLine") != n.get("statusLine"):
+    if isinstance(o, dict) and isinstance(n, dict) and o.get("statusLine") != n.get("statusLine"):
         what.append("show tagteam in your status line (your own command still runs)")
     return "; ".join(what) or "already up to date"
 
@@ -457,6 +461,14 @@ def _ours_plugin(p):
         return False
 
 
+def _remove_plugins(d, names=(SWIFTBAR_PLUGIN, *OLD_PLUGINS)):
+    """Delete tagteam's plugins in `d`, never a user's file of the same name. Returns the paths removed."""
+    gone = [d / n for n in names if _ours_plugin(d / n)]
+    for p in gone:
+        p.unlink()
+    return gone
+
+
 def _menubar():
     """Where the plugin goes, as (folder, SwiftBar's current folder or None), or why the menu bar is skipped."""
     if state.extras_off():
@@ -501,10 +513,11 @@ def install_swiftbar():
     target.mkdir(parents=True, exist_ok=True)
     plugin.write_text(swiftbar_plugin())
     plugin.chmod(0o755)
+    _remove_plugins(target, OLD_PLUGINS)             # two intervals would show two icons
     if target != current:
         subprocess.run(["defaults", "write", SWIFTBAR_DOMAIN, "PluginDirectory", str(target)], check=True)
-        if legacy and _ours_plugin(current / SWIFTBAR_PLUGIN):
-            (current / SWIFTBAR_PLUGIN).unlink()
+        if legacy:
+            _remove_plugins(current)
         subprocess.run(["pkill", "-x", "SwiftBar"], check=False)    # SwiftBar reads its folder only at launch
         for _ in range(25):
             if not _swiftbar_running():
@@ -551,9 +564,8 @@ def uninstall():
         if h.author:
             h.author.uninstall()
     d = _swiftbar_dir()
-    if d and _ours_plugin(d / SWIFTBAR_PLUGIN):
-        (d / SWIFTBAR_PLUGIN).unlink()
-        print(f"removed {d / SWIFTBAR_PLUGIN}")
+    for p in _remove_plugins(d) if d else []:
+        print(f"removed {p}")
     if not state.extras_off() and (LAUNCHER / LAUNCHER_MARK).exists():
         shutil.rmtree(LAUNCHER)
         print(f"removed {LAUNCHER}")

@@ -99,9 +99,13 @@ def load(p):
 
 
 def save(p, data, dry_run):
-    """Write `data` as JSON, backing up the old file first. Returns (path, old text or "", new text); a dry run
-    only returns it."""
-    text = json.dumps(data, indent=2) + "\n"
+    """Write `data` as JSON (see `write`)."""
+    return write(p, json.dumps(data, indent=2) + "\n", dry_run, json.loads)
+
+
+def write(p, text, dry_run, check=None):
+    """Write `text`, backing up the old file first; `check` re-validates the written copy before it replaces the
+    file. Returns (path, old text or "", new text); a dry run only returns it."""
     old = p.read_text() if p.exists() else ""
     if dry_run:
         return p, old, text
@@ -112,7 +116,8 @@ def save(p, data, dry_run):
         shutil.copyfile(p, bak)
     tmp = p.with_name(p.name + ".tagteam-tmp")
     tmp.write_text(text)
-    json.loads(tmp.read_text())                     # re-validate before replacing
+    if check:
+        check(tmp.read_text())
     tmp.replace(p)
     print(f"updated {p}" + (f" (backup: {bak.name})" if bak else ""))
     return p, old, text

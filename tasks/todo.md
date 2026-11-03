@@ -345,7 +345,166 @@ terminal, and its turn-end notice pointed at a status line Codex doesn't have.
       model context and the notice. Blockers get no notice: they block the next Stop. Claude is unchanged.
 - [x] Tests: once-only, suggestions carry both fields, blocker gets none, Claude gets none, Codex text. All seven
       mutations caught. 296 OK.
-- [ ] Live check in the Codex TUI: a small change, then the next prompt shows the result.
+- [x] Live check in the Codex TUI: a small change, then the next prompt shows the result (confirmed 2026-10-28, dj-rara run 20261028T165517-6818).
+
+## Phase 15: see background results sooner (2026-10-28)
+- [x] Menu bar refreshes every second: plugin renamed `tagteam.1s.sh` (a refresh costs ~40 ms); install
+      removes tagteam's own `tagteam.2s.sh` (two intervals would show two icons), uninstall removes either.
+- [x] `hooks.on_review` gets `TAGTEAM_AUTHOR`; README example notifies only for background reviews of
+      agents without a status line. Enabled in the user's config; test notification fired for codex, skipped for claude.
+- [ ] Live: next Codex background review pops a macOS notification.
+
+## Phase 16: New agents, review-style presets, reviewer model prompt (plan, 2026-10-28)
+
+**Paused 2026-10-28 at the user's request.** Resume only when the user says so; the Cursor, Kiro and Pi spikes also wait on their sign-ins. Nothing is running.
+Order: Cursor, OpenCode, Kiro, Pi, then install work. Presets as written (decided 2026-10-28).
+Every spike captures real payloads into `tests/fixtures/`; those fixtures are the research data.
+
+### 16a: Cursor (`cursor-agent` 2026.10.22 installed)
+- [ ] Spike: event names and hook file location from current docs, then a logging hook in `~/.cursor/hooks.json`.
+      Record which events map to turn-start / touch / turn-end, the payload fields (session id, cwd, prompt,
+      tool-arg paths), whether turn-end can block and through which field, the timeout ceiling (need ~280s),
+      whether `TAGTEAM_DEPTH` reaches the hook, and where credentials live (`logged_in`).
+- [ ] Reviewer spike: find a truly read-only headless mode (`-p` alone allows write and shell; try `--mode ask`
+      or `--mode plan`, plus `--sandbox enabled`). Prove read-only live, as was needed for Codex. Check `--trust`
+      in a fresh worktree sandbox so runs don't hang on a prompt. Structured output via `--output-format json`; usage.
+- [ ] Adapter `harnesses/cursor.py` tested against the captured fixtures; registry detects the `cursor-agent`
+      binary (the CLI name differs from the agent name).
+- [ ] Wire the name everywhere it is hard-coded: `cli.py` hook choices, `live.AGENTS` palette,
+      `config.default.toml` (reviewer table, routing agent with a quota source, `authors.review`), doctor/install lines.
+- [ ] Live end-to-end: Cursor author → reviewer blocks a planted bug; Cursor as reviewer finds an off-by-one.
+
+### 16b: OpenCode (1.17.11 installed)
+- [ ] Spike: hooks are JS plugins, not a JSON file. Get the plugin event API from current docs; a logging plugin
+      that shells out to `tagteam hook opencode <phase>`. Same facts as Cursor, plus whether turn-end can block
+      at all (if not: a non-blocking author with background results, like Codex).
+  Spike notes (1.17.11, project plugin in a scratch repo): `chat.message` gives `sessionID` and the prompt in
+  `parts[].text` (`opencode run` wraps it in literal quotes); plugin gets `directory`/`worktree`; `TAGTEAM_DEPTH`
+  reaches the plugin and its children. Upgraded to 1.19.5. Blocking: on a long-lived server (`opencode serve` +
+  `run --attach`, as in the TUI) a `client.session.prompt` follow-up from `session.idle` runs as a new user turn
+  (it also fires `chat.message`, so turn-start must not reset the round count); headless `opencode run` exits at
+  idle, so there it can only be background. Context: pushing a text part in `chat.message` reaches the model.
+  Reviewer: `--pure` loads no plugins; `OPENCODE_CONFIG_CONTENT` permission deny for edit/bash removes those
+  tools (proven: build agent could not write); also deny task/websearch. `--format json`: text parts + step_finish
+  tokens/cost. Fixtures: tests/fixtures/opencode-*.json. Spike files only in the scratchpad.
+- [x] Install shape: one tagged plugin file, `~/.config/opencode/plugins/tagteam.js`, rendered from
+      `tagteam/data/opencode-plugin.js` (backup, dry-run diff, uninstall removes only a file carrying the tag).
+      `base.write` saves any text; install's summary and doctor's hook check read a non-JSON hook file.
+- [x] Reviewer: `env OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=… opencode run --pure --agent
+      tagteam-review --format json`. Live: `OPENCODE_CONFIG_CONTENT` alone lost to a repo `opencode.json` that
+      allowed edits (the reviewer wrote a file), and so did `OPENCODE_PERMISSION`; with project config off the
+      write tools are gone, and the agent only our config defines kept them denied under a hostile
+      `OPENCODE_CONFIG` file. Found a planted off-by-one in 4.2s; output and usage parse
+      (`tests/fixtures/opencode-review.jsonl`).
+- [x] Adapter, registry, wiring (cli choices now come from the registry, palette khaki, config tables).
+- [x] Plugin, live on 1.19.5 (`opencode serve` + `run --attach`): a pushed context part needs `id`, `sessionID`
+      and `messageID`, or OpenCode fails the user's whole turn; with them it reaches the model. Subagent sessions
+      report as their root (touches attributed, no turn-start or turn-end of their own). Headless `run` calls no
+      hook. A toast posted to `/tui/show-toast` shows in an attached TUI.
+- [x] Live end-to-end with the real plugin and `tagteam` (project-level plugin in a scratch repo; the classifier
+      refused writing the global plugin, so `~/.config/opencode/plugins` was never touched): high-risk `auth.py`
+      with a planted bug, agy + copilot blocked round 1, OpenCode fixed it, round 2 copilot objected that the fix
+      broke "exactly this content", OpenCode reverted with a rebuttal, round 3 confirm allowed (runs
+      20261031T224148-10a7, -8859, -c4cf). Round count held across the follow-up prompts. Background: a 5-line
+      `util.py` got agy's suggestion, and the next prompt carried it as a synthetic part.
+- [x] Second pass, live with a fake tagteam:
+      - A fix round now carries the user's agent and model (tested with `--agent plan -m …glm…`).
+      - An aborted turn (`POST /session/:id/abort`) used to be restarted by the block prompt. OpenCode sends
+        `session.error` MessageAbortedError and then *two* idles, so the plugin skips turn-end until the next
+        prompt, as with Claude's Esc. The next turn is reviewed again.
+      - A user prompt during a running review drops the block prompt.
+- [x] Reviewer `$PWD` bug: OpenCode takes its directory from `$PWD`, which `runner._spawn` inherits from the
+      hook, so 3/4 reviews ran in the wrong folder and every read of the review checkout was auto-rejected as
+      external. `env -u PWD` fixed it (4/4 found the bug, reading files). This invalidated the first
+      Python-driven hostile-repo test. Redone: a repo `.opencode/opencode.json` plus `.opencode/agent(s)/
+      tagteam-review.md` allowing bash ran `touch` without isolation (control) and had no bash or write tool
+      under tagteam's argv. `snapshot: false` stops ~22 snapshot files per review; runs are titled
+      "tagteam review".
+- [ ] Install for real (`tagteam install --agents opencode`) and try it in the plain TUI: the classifier refused
+      the write to `~/.config/opencode/plugins`, so the user runs it.
+- [ ] OpenCode 2 port (mostly done, see below). 2.2.0 is installed now and both halves fail (verified 2026-11-01):
+      - Plugin: the log says `failed to load plugin … tagteam.js … Plugin must export a default definition with
+        an id and an effect or setup function`, so no hook has ever run in the TUI.
+      - Reviewer: `Unrecognized flag: --pure`. `--variant` is gone too (now `-m provider/model#variant`), and
+        `run` now talks to a shared background service unless you pass `--standalone`.
+      Done 2026-11-01. Every free OpenCode model was out of quota (~9.5 h), so the live checks drove OpenCode
+      2.2.0 with a scripted local OpenAI-compatible model (scratchpad `mock.py`) through `opencode serve` and
+      `run --server`.
+      - [x] Plugin: `export default { id: "tagteam", setup, server }`; v2 loads it (log shows no load error).
+            `server()` is the 1.x code, unchanged except that it's no longer a named export.
+      - [x] v2 `setup(ctx)`, live: the prompt hook → turn-start (intent recorded without run's quotes);
+            `tool.hook("execute.after")` → touch (it carries `sessionID`; v2 tools take `path`, which
+            `PATH_KEYS` already has); `session.execution.succeeded|failed` → turn-end;
+            a block → `ctx.session.prompt`, which starts a new turn that the prompt hook sees with the
+            `[tagteam]` marker (agent and model are per session in v2, so the 1.x `picks` map is not needed);
+            context → `session.synthetic({resume: false})` from inside the prompt hook, which lands just before
+            the user's message. Interrupted turns aren't subscribed, so they end unreviewed. Round trip: high-risk
+            `auth.py` with a planted bug, agy + copilot blocked round 1, the fix prompt reached the model, the
+            mock changed nothing, round 2 blocked, round 3 allowed at the cap (run 20261101T094236-8216).
+            Background: an 11-line `stats.py` got agy's suggestion (run 20261101T094452-f96a), and the next prompt
+            carried it as a synthetic message. One server, two folders: a session in another folder got no tagteam
+            activity.
+            Not available in v2: a server plugin has no toast API, so `systemMessage` notices are dropped.
+      - [x] Reviewer: `run --standalone`, no `--pure`, effort as `-m model#effort` (dropped without a model).
+            The config is now v2-shaped (`permissions` rules, `agents`) and an allowlist: deny `*`, then allow
+            read/glob/grep. Control: a hostile repo (`opencode.json` + `.opencode/opencode.json` + agent file all
+            allowing `*`) plus a hostile `OPENCODE_CONFIG` let a `tagteam-review` agent write `pwned.txt`. Under
+            tagteam's argv the model is offered only read/glob/grep/skill and nothing is written. Both
+            `OPENCODE_DISABLE_PROJECT_CONFIG` and `OPENCODE_CONFIG_PROJECT_DISABLE` drop project config in v2.
+            `snapshot: false` is still accepted. The `--format json` events (`text`, `step_finish` with tokens
+            and cost) are unchanged, so the parsers and fixture stand; the fixture is not re-recorded because
+            no real model had quota.
+      - [ ] Planted-bug review with a real OpenCode model as reviewer (needs quota back).
+      - [ ] The user's real TUI after `tagteam install --agents opencode` rewrites the global plugin.
+      - Open: `opencode run` without `--standalone` now uses the shared service, where the plugin runs as in
+        the TUI, so a headless run's turn is reviewed and a block continues the session after `run` exits. The
+        1.x `headless()` check can't tell from inside a v2 server.
+
+### 16c: Kiro and Pi (decided: install both and spike live; the user signs in)
+- [ ] Install `kiro-cli` and `pi`; same spike, adapter, wiring and live end-to-end as Cursor.
+
+### 16d: Review-style presets in `tagteam install`
+- [ ] `config.save_user` writes scalars and inline tables, not only lists (today it can't express "nothing blocks").
+- [ ] Presets write exactly two keys in the user's `[review]` table; `block_at`, `large_lines` and the rest stay as they are:
+
+      | preset   | `review.per_change`                                  | `review.blocking`                                          |
+      |----------|------------------------------------------------------|------------------------------------------------------------|
+      | Light    | `{ small = 1, large = 1, high_risk = 1, docs = 1 }`  | `{ small = false, large = false, high_risk = false, docs = false }` |
+      | Standard | key removed (follows the packaged default)           | key removed (follows the packaged default)                 |
+      | Strict   | `{ small = 2, large = 2, high_risk = 2, docs = 2 }`  | `{ small = true, large = true, high_risk = true, docs = true }`     |
+
+      Standard writes nothing and removes these two keys, so it follows future default changes (today:
+      per_change 1/2/2/2, blocking false/true/true/true). No preset name is stored: the picker reads the two keys
+      from the user file only (not merged defaults). Both absent = Standard; both equal to a row = that preset;
+      anything else = "custom", which is preselected and kept unless the user picks a preset.
+      `--preset light|standard|strict`; `--yes` without it keeps the current style. A repo file can still only
+      tighten (existing `_conservative` rules), so a repo can make Light block.
+- [ ] Background delivery under Light reuses the paths that already exist for non-blocking reviews (Phases 10, 14,
+      15); a preset adds no new delivery. Per author: status line (claude); next-prompt context (`can_add_context`:
+      claude, codex, and each new agent that the spike shows can add context); everyone: `watch`, the menu bar,
+      `hooks.on_review`. Each new adapter declares these flags from its spike. An agent with none of the
+      per-agent paths gets only the shared ones, and the summary says so for that agent.
+- [ ] Tests: each preset writes exactly its table row (Standard removes the keys); detection on each row,
+      absent and custom; custom is kept; `--yes` keeps the style; for each author, with no repo file, a Light run
+      gives a background verdict, never a block. Separately: a repo `.tagteam.toml` setting `blocking.small = true`
+      over a Light user config makes a small change block (the tighten-only rule still wins).
+
+### 16e: Per-reviewer model prompt
+- [ ] After the reviewer picker: one line per chosen reviewer with its current model/effort; Enter keeps it.
+      List real choices where the CLI offers them (`cursor-agent --list-models`, `opencode models`).
+      `--yes` and scripts skip it.
+
+### Every unit
+- [ ] Install and uninstall for each new agent use the existing contract: `base.save` (backup, temp file,
+      re-parse, atomic replace), only tagteam-tagged entries changed, a re-run converges. No multi-file rollback
+      (decided in Phase 11; a re-run fixes a partial install). New: a round-trip test per agent: install over a
+      file that already has the user's own hooks, then uninstall, and the file is byte-identical (or absent if it
+      was absent). For OpenCode, the user's other plugin files are untouched.
+- [ ] Spike cleanup: logging hooks and plugins live in scratch repos (project-level files), never the user's
+      global config. Each spike ends by checking that `~/.cursor/hooks.json`, `~/.config/opencode/plugins/`,
+      `~/.kiro` and `~/.pi` hold nothing from the spike.
+- [ ] Tests patch every new real path (`~/.cursor`, `~/.config/opencode/plugins`) per lessons.md; suite only via
+      `python3 -m unittest discover -s tests -t .`; mutation checks in a scratch copy.
 
 ## Reviewer prompt tuning (2026-11-03)
 Evidence: 125 past verdicts; median finding confidence 0.98, none under 0.6 (`min_confidence` never fires);
