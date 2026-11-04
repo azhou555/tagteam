@@ -2,6 +2,7 @@
 import concurrent.futures as cf
 import contextlib
 import json
+import hashlib
 import os
 import shutil
 import tempfile
@@ -47,19 +48,19 @@ def _clear_stale(repo, stale_s):
 
 
 def _worktree(repo, commit):
+    """Register an empty worktree. Run these one at a time: `worktree add` reads every sibling's admin files,
+    and a concurrent add can catch one half-written ("failed to read .git/worktrees/<name>/commondir")."""
     path = os.path.realpath(tempfile.mkdtemp(prefix=PREFIX))
     if changes.in_repo(path, repo):
         shutil.rmtree(path, ignore_errors=True)
         raise OSError(f"temp dir {path} is inside the repo")
     try:
-        changes.git(repo, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", path, commit,
-                    env={"GIT_LFS_SKIP_SMUDGE": "1"})
+        changes.git(repo, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--no-checkout", "--detach", path, commit)
     except (RuntimeError, OSError):
         shutil.rmtree(path, ignore_errors=True)
         raise
     _no_hooks(path)
     return path
-
 
 def _no_hooks(path):
     """Turn off Copilot's hooks in this sandbox, the reviewed repo's included (its own settings.json can't undo it)."""
@@ -77,38 +78,60 @@ def _no_hooks(path):
         json.dump({**(cur if isinstance(cur, dict) else {}), "disableAllHooks": True}, f)
 
 
+def _populate(path):
+    """Check out the files; touches only this worktree's index and tree, so these run in parallel."""
+    changes.git(path, "-c", "core.hooksPath=/dev/null", "reset", "-q", "--hard", env={"GIT_LFS_SKIP_SMUDGE": "1"})
+    _no_hooks(path)
+
+
 @contextlib.contextmanager
 def checkouts(repo, tree, names, cwd=None, stale_s=7200):
     """Yield {name: path}: one throwaway worktree of `tree` per name, all removed on exit whatever happens.
     Without a repo, or if worktrees can't be made, every name gets `cwd` (flags plus `Watch` only)."""
     cwd = cwd or os.getcwd()
-    made = []
+    made, lock = [], None
     try:
         if repo and tree:
             try:
-                _clear_stale(repo, stale_s)
-                commit = changes.git(repo, "commit-tree", tree, "-m", "tagteam-review", env=_GIT_ENV).strip()
+                lock = _registry_lock(repo)
+                with state.locked(lock):
+                    _clear_stale(repo, stale_s)
+                    commit = changes.git(repo, "commit-tree", tree, "-m", "tagteam-review", env=_GIT_ENV).strip()
+                    for _ in names:
+                        made.append(_worktree(repo, commit))
                 with cf.ThreadPoolExecutor(max_workers=max(1, len(names))) as ex:
-                    futs = [ex.submit(_worktree, repo, commit) for _ in names]
-                made = [f.result() for f in futs if not f.exception()]
-                err = next((f.exception() for f in futs if f.exception()), None)
-                if err:
-                    raise err
+                    list(ex.map(_populate, made))
             except (RuntimeError, OSError) as e:
                 state.log("sandbox unavailable, reviewing in place", repo=repo, error=repr(e))
-                for p in made:
-                    _remove(repo, p)
+                _remove_all(repo, lock, made)
                 made = []
         yield dict(zip(names, made)) if made else {n: cwd for n in names}
     finally:
-        for p in made:
-            _remove(repo, p)
+        _remove_all(repo, lock, made)
+
+
+def _registry_lock(repo):
+    """Lock name for `repo`'s .git/worktrees. Other tagteam processes (another session, a background review) add
+    and remove worktrees of the same repo, and git doesn't make that safe: see `_worktree`."""
+    return "worktrees-" + hashlib.sha256(os.path.realpath(_common_dir(repo)).encode()).hexdigest()[:16]
+
+
+def _remove_all(repo, lock, paths):
+    if paths:
+        with state.locked(lock):
+            for p in paths:
+                _remove(repo, p)
 
 
 @contextlib.contextmanager
 def checkout(repo, tree, cwd=None):
     with checkouts(repo, tree, ["_"], cwd) as m:
         yield m["_"]
+
+
+def _common_dir(repo):
+    common = changes.git(repo, "rev-parse", "--git-common-dir").strip()
+    return common if os.path.isabs(common) else os.path.join(repo, common)
 
 
 def _config(path):
@@ -125,8 +148,7 @@ def _config(path):
 def _git_files(repo):
     """The shared git dir's config entries and hook digests: what a sandboxed `git config` or hook install
     changes. Returns ({config entry or hook path: digest-or-True}, branch tracking entries)."""
-    common = changes.git(repo, "rev-parse", "--git-common-dir").strip()
-    common = common if os.path.isabs(common) else os.path.join(repo, common)
+    common = _common_dir(repo)
     risky, tracking = _config(os.path.join(common, "config"))
     out = dict.fromkeys(risky, True)
     for root, _, files in os.walk(os.path.join(common, "hooks")):
