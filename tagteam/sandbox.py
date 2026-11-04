@@ -11,8 +11,10 @@ import time
 from . import changes, state
 
 PREFIX = "tagteam-review-"
-# Copilot runs a trusted repo's own hooks (.claude/settings.json, .github/hooks), even in -p and in a worktree of it.
+# Copilot runs a trusted repo's own hooks (.claude/settings.json, .github/hooks) and MCP servers, even in -p and in a
+# worktree of it.
 COPILOT_SETTINGS = ".github/copilot/settings.local.json"
+COPILOT_MCP = (".mcp.json", ".github/mcp.json")
 _GIT_ENV = {"GIT_AUTHOR_NAME": "tagteam", "GIT_COMMITTER_NAME": "tagteam",
             "GIT_AUTHOR_EMAIL": "tagteam@localhost", "GIT_COMMITTER_EMAIL": "tagteam@localhost",
             "GIT_AUTHOR_DATE": "@0 +0000", "GIT_COMMITTER_DATE": "@0 +0000"}
@@ -59,29 +61,37 @@ def _worktree(repo, commit):
     except (RuntimeError, OSError):
         shutil.rmtree(path, ignore_errors=True)
         raise
-    _no_hooks(path)
     return path
 
-def _no_hooks(path):
-    """Turn off Copilot's hooks in this sandbox, the reviewed repo's included (its own settings.json can't undo it)."""
-    p = os.path.join(path, COPILOT_SETTINGS)
-    if not os.path.realpath(p).startswith(path + os.sep):       # a symlink in the repo would write outside
-        state.log("copilot hooks left on in sandbox: settings path leaves it", path=path)
-        return
+
+def _json_dict(p):
     try:
         with open(p) as f:
-            cur = json.load(f)
+            d = json.load(f)
     except (OSError, ValueError):
-        cur = {}
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _no_repo_code(path):
+    """Turn off what Copilot would start from the reviewed repo: all hooks (its own settings.json can't undo it)
+    and the repo's MCP servers, which Copilot reads from .mcp.json or else .github/mcp.json."""
+    p = os.path.join(path, COPILOT_SETTINGS)
+    if not os.path.realpath(p).startswith(path + os.sep):       # a symlink in the repo would write outside
+        state.log("copilot hooks and MCP left on in sandbox: settings path leaves it", path=path)
+        return
+    cur = _json_dict(p)
+    servers = [n for f in COPILOT_MCP for n in _json_dict(os.path.join(path, f)).get("mcpServers") or {}]
+    off = cur.get("disabledMcpServers") if isinstance(cur.get("disabledMcpServers"), list) else []
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w") as f:
-        json.dump({**(cur if isinstance(cur, dict) else {}), "disableAllHooks": True}, f)
+        json.dump({**cur, "disableAllHooks": True, "disabledMcpServers": list(dict.fromkeys(off + servers))}, f)
 
 
 def _populate(path):
     """Check out the files; touches only this worktree's index and tree, so these run in parallel."""
     changes.git(path, "-c", "core.hooksPath=/dev/null", "reset", "-q", "--hard", env={"GIT_LFS_SKIP_SMUDGE": "1"})
-    _no_hooks(path)
+    _no_repo_code(path)
 
 
 @contextlib.contextmanager

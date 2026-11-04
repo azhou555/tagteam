@@ -67,10 +67,22 @@ class Checkout(unittest.TestCase):
         tree = changes.snapshot(repo)
         with sandbox.checkout(repo, tree) as path:
             got = json.loads(pathlib.Path(path, sandbox.COPILOT_SETTINGS).read_text())
-            self.assertEqual(got, {"model": "x", "disableAllHooks": True})
+            self.assertEqual(got, {"model": "x", "disableAllHooks": True, "disabledMcpServers": []})
             self.assertEqual(sandbox.dirty(path, tree), [])
             pathlib.Path(path, "a.py").write_text("x = 2\n")
             self.assertEqual(sandbox.dirty(path, tree), ["a.py"])
+
+    def test_sandbox_turns_off_the_repos_copilot_mcp_servers(self):
+        repo = make_repo()
+        pathlib.Path(repo, ".github/copilot").mkdir(parents=True)
+        pathlib.Path(repo, ".mcp.json").write_text('{"mcpServers": {"db": {"command": "sh"}}}')
+        pathlib.Path(repo, ".github/mcp.json").write_text('{"mcpServers": {"web": {}, "db": {}}}')
+        pathlib.Path(repo, sandbox.COPILOT_SETTINGS).write_text('{"disabledMcpServers": ["mine"]}')
+        tree = changes.snapshot(repo)
+        with sandbox.checkout(repo, tree) as path:
+            got = json.loads(pathlib.Path(path, sandbox.COPILOT_SETTINGS).read_text())
+            self.assertEqual(got["disabledMcpServers"], ["mine", "db", "web"])
+            self.assertEqual(sandbox.dirty(path, tree), [])
 
     def test_sandbox_never_writes_through_a_symlink_out_of_it(self):
         repo, outside = make_repo(), tempfile.mkdtemp()

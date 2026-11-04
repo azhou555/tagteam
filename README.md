@@ -139,10 +139,11 @@ To make every change blocking, set `blocking = { small = true }` under `[review]
 ## What you'll see
 
 Reviewers read your change in a **throwaway checkout**, not your working tree, and are run with their own
-read-only flags. They don't run the reviewed repo's own agent hooks: Claude loads only your user settings,
-and the checkout carries a `.github/copilot/settings.local.json` that turns Copilot's hooks off (Copilot
-otherwise runs a trusted repo's `.claude/settings.json`, `.github/hooks` and `.github/copilot/settings.json`
-hooks, even in a checkout of it). A repo whose `.github` is a symlink out of the checkout keeps Copilot's hooks.
+read-only flags. They don't run the reviewed repo's own agent hooks or MCP servers: Claude loads only your
+user settings, and the checkout carries a `.github/copilot/settings.local.json` that turns off Copilot's hooks
+and the servers named in the repo's `.mcp.json` and `.github/mcp.json` (Copilot otherwise runs a trusted
+repo's `.claude/settings.json`, `.github/hooks` and `.github/copilot/settings.json` hooks and starts its MCP
+servers, even in a checkout of it). A repo whose `.github` is a symlink out of the checkout keeps both on.
 If a reviewer writes anywhere it shouldn't, the turn's notice says so, for example
 `⚠ disabled codex: wrote outside read-only (tagteam doctor --clear)` or
 `⚠ your repo changed during review (see tagteam.log)`.

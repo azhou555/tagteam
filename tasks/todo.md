@@ -542,8 +542,14 @@ Evidence: 125 past verdicts; median finding confidence 0.98, none under 0.6 (`mi
       in any of the five, all exited 0. In-place reviews (no sandbox) still can run Copilot's repo hooks; Watch
       catches what they write. A repo's committed .github/copilot/settings.json with disableAllHooks false and
       inline hooks: hooks ran without the fix, none with it (local wins). A symlinked .github leaves them on.
-- [ ] Not probed: repo MCP servers, plugins and skills, which Copilot loads in a trusted folder, and whether
-      Claude with --setting-sources user still loads a project .mcp.json. MCP servers are processes they start.
+- [x] Repo MCP servers (2026-11-04). Probe repo under ~/Coding with a server that writes a marker in .mcp.json,
+      .github/mcp.json, .vscode/mcp.json, .codex/config.toml, .gemini/settings.json, .agents/mcp.json,
+      .antigravity/mcp_config.json, opencode.json, plus .claude/settings.json enableAllProjectMcpServers.
+      Only Copilot started one (.mcp.json; .github/mcp.json when there is no .mcp.json). Claude did too without
+      --setting-sources user, none with it. `--disable-mcp-server '*'` is not a wildcard. Fix: the sandbox's
+      settings.local.json also lists the servers from both files in `disabledMcpServers` (the key `copilot mcp
+      disable` writes); re-probe with both files and with .github/mcp.json alone: none started.
+- [ ] Not probed: plugins Copilot might load from a trusted repo (only user-installed plugins are documented).
 - [x] Reviewer order agy, opencode, copilot, codex, claude; opencode pinned to free opencode/big-pickle
 - [x] Reviewer order agy, copilot, opencode, codex, claude: a blocking round waits for its slowest reviewer (agy
       ~128s, opencode ~166s and 2/7 timeouts vs copilot ~30s), so copilot pairs with agy on large changes
