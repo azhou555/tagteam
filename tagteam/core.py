@@ -26,6 +26,21 @@ def _session_file(ev):
     return state.path("sessions", f"{limits.safe_session_key(ev.agent, ev.session_id)}.json")
 
 
+IDE_CONTEXT = re.compile(r"\s*<(ide_opened_file|ide_selection|browser_instruction|system-reminder)\b[^>]*>.*?</\1>",
+                         re.S)
+NOT_FROM_USER = re.compile(r"\s*<(task-notification|agent-message)\b")
+
+
+def intent(prompt, previous):
+    """What the user asked, for reviewers: the harness's IDE context prefixes stripped, and a turn the harness
+    started (a background task finishing, a subagent reporting back) keeps the previous request."""
+    if NOT_FROM_USER.match(prompt):
+        return previous
+    while m := IDE_CONTEXT.match(prompt):
+        prompt = prompt[m.end():]
+    return prompt.strip()
+
+
 def turn_start(ev, cfg):
     if ev.prompt.lstrip().startswith(MARKER):      # Copilot re-submits our block message as a prompt
         return None
@@ -41,7 +56,7 @@ def turn_start(ev, cfg):
             "turn_id": ev.turn_id or uuid.uuid4().hex[:12], "started": time.time(), "cwd": ev.cwd,
             "repo": repo, "baseline": base, "turn_baseline": base,    # baseline advances each round; turn_baseline never
             "refs": changes.refs(repo) if repo else {},
-            "prompt": ev.prompt, "round": 0, "touched": touched, "reviewed_digests": {}, "prior": prior,
+            "prompt": intent(ev.prompt, prev.get("prompt", "")), "round": 0, "touched": touched, "reviewed_digests": {}, "prior": prior,
             "carried": bool(prior), "owed": prev.get("owed"), "plan_rounds": 0, "plan_prior": [],
             "outside_touched": [p for p in touched if not changes.in_repo(p, repo)], "reverted_prior": [],
         })
@@ -267,14 +282,15 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
                             "prior": run["prior"], "mode": mode, "background": bool(pinned), "started": now,
                             "expires": now + deadline + 60}) as update:
             outcomes = runner.run_all(jobs, cfg, works, run_dir, deadline, on_done=update)
-        guilty = {r: "wrote in its sandbox" for r in plan if works[r] != (repo or ev.cwd) and sandbox.dirty(works[r], before)}
+        wrote = {r: sandbox.dirty(works[r], before) for r in plan if works[r] != (repo or ev.cwd)}
+        guilty = {r: f"wrote in its sandbox: {', '.join(w[:5])}" for r, w in wrote.items() if w}
     seen = watch.after()
     in_place = any(works[r] == (repo or ev.cwd) for r in plan)
     if seen["git"]:                                  # a security signal; users rarely edit these mid-review
-        guilty = {r: "git config/hooks changed" for r in plan}
+        guilty = {r: f"git config/hooks changed: {', '.join(seen['git'][:5])}" for r in plan}
     elif in_place and (seen["repo"]["tree"] or seen["outside"]):   # no sandbox to prove who wrote: postcondition decides
         guilty = {r: "real tree or touched files changed with no sandbox" for r in plan}
-    changed = [] if pinned else seen["repo"]["tree"] + seen["repo"]["refs"] + seen["outside"]
+    changed = [] if pinned else seen["repo"]["tree"] + seen["repo"]["refs"] + seen["repo"]["config"] + seen["outside"]
     if guilty:
         state.log("REVIEWER WROTE OUTSIDE READ-ONLY; disabled", run_id=run_id, reviewers=list(guilty),
                   why=guilty, git=seen["git"], outside=seen["outside"], tree=seen["repo"]["tree"][:50],
@@ -284,7 +300,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         run["disabled"] = list(guilty)
     if changed:
         state.log("repo changed during review", run_id=run_id, blamed=list(guilty), tree=seen["repo"]["tree"][:50],
-                  refs=seen["repo"]["refs"], outside=seen["outside"])
+                  refs=seen["repo"]["refs"], config=seen["repo"]["config"], outside=seen["outside"])
         run["real_repo_changed"] = changed
     warn = ""
     if guilty:
@@ -402,8 +418,11 @@ def _turn_end(ev, cfg, lock, fd):
     if not wanted(ev, cfg, artifacts):
         return None
     mode = _mode(cfg, artifacts, prior)
-    if (mode == "advise" and s.get("repo") and head and lock == limits.HELD and cfg["reviewers"].get("use")
-            and _start_background(ev, cfg, s, artifacts, head, rebuttal, fd)):
+    # A confirm can't block either, so the author doesn't wait for it; it still spends its round.
+    if ((mode == "advise" or confirm) and s.get("repo") and head and lock == limits.HELD and cfg["reviewers"].get("use")
+            and _start_background(ev, cfg, s, artifacts, head, rebuttal, fd, round_no if confirm else None, mode)):
+        if confirm:
+            _write_back(sf, s.get("turn_id"), lambda cur: cur.update(round=round_no))
         return {"action": "allow", "message": BACKGROUND if _has_status_line(ev.agent) else BACKGROUND_NEXT}
     action, msg, run_dir, open_issues = review(ev, cfg, s, artifacts, round_no, "turn", lock, confirm, rebuttal, started,
                                                mode)
@@ -446,12 +465,14 @@ def _detach(argv, fd):
                      start_new_session=True, pass_fds=(fd,))
 
 
-def _start_background(ev, cfg, s, artifacts, head, rebuttal, fd):
-    """Hand the review to a detached `tagteam background`. False if it couldn't start: review in the foreground."""
+def _start_background(ev, cfg, s, artifacts, head, rebuttal, fd, confirm_round=None, mode="advise"):
+    """Hand the review to a detached `tagteam background`. False if it couldn't start: review in the foreground.
+    `confirm_round` makes it the turn's confirm round (the last word on a blocking cycle, which can't block)."""
     job = state.path("jobs", f"{_session_file(ev).stem}-{uuid.uuid4().hex[:8]}.json")
     try:
         state.write_json(job, {"ev": dataclasses.asdict(ev), "cfg": cfg, "session": s, "artifacts": artifacts,
-                               "pinned": [head, _git_activity(s)], "rebuttal": rebuttal})
+                               "pinned": [head, _git_activity(s)], "rebuttal": rebuttal,
+                               "confirm_round": confirm_round, "mode": mode})
         _detach([sys.executable, "-m", "tagteam", "background", str(job)], fd)
     except OSError as e:
         state.log("background review not started; reviewing now", error=repr(e))
@@ -461,8 +482,8 @@ def _start_background(ev, cfg, s, artifacts, head, rebuttal, fd):
 
 
 def background(path, alarm=False):
-    """The detached half of a non-blocking turn end. It holds the session lock it was handed for its whole run
-    and spends none of the turn's rounds. `alarm` ends a run that overstays its deadline: the lock is freed and
+    """The detached half of a non-blocking turn end. It holds the session lock it was handed for its whole run.
+    An advise review spends none of the turn's rounds; a confirm round's was spent when it started. `alarm` ends a run that overstays its deadline: the lock is freed and
     the run shows as interrupted."""
     job = state.read_json(path)
     pathlib.Path(path).unlink(missing_ok=True)
@@ -471,8 +492,12 @@ def background(path, alarm=False):
     cfg, s, ev = job["cfg"], job["session"], HookEvent(**job["ev"])
     if alarm:
         signal.alarm(int(cfg["review"]["deadline_s"]) + 120)
-    action, msg, run_dir, open_issues = review(ev, cfg, s, job["artifacts"], 1, "turn", limits.HELD,
-                                               rebuttal=job["rebuttal"], mode="advise", pinned=tuple(job["pinned"]))
+    confirm_round = job.get("confirm_round")
+    action, msg, run_dir, open_issues = review(ev, cfg, s, job["artifacts"], confirm_round or 1, "turn", limits.HELD,
+                                               bool(confirm_round), job["rebuttal"], mode=job.get("mode", "advise"),
+                                               pinned=tuple(job["pinned"]))
+    if confirm_round and open_issues is not None:  # the last word on the blocking cycle: only suggestions stay open
+        open_issues = verdict.gated(open_issues, "advise")
     verdict_in = open_issues is not None and (run_dir is not None or msg)   # not: no verdict, or already reviewed
     notice = msg if msg and action != "block" and not _has_status_line(ev.agent) else None   # a blocker blocks instead
     if not (verdict_in or notice):

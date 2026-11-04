@@ -2,7 +2,7 @@
 # (see README, "A repo's own file"); every other key in it is ignored.
 
 [authors]
-review = ["claude", "codex", "copilot", "agy"]     # whose turns get reviewed
+review = ["claude", "codex", "copilot", "agy", "opencode"]     # whose turns get reviewed
 
 [triggers]
 kinds = ["code", "plan", "design"]
@@ -49,6 +49,10 @@ model = "sonnet"            # reviewer runs use a cheaper model than your main s
 [reviewers.codex]
 model = ""
 
+[reviewers.opencode]
+model = ""                  # provider/model; empty = OpenCode's default
+effort = ""                 # --variant, e.g. high; empty = the model's default
+
 [routing]
 mode = "ordered"            # ordered | quota
 
@@ -76,3 +80,8 @@ quota = { source = "claude_statusline", reserve_floor = 0.5 }
 tier = "primary"
 weight = { code = 1.0, design = 0.7, plan = 0.8 }
 quota = { source = "codex_rollout", reserve_floor = 0.5 }
+
+[routing.quota.agents.opencode]
+tier = "reviewer"
+weight = { code = 0.8, design = 0.8, plan = 0.8 }
+quota = { source = "self", daily_budget_runs = 80 }

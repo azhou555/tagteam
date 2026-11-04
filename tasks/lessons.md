@@ -26,3 +26,9 @@
   literally, not through a shell variable.
 - Also (2026-10-28): mutate a scratch copy (`git worktree add` or `cp -r`), never the working tree. tagteam's own
   Stop hook reviewed the tree mid-run, saw a deliberately broken line, and raised a false blocker.
+
+## Label a sample before tuning a reviewer for noise
+- What happened (2026-11-03): high block rate and ~0.99 confidence looked like noise, so I tightened the rubric.
+  The user labeled 14/15 past blocking findings real; the stricter rubric dropped real bugs.
+- Rule: before changing review prompts to cut false positives, get a labeled sample (scripts/rubric_eval.py
+  writes labels.md) and measure recall on real findings, not just block rate.

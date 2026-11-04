@@ -66,6 +66,8 @@ def _spawn(argv, stdin, cwd, timeout):
 
 def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
     workdir = tempfile.mkdtemp(prefix=f"{agent}-", dir=run_dir)
+    with open(os.path.join(workdir, "prompt.txt"), "w") as f:     # what the reviewer saw, for replaying rubric changes
+        f.write(prompt)
     t0 = time.time()
     reviewer, options = harnesses.get(agent).reviewer, cfg["reviewers"].get(agent, {})
     for attempt in (1, 2):

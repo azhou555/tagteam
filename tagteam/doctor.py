@@ -3,6 +3,7 @@ disabled and resumes ones paused after failures."""
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import tempfile
@@ -27,9 +28,13 @@ def hook_entries(path):
     """argv prefixes (the part before `hook`) of tagteam's hook commands in this agent's hook file.
     None if the file is missing or unreadable; [] if it holds none of ours."""
     try:
-        cmds = _commands(json.loads(path.read_text()))
-    except (OSError, ValueError):
+        text = path.read_text()
+    except OSError:
         return None
+    try:
+        cmds = _commands(json.loads(text))
+    except ValueError:                               # a plugin file: its commands are JSON string literals
+        cmds = [json.loads(s) for s in re.findall(r'"(?:[^"\\]|\\.)*"', text) if harnesses.base.TAG in s]
     out = []
     for c in cmds:
         try:
@@ -97,7 +102,7 @@ def probe_one(name, cfg):
             if after["git"] or after["outside"] or after["repo"]["tree"] or after["repo"]["refs"]:
                 return "wrote-files"
             try:
-                if changes.snapshot(work) != tree:
+                if sandbox.written(work, tree):
                     return "wrote-files"
             except (RuntimeError, OSError):
                 return "unknown (could not re-check the checkout)"

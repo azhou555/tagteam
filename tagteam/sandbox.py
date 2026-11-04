@@ -1,6 +1,7 @@
 """Run each reviewer in its own disposable checkout of the turn's snapshot, and detect writes that escape it."""
 import concurrent.futures as cf
 import contextlib
+import json
 import hashlib
 import os
 import shutil
@@ -10,6 +11,8 @@ import time
 from . import changes, state
 
 PREFIX = "tagteam-review-"
+# Copilot runs a trusted repo's own hooks (.claude/settings.json, .github/hooks), even in -p and in a worktree of it.
+COPILOT_SETTINGS = ".github/copilot/settings.local.json"
 _GIT_ENV = {"GIT_AUTHOR_NAME": "tagteam", "GIT_COMMITTER_NAME": "tagteam",
             "GIT_AUTHOR_EMAIL": "tagteam@localhost", "GIT_COMMITTER_EMAIL": "tagteam@localhost",
             "GIT_AUTHOR_DATE": "@0 +0000", "GIT_COMMITTER_DATE": "@0 +0000"}
@@ -56,12 +59,29 @@ def _worktree(repo, commit):
     except (RuntimeError, OSError):
         shutil.rmtree(path, ignore_errors=True)
         raise
+    _no_hooks(path)
     return path
+
+def _no_hooks(path):
+    """Turn off Copilot's hooks in this sandbox, the reviewed repo's included (its own settings.json can't undo it)."""
+    p = os.path.join(path, COPILOT_SETTINGS)
+    if not os.path.realpath(p).startswith(path + os.sep):       # a symlink in the repo would write outside
+        state.log("copilot hooks left on in sandbox: settings path leaves it", path=path)
+        return
+    try:
+        with open(p) as f:
+            cur = json.load(f)
+    except (OSError, ValueError):
+        cur = {}
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f:
+        json.dump({**(cur if isinstance(cur, dict) else {}), "disableAllHooks": True}, f)
 
 
 def _populate(path):
     """Check out the files; touches only this worktree's index and tree, so these run in parallel."""
     changes.git(path, "-c", "core.hooksPath=/dev/null", "reset", "-q", "--hard", env={"GIT_LFS_SKIP_SMUDGE": "1"})
+    _no_hooks(path)
 
 
 @contextlib.contextmanager
@@ -114,52 +134,82 @@ def _common_dir(repo):
     return common if os.path.isabs(common) else os.path.join(repo, common)
 
 
+def _config(path):
+    """(entries that could run code or redirect git, branch.* tracking entries): `key=value` lines. Branch
+    tracking is what VS Code and `git push -u` write mid-review; nothing in it runs code. Unparseable config
+    is one opaque entry, so any change to it still counts."""
+    try:
+        lines = changes.git(os.path.dirname(path), "config", "--file", path, "--list").splitlines()
+    except (RuntimeError, OSError):
+        return {f"(unparseable config {changes.file_digest(path)})"}, set()
+    return {l for l in lines if not l.startswith("branch.")}, {l for l in lines if l.startswith("branch.")}
+
+
 def _git_files(repo):
-    """Digests of the shared git dir's config and hooks: what a sandboxed `git config` or hook install changes."""
+    """The shared git dir's config entries and hook digests: what a sandboxed `git config` or hook install
+    changes. Returns ({config entry or hook path: digest-or-True}, branch tracking entries)."""
     common = _common_dir(repo)
-    paths = [os.path.join(common, "config")]
+    risky, tracking = _config(os.path.join(common, "config"))
+    out = dict.fromkeys(risky, True)
     for root, _, files in os.walk(os.path.join(common, "hooks")):
-        paths += [os.path.join(root, f) for f in files]
-    return {p: changes.file_digest(p) for p in paths}
+        out.update({os.path.join(root, f): changes.file_digest(os.path.join(root, f)) for f in files})
+    return out, tracking
+
+
+def _delta(old, new):
+    return sorted(f"+{k}" if k in new else f"-{k}" for k in set(old) ^ set(new)) + sorted(
+        k for k in set(old) & set(new) if old[k] != new[k])
 
 
 def _refs(repo):
     return {k: v for k, v in changes.refs(repo).items() if not k.startswith("refs/remotes/")}
 
 
+def written(path, tree):
+    """The paths in which a sandbox no longer matches `tree` (tagteam's own Copilot settings aside); raises if
+    git can't tell."""
+    now = changes.snapshot(path)
+    if now == tree:
+        return []
+    wrote = changes.git(path, "diff", "--name-only", tree, now).split()
+    return [p for p in wrote if p != COPILOT_SETTINGS] if wrote else ["(tree changed)"]
+
+
 def dirty(path, tree):
-    """True if a sandbox no longer holds exactly `tree`."""
+    """`written`, but empty (and logged) if git can't tell."""
     try:
-        return changes.snapshot(path) != tree
+        return written(path, tree)
     except (RuntimeError, OSError) as e:
         state.log("sandbox not re-checked", path=path, error=repr(e))
-        return False
+        return []
 
 
 class Watch:
     """What the review must not change. `after()` reports, in three classes of increasing doubt:
-    git: shared config/hooks that changed (a security signal), outside: touched outside-repo files that changed,
-    repo: {tree: [paths], refs: [names]} for the real working tree and non-remote refs (maybe the user's own edits)."""
+    git: shared config entries (`+key=value` / `-key=value`) and hook paths that changed (a security signal),
+    outside: touched outside-repo files that changed, repo: {tree: [paths], refs: [names], config: [branch.*
+    entries]} for the real working tree, non-remote refs and branch tracking (maybe the user's own doing)."""
 
     def __init__(self, repo, tree, outside_paths=()):
         self.repo, self.tree = repo, tree
         self.outside = {p: changes.file_digest(p) for p in outside_paths}
-        self.git = self.refs = None
+        self.git = self.tracking = self.refs = None
         if repo:
             try:
-                self.git, self.refs = _git_files(repo), _refs(repo)
+                (self.git, self.tracking), self.refs = _git_files(repo), _refs(repo)
             except (RuntimeError, OSError) as e:
                 state.log("git state not watched", repo=repo, error=repr(e))
 
     def after(self):
         out = {"git": [], "outside": [p for p, d in self.outside.items() if changes.file_digest(p) != d],
-               "repo": {"tree": [], "refs": []}}
+               "repo": {"tree": [], "refs": [], "config": []}}
         if not self.repo:
             return out
         try:
             if self.git is not None:
-                now = _git_files(self.repo)
-                out["git"] = sorted(p for p in set(now) | set(self.git) if now.get(p) != self.git.get(p))
+                now, tracking = _git_files(self.repo)
+                out["git"] = _delta(self.git, now)
+                out["repo"]["config"] = _delta(dict.fromkeys(self.tracking, True), dict.fromkeys(tracking, True))
                 refs = _refs(self.repo)
                 out["repo"]["refs"] = sorted(k for k in set(refs) | set(self.refs) if refs.get(k) != self.refs.get(k))
             if self.tree:

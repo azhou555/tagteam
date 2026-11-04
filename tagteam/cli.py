@@ -146,13 +146,13 @@ def show_config():
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="tagteam", formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="Cross-agent review for coding agents. When Claude Code, Codex, Copilot CLI or Antigravity (agy)\n"
-                    "finishes a turn that changed code, a plan or a design, a different agent reviews the change.",
+        description="Cross-agent review for coding agents. When Claude Code, Codex, Copilot CLI, Antigravity (agy)\n"
+                    "or OpenCode finishes a turn that changed code, a plan or a design, a different agent reviews the change.",
         epilog="Start with `tagteam install`. Then `tagteam doctor` checks each agent, `tagteam watch` shows\n"
                "reviews live, and `tagteam config` prints every setting.")
     sub = p.add_subparsers(dest="cmd", metavar="command")
     h = sub.add_parser("hook", help="internal: run by the agents' hooks")
-    h.add_argument("agent", choices=["claude", "codex", "copilot", "agy"])
+    h.add_argument("agent", choices=list(harnesses.ALL))
     h.add_argument("phase")
     h.add_argument("--check", action="store_true", help="parse stdin only; exit 1 if it is not a valid payload")
     sub.add_parser("statusline", help="internal: the Claude status line")

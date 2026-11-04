@@ -1,0 +1,5 @@
+{
+ "sessionID": "ses_e6b0d6decffekHf2z3qfod1Rg8",
+ "cwd": "/tmp/spike/ws-opencode",
+ "prompt": "\"Add a function mul(a, b) to m.py with the edit tool, then create todo.txt containing the word later with the write tool. Be brief.\""
+}

@@ -274,6 +274,25 @@ class EndToEnd(HookRig, unittest.TestCase):
             out = self.run_hook("claude", "x", payload)
         return out, new_turn, state.read_json(sf)
 
+    def intent_after(self, *prompts):
+        for p in prompts:
+            self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt=p))
+        return state.read_json(core._session_file(adapters.parse("claude", "turn-start", self.claude(
+            "UserPromptSubmit", prompt="")))) ["prompt"]
+
+    def test_intent_skips_ide_context_but_keeps_pasted_content(self):
+        p = ("<ide_opened_file>The user opened the file /r/a.md in the IDE.</ide_opened_file>\n"
+             "<ide_selection>The user selected lines 1 to 2:\nx\n</ide_selection>\n"
+             "<browser_instruction># Chrome\nuse tabs\n</browser_instruction>\n"
+             "fix this:\n<pasted_content id=\"1\">\nTraceback\n</pasted_content>")
+        self.assertEqual(self.intent_after(p), "fix this:\n<pasted_content id=\"1\">\nTraceback\n</pasted_content>")
+
+    def test_intent_survives_notifications_and_subagent_reports(self):
+        self.assertEqual(self.intent_after(
+            "add a retry to fetch",
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+            '<agent-message from="a1">\n[Subagent hand-back] report\n</agent-message>'), "add a retry to fetch")
+
     def test_turn_started_mid_review_keeps_its_state_and_inherits_the_open_issues(self):
         self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
         pathlib.Path(self.repo, "feature.py").write_text("def f(x):\n    return x[0]\n" * 4)
@@ -644,7 +663,8 @@ class OnReview(unittest.TestCase):
         self.assertEqual(json.loads((out / "run.json").read_text()), {**self.RUN, "outcome": "blocked", "summary": summary})
         env = (out / "env").read_text().splitlines()
         self.assertEqual([e for e in env if not e.startswith("TAGTEAM_HOME=")],
-                         ["TAGTEAM_DEPTH=1", "TAGTEAM_MODE=block", "TAGTEAM_OUTCOME=blocked", f"TAGTEAM_SUMMARY={summary}"])
+                         ["TAGTEAM_AUTHOR=claude", "TAGTEAM_DEPTH=1", "TAGTEAM_MODE=block", "TAGTEAM_OUTCOME=blocked",
+                          f"TAGTEAM_SUMMARY={summary}"])
 
     def test_nothing_runs_when_unset_or_backfilling(self):
         with mock.patch("subprocess.Popen") as popen:
