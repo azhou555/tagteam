@@ -161,7 +161,8 @@ and the servers named in the repo's `.mcp.json` and `.github/mcp.json` (Copilot 
 repo's `.claude/settings.json`, `.github/hooks` and `.github/copilot/settings.json` hooks and starts its MCP
 servers, even in a checkout of it). A repo whose `.github` is a symlink out of the checkout keeps both on.
 If a reviewer writes in its own checkout, it is disabled and the turn's notice says so:
-`⚠ disabled codex: wrote outside read-only` (it is re-tested on its own, see [Self-healing](#self-healing)).
+`⚠ disabled codex: wrote outside read-only` (a first write is re-tested on its own; a repeat within 7 days, or
+a write during the re-test, stays off until `tagteam doctor --clear`, see [Self-healing](#self-healing)).
 When the shared git config or hooks change during a review, nothing shows who changed them (another session
 or you could have). The run stops, its results are discarded, no reviewer is disabled, and the next turn's
 review covers the code this turn changed (the git config change itself is not reviewed):
@@ -349,14 +350,16 @@ tagteam fixes most reviewer trouble itself and only tells you about what it can'
 **What it fixes on its own**
 
 - **Demotion.** A reviewer is demoted when 3 of its last 4 calls failed and the latest one failed. A demoted
-  reviewer is tried after the healthy ones. Any success clears it.
-- **Fallback.** If a reviewer fails fast and at least 90 seconds of the deadline remain, the next healthy
-  listed reviewer takes over in its own checkout. The run shows `codex (for agy)`.
+  reviewer is tried after the healthy ones. Any success clears it, but a probe pass keeps the probe backoff
+  until a real review succeeds, so a reviewer that keeps failing real work isn't probed every 15 minutes.
+- **Fallback.** If a reviewer fails fast and at least 90 seconds of the deadline remain, the next listed
+  reviewer (a healthy one first, a demoted one if none is healthy) starts at once in its own checkout, while
+  the others are still running. The run shows `codex (for agy)`.
 - **Probing.** A small background job, started by hooks at most every 15 minutes, probes demoted reviewers
   with backoff from 15 minutes up to 6 hours: at most 2 probes per run, and at most 4 Copilot probes a day.
-- **Re-enabling after a write.** A reviewer disabled for writing outside its checkout is re-tested in a
-  throwaway worktree of the repo where it happened, with write traps added. It comes back only after a
-  valid review with no writes. A second write within 7 days, or a write during the re-test, latches it off:
+- **Re-enabling after a write.** A reviewer disabled for writing (outside its checkout, or to files inside it)
+  is re-tested in a throwaway worktree of the repo where it happened, with write traps added. It comes back
+  only after a valid review with no writes. A second write within 7 days, or a write during the re-test, latches it off:
   only `tagteam doctor --clear` re-enables it then.
 - **Cleanup.** Run folders older than 30 days and stale sandbox worktrees are removed.
 
@@ -364,7 +367,7 @@ tagteam fixes most reviewer trouble itself and only tells you about what it can'
 write breaker, a disabled reviewer whose repo no longer exists, stale hooks, or an author with no reviewer.
 These show in the Claude status line, in the menu bar title, and in the notice at the end of a turn (each
 issue at most once a day). `tagteam watch` and the menu bar dropdown also show a Health block whenever
-something isn't ok, plus recent self-healing events. Everything else is handled quietly.
+something isn't ok or there are recent self-healing events. Everything else is handled quietly.
 
 `tagteam doctor` shows each reviewer's health. `tagteam doctor --fix` runs one pass now instead of waiting.
 State is in `~/.tagteam/state/`: `health.json`, `heal.jsonl` and `probes.jsonl` (all advisory), and
