@@ -148,7 +148,8 @@ def trips():
 def _history(t, d, reviewer):
     """(trip list, latched) for `reviewer`. A `disabled.json` entry newer than the last recorded trip (no record at
     all, or a trip lost to a failed write) counts as one more trip, latched if within TRIP_WINDOW of the one before.
-    `disable` stamps both files with the same time, so a recorded trip is never counted twice.
+    `disable` stamps both files with the same time, so a recorded trip is never counted twice. An entry's own
+    `latched` flag (a canary write) latches too, so a failed trips write can't drop it.
     None if the record is malformed (fail closed)."""
     h = t.get(reviewer)
     if h is not None and (not isinstance(h, dict) or not isinstance(h.get("trips"), list)):
@@ -156,6 +157,7 @@ def _history(t, d, reviewer):
     past, latched = (h["trips"], bool(h.get("latched"))) if h else ([], False)
     e = d.get(reviewer)
     if isinstance(e, dict):
+        latched = latched or e.get("latched") is True
         stamps = [x.get("ts") for x in past if isinstance(x, dict) and isinstance(x.get("ts"), (int, float))]
         ts = e.get("ts")
         if not past or isinstance(ts, (int, float)) and (not stamps or ts > max(stamps)):
@@ -177,7 +179,9 @@ def disable(reviewer, reason, run_id=None, latch=False):
             with state.locked("trips"):
                 t = trips()
                 h = None if t is None else _history(t, d, reviewer)
-                d[reviewer] = {"reason": reason, "ts": now}
+                was = d.get(reviewer)
+                keep = latch or isinstance(was, dict) and was.get("latched") is True     # survives a lost trips write
+                d[reviewer] = {"reason": reason, "ts": now, **({"latched": True} if keep else {})}
                 state.write_json(state.path("disabled.json"), d)
                 if h is None:
                     state.log("trips unreadable; history left as is", reviewer=reviewer, run_id=run_id)
