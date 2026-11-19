@@ -6,7 +6,7 @@ from unittest import mock
 
 from tests.helpers import (ALL_AGENTS, CFG, FULL, HookRig, art, clear_user_config, state, use_toml,  # isort: skip
                            write_user_config)
-from tagteam import core, harnesses, live, quota, router, runner  # noqa: E402
+from tagteam import core, harnesses, health, live, quota, router, runner  # noqa: E402
 
 NOTICE_NONE = "[tagteam] ⚠ Not reviewed: no reviewers configured; run tagteam install"
 NOTICE_UNAVAILABLE = "[tagteam] ⚠ Not reviewed: no listed reviewer is available"
@@ -34,6 +34,27 @@ class Routing(unittest.TestCase):
         with mock.patch.object(quota, "cooling", side_effect=lambda a, now=None: a == "copilot"):
             plan, _ = router.route("claude", groups, cfg, FULL, {})
         self.assertEqual(list(plan), ["codex", "agy"])
+
+    def test_ordered_puts_demoted_last(self):
+        cfg = cfg_with(["codex", "agy", "copilot"], small=1)
+        with mock.patch.object(health, "is_demoted", side_effect=lambda a: a == "codex"):
+            plan, _ = router.route("claude", {"code": [art("a.py", 10)]}, cfg, FULL, {})
+        self.assertEqual(list(plan), ["agy"])
+
+    def test_ordered_demoted_still_used_when_alone(self):
+        with mock.patch.object(health, "is_demoted", return_value=True):
+            plan, _ = router.route("claude", {"code": [art("a.py", 10)]}, cfg_with(["codex"]), FULL, {})
+        self.assertEqual(list(plan), ["codex"])
+
+    def test_quota_drops_demoted_unless_short(self):
+        groups = {"code": [art("a.py", 10)]}
+        with mock.patch.object(health, "is_demoted", side_effect=lambda a: a == "copilot"):
+            plan, _ = router.route("claude", groups, cfg_with(["copilot", "agy"], "quota", small=1), FULL, {})
+            self.assertEqual(list(plan), ["agy"])
+            plan, _ = router.route("claude", groups, cfg_with(["copilot", "agy"], "quota", small=2), FULL, {})
+            self.assertEqual(sorted(plan), ["agy", "copilot"])
+        plan, _ = router.route("claude", groups, cfg_with(["copilot", "agy"], "quota", small=1), FULL, {})
+        self.assertEqual(list(plan), ["copilot"])                  # control: healthy copilot wins on score
 
     def test_tier_picks_one_bucket_per_change(self):
         rv = CFG["review"]

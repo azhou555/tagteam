@@ -3,7 +3,7 @@
 `ordered` mode takes the first N available from the list; `quota` mode scores the listed agents by headroom
 (reviewer-tier first, primaries only as overflow). Both go through `candidates`, the one place the list applies.
 """
-from . import harnesses, limits, quota
+from . import harnesses, health, limits, quota
 
 LENSES = {
     "code": ["correctness", "tests", "design"],
@@ -72,7 +72,7 @@ def _assign(groups, cfg, pick):
 
 
 def _ordered(author, groups, cfg, headroom, load):
-    pool = [a for a in candidates(author, cfg) if not quota.cooling(a)]
+    pool = sorted((a for a in candidates(author, cfg) if not quota.cooling(a)), key=health.is_demoted)  # stable
     return _assign(groups, cfg, lambda kind, n: pool[:n])
 
 
@@ -80,12 +80,18 @@ def _quota(author, groups, cfg, headroom, load):
     r = cfg["routing"]["quota"]
     agents = r["agents"]
     pool = eligible(author, cfg, headroom)
+    demoted = {a for a in pool if health.is_demoted(a)}
+    most = max((needed(k, arts, cfg["review"]) for k, arts in groups.items() if arts), default=0)
+    if len(pool) - len(demoted) >= most:
+        pool = {a: h for a, h in pool.items() if a not in demoted}
     load = dict(load)
 
     def pick(kind, n):
         def score(a):
             s = (load.get(a, 0) + 1) / (agents[a]["weight"][kind] * pool[a])
-            return s * (r["tier_penalty"] if agents[a]["tier"] == "primary" else 1.0)
+            if agents[a]["tier"] == "primary":
+                s *= r["tier_penalty"]
+            return s * r["tier_penalty"] if a in demoted else s
 
         if r["primary_use"] == "balanced":
             picked = sorted(pool, key=lambda a: (score(a), a))[:n]
