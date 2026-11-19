@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import heapq
 import json
 import os
 import pathlib
@@ -12,7 +13,7 @@ import warnings
 from unittest import mock
 
 from tests.helpers import CFG, FULL, ROOT, HookRig, art, finding, fx, make_repo, sh, use_toml, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
-from tagteam import adapters, changes, classify, core, harnesses, health, install, live, router, runner, state, verdict  # noqa: E402
+from tagteam import adapters, changes, classify, core, harnesses, health, install, live, router, runner, sandbox, state, verdict  # noqa: E402
 from tagteam.harnesses import agy as agy_h, base as harness_base, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
 
 
@@ -486,20 +487,29 @@ class Fallback(HookRig, unittest.TestCase):
         self.unrig()
 
     def fake(self, fail=(), timeout=(), write=(), took=5, results=None):
+        """runner.run_all on a simulated clock: each reviewer finishes `took` (s, or {reviewer: s}) after it starts,
+        and what on_done returns starts then. self.calls/cwds/deadlines get one entry per batch started."""
         def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
-            self.calls.append(jobs)
-            self.cwds.append(cwd)
-            self.deadlines.append(deadline)
-            self.clock[0] += took
-            out = {}
-            for r in jobs:
-                if r in write:
-                    pathlib.Path(cwd[r], "scribble.py").write_text("x = 2\n")
-                meta = {"reviewer": r, "ok": r not in fail + timeout, "timed_out": r in timeout, "duration": took}
+            out, queue = {}, []
+
+            def start(batch, cwds, d):
+                self.calls.append(batch)
+                self.cwds.append(cwds)
+                self.deadlines.append(d)
+                for r in batch:
+                    if r in write:
+                        pathlib.Path(cwds[r], "scribble.py").write_text("x = 2\n")
+                    t = took.get(r, 5) if isinstance(took, dict) else took
+                    heapq.heappush(queue, (self.clock[0] + t, r, t))
+            start(jobs, cwd, deadline)
+            while queue:
+                self.clock[0], r, t = heapq.heappop(queue)
+                meta = {"reviewer": r, "ok": r not in fail + timeout, "timed_out": r in timeout, "duration": t}
                 res = None if r in fail + timeout else (results or {}).get(r, {"verdict": "approve", "summary": "",
                                                                                 "findings": []})
                 out[r] = (meta, res)
-                on_done(r, meta)
+                for n, (p, c, d) in (on_done(r, meta) or {}).items():
+                    start({n: p}, {n: c}, d)
             return out
         return run_all
 
@@ -543,6 +553,43 @@ class Fallback(HookRig, unittest.TestCase):
         from tagteam import limits
         _, run = self.review(fail=("agy",), write=("copilot",))
         self.assertEqual((sorted(limits.disabled()), run["disabled"]), (["copilot"], ["copilot"]))
+
+    def test_fast_failure_next_to_a_slow_reviewer_gets_its_fallback_at_once(self):
+        self.unrig()
+        self.rig(use_toml(["agy", "codex", "copilot"]))
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+        pathlib.Path(self.repo, "f.py").write_text("a = 1\n" * 200)          # large: two reviewers
+        with mock.patch.object(runner, "run_all", self.fake(fail=("agy",), took={"agy": 5, "codex": 200})):
+            self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        run = state.read_jsonl(state.path("runs.jsonl"))[-1]
+        self.assertEqual([sorted(c) for c in self.calls], [["agy", "codex"], ["copilot"]])
+        self.assertEqual(self.deadlines[1], self.deadlines[0] - 5)                 # measured when agy failed
+        self.assertEqual((run["fallback_for"], run["failed"]), ({"copilot": "agy"}, ["agy"]))
+
+    def test_background_review_drops_and_logs_a_fallback_with_no_sandbox(self):
+        self.unrig()
+        self.rig(use_toml(["agy", "copilot"]), small_blocks=False)
+        real = sandbox.checkouts
+
+        def no_sandbox_for_copilot(repo, tree, names, cwd=None, stale_s=7200):
+            return real(None, None, names, cwd) if names == ["copilot"] else real(repo, tree, names, cwd, stale_s)
+        with mock.patch.object(sandbox, "checkouts", no_sandbox_for_copilot):
+            _, run = self.review(fail=("agy",))
+        self.assertTrue(self.detached)
+        self.assertEqual([list(c) for c in self.calls], [["agy"]])
+        self.assertNotIn("fallback_for", run)
+        self.assertNotIn("disabled", run)
+        log = [json.loads(l) for l in state.path("tagteam.log").read_text().splitlines()]
+        self.assertIn({"fallback": "copilot", "failed": "agy"},
+                      [{k: e.get(k) for k in ("fallback", "failed")} for e in log
+                       if e["msg"] == "fallback skipped: no sandbox"])
+
+    def test_a_fallback_that_cannot_start_keeps_the_write_checks(self):
+        from tagteam import limits
+        with mock.patch.object(router, "fallback", side_effect=RuntimeError("boom")):
+            _, run = self.review(fail=("agy",), write=("agy",))
+        self.assertEqual((sorted(limits.disabled()), run["disabled"]), (["agy"], ["agy"]))
+        self.assertIn("fallback not started", state.path("tagteam.log").read_text())
 
     def test_fallback_label(self):
         run = {"reviewers": ["agy", "copilot"], "fallback_for": {"copilot": "agy"}}

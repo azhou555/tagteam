@@ -315,25 +315,34 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
                             "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "reviewers": list(plan),
                             "prior": run["prior"], "mode": mode, "background": bool(pinned), "started": now,
                             "expires": now + deadline + 60}) as update:
-            t_run = _clock()
-            outcomes = runner.run_all(jobs, cfg, works, run_dir, deadline, on_done=update)
-            subs = {}                                # one fallback per fast failure, none for a fallback
-            for bad in [r for r, (m, _) in outcomes.items() if not m.get("ok") and not m.get("timed_out")]:
-                new = deadline - (_clock() - t_run) >= 90 and router.fallback(ev.agent, cfg, set(plan) | set(subs))
-                if new:
-                    subs[new] = bad
-            if subs:
-                works.update(more.enter_context(sandbox.checkouts(repo, before, list(subs), repo or ev.cwd, stale_s)))
-                if pinned:                           # a background review never reads the live tree
-                    subs = {n: b for n, b in subs.items() if works[n] != (repo or ev.cwd)}
-            if subs:
-                state.log("reviewer failed fast; handing its work on", run_id=run_id, fallback_for=subs)
-                run.update(fallback_for=subs, reviewers=run["reviewers"] + list(subs))
-                for n, b in subs.items():
-                    plan[n] = plan[b]
-                    update(n, None)
-                outcomes.update(runner.run_all({n: ask(n) for n in subs}, cfg, {n: works[n] for n in subs}, run_dir,
-                                               deadline - (_clock() - t_run), on_done=update))
+            t_run, subs = _clock(), {}
+
+            def done(bad, meta):                     # on this thread, so plan/works/run change one at a time
+                update(bad, meta)
+                if bad in subs or meta.get("ok") or meta.get("timed_out"):   # no chains; a timeout used the time
+                    return None
+                new = None
+                try:
+                    new = deadline - (_clock() - t_run) >= 90 and router.fallback(ev.agent, cfg, set(plan))
+                    if not new:
+                        return None
+                    work = more.enter_context(sandbox.checkouts(repo, before, [new], repo or ev.cwd, stale_s))[new]
+                    if pinned and work == (repo or ev.cwd):          # a background review never reads the live tree
+                        state.log("fallback skipped: no sandbox", run_id=run_id, fallback=new, failed=bad)
+                        return None
+                    works[new], plan[new] = work, plan[bad]
+                    prompt = ask(new)
+                    update(new, None)
+                except Exception as e:               # a fallback must never cost the write checks below
+                    if new:
+                        plan.pop(new, None)
+                    state.log("fallback not started", run_id=run_id, failed=bad, error=repr(e))
+                    return None
+                subs[new] = bad
+                state.log("reviewer failed fast; handing its work on", run_id=run_id, fallback_for={new: bad})
+                run.update(fallback_for=subs, reviewers=run["reviewers"] + [new])
+                return {new: (prompt, work, deadline - (_clock() - t_run))}
+            outcomes = runner.run_all(jobs, cfg, works, run_dir, deadline, on_done=done)
         wrote = {r: sandbox.dirty(works[r], before) for r in plan if works[r] != (repo or ev.cwd)}
         guilty = {r: f"wrote in its sandbox: {', '.join(w[:5])}" for r, w in wrote.items() if w}
     seen = watch.after()

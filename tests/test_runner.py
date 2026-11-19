@@ -2,6 +2,7 @@ import json
 import pathlib
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -97,6 +98,29 @@ class RunOne(unittest.TestCase):
         self.assertEqual(runner._quota_minutes("rate limit", default), default)
         self.assertEqual(runner._quota_minutes('"retryAfterMs":1000', default), default)        # never shorter
         self.assertEqual(runner._quota_minutes('\\"retryAfterMs\\":999999999999', default), 24 * 60)
+
+
+class RunAll(unittest.TestCase):
+    def test_on_done_starts_more_jobs_while_others_run_and_all_are_joined(self):
+        started, ended, seen, done = threading.Event(), [], [], []
+
+        def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
+            if agent == "slow":
+                seen.append(started.wait(5))        # finishes only once the fallback has started
+            if agent == "fb":
+                started.set()
+                time.sleep(0.2)
+            ended.append(agent)
+            return {"reviewer": agent, "ok": agent != "bad", "deadline": deadline, "cwd": cwd}, None
+
+        def on_done(r, meta):
+            done.append(r)
+            return {"fb": ("P", "/fb", 50)} if r == "bad" else None
+        with mock.patch.object(runner, "run_one", run_one):
+            out = runner.run_all({"bad": "P", "slow": "P"}, CFG, {"bad": "/b", "slow": "/s"}, "/r", 100, on_done)
+        self.assertEqual(seen, [True])
+        self.assertEqual((sorted(out), sorted(done), sorted(ended)), (["bad", "fb", "slow"],) * 3)
+        self.assertEqual((out["fb"][0]["deadline"], out["fb"][0]["cwd"]), (50, "/fb"))
 
 
 if __name__ == "__main__":
