@@ -28,7 +28,7 @@ class Author:
 
 @dataclasses.dataclass(frozen=True)
 class Reviewer:
-    argv: Callable             # (prompt, options, workdir, deadline) -> (argv, stdin_text, output_file)
+    argv: Callable             # (prompt, options, workdir, deadline, cwd) -> (argv, stdin_text, output_file)
     parse: Callable            # (stdout, out_file) -> normalized result | None
     usage: Callable            # (stdout, workdir) -> subset of {input_tokens, output_tokens, cost_usd, premium_requests}
     reads_repo: bool = True

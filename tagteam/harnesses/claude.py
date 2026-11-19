@@ -123,7 +123,7 @@ def logged_in():
     return base.signed_in_if(pathlib.Path.home() / ".claude" / ".credentials.json")     # macOS may use the keychain
 
 
-def argv(prompt, options, workdir, deadline):
+def argv(prompt, options, workdir, deadline, cwd):
     model = options.get("model")
     out = ["claude", "-p", "--output-format", "json", "--json-schema", base.schema_path().read_text(),
            "--permission-mode", "plan", "--disallowedTools", "Write", "Edit", "NotebookEdit",

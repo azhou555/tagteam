@@ -59,7 +59,7 @@ def logged_in():
     return base.signed_in_if(pathlib.Path.home() / ".local" / "share" / "opencode" / "auth.json")
 
 
-def argv(prompt, options, workdir, deadline):
+def argv(prompt, options, workdir, deadline, cwd):
     model, effort = options.get("model"), options.get("effort")
     if model and effort:
         model += f"#{effort}"
