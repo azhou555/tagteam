@@ -215,7 +215,8 @@ Claude Code and Codex are the **primary** agents, where the user does their main
 | agy | ✅ **Verified: no quota exposed.** `-p --output-format json` returns only per-run token `usage`. `agy models` shows no quota | **Self-metered**: count runs and tokens against `daily_budget`, plus reactive detection | Approximate |
 
 **Reactive backstop (all agents):** if a reviewer's stderr or exit status matches a quota or rate-limit
-pattern, set headroom = 0 until `resets_at` (when known) or `cooldown_min`.
+pattern, set headroom = 0 for the provider's own retry-after when it sends one (OpenCode's `retryAfterMs`,
+capped at a day), else `4 × cooldown_min`.
 **Stale data:** if the live data is older than its window allows (e.g. Claude data older than 5h), fall back to the agent's
 self-metered estimate rather than trusting the old number.
 

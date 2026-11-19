@@ -24,7 +24,7 @@ BLOCK = {"verdict": "request_changes", "summary": "", "findings": [finding("bloc
 
 def fake_harness(script, result=APPROVE):
     """A reviewer 'CLI' that is just a shell script, standing in for harnesses.get."""
-    rev = Reviewer(argv=lambda prompt, options, workdir, deadline: (["sh", "-c", script], None, None),
+    rev = Reviewer(argv=lambda prompt, options, workdir, deadline, cwd: (["sh", "-c", script], None, None),
                    parse=lambda out, f: result, usage=no_usage)
     real = harnesses.get
     return lambda name: dataclasses.replace(real(name), reviewer=rev) if name == "copilot" else real(name)

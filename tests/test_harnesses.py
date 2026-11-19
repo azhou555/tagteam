@@ -36,8 +36,8 @@ class Registry(unittest.TestCase):
                      "--print-timeout", "100s", "--model", "m"], None, None),
         }
         for a, expected in want.items():
-            self.assertEqual(get(a).reviewer.argv("P", opts, "/w", 100), expected, a)
-        self.assertEqual(get("agy").reviewer.argv("P", {"effort": "high"}, "/w", 100)[0][-2:], ["--effort", "high"])
+            self.assertEqual(get(a).reviewer.argv("P", opts, "/w", 100, "/c"), expected, a)
+        self.assertEqual(get("agy").reviewer.argv("P", {"effort": "high"}, "/w", 100, "/c")[0][-2:], ["--effort", "high"])
 
     def test_shipped_fixtures_parse_as_turn_end(self):
         for a, h in ALL.items():
@@ -82,13 +82,13 @@ class OpenCode(unittest.TestCase):
 
     def test_reviewer(self):
         rv = get("opencode").reviewer
-        argv, stdin, out = rv.argv("P", {"model": "opencode/m", "effort": "high"}, "/w", 100)
+        argv, stdin, out = rv.argv("P", {"model": "opencode/m", "effort": "high"}, "/w", 100, "/c")
         self.assertEqual(argv[:5], ["env", "-u", "PWD", "OPENCODE_DISABLE_PROJECT_CONFIG=1", "OPENCODE_CONFIG_CONTENT=" + json.dumps(
             {"snapshot": False, "permissions": READ_ONLY, "agents": {"tagteam-review": {"mode": "primary", "description": "tagteam's "
                                                                  "read-only reviewer", "permissions": READ_ONLY}}})])
         self.assertEqual(argv[5:], ["opencode", "run", "--standalone", "--agent", "tagteam-review", "--title",
                                     "tagteam review", "--format", "json", "-m", "opencode/m#high", "--", "P"])
-        self.assertEqual(rv.argv("P", {"effort": "high"}, "/w", 100)[0][-2:], ["--", "P"])     # a variant needs a model
+        self.assertEqual(rv.argv("P", {"effort": "high"}, "/w", 100, "/c")[0][-2:], ["--", "P"])     # a variant needs a model
         self.assertEqual((stdin, out), (None, None))
         stdout = (FIX / "opencode-review.jsonl").read_text()
         result = rv.parse(stdout, None)

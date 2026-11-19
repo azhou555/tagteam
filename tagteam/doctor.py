@@ -96,7 +96,7 @@ def probe_one(name, cfg):
         reviewer, options = harnesses.get(name).reviewer, cfg["reviewers"].get(name, {})
         watch = sandbox.Watch(repo, tree)
         with sandbox.checkout(repo, tree, cwd=repo) as work, tempfile.TemporaryDirectory() as run_dir:
-            argv, stdin, out_file = reviewer.argv(PROBE_PROMPT, options, run_dir, PROBE_TIMEOUT_S)
+            argv, stdin, out_file = reviewer.argv(PROBE_PROMPT, options, run_dir, PROBE_TIMEOUT_S, work)
             stdout, _, _, timed_out = runner._spawn(argv, stdin, work, PROBE_TIMEOUT_S)
             after = watch.after()
             if after["git"] or after["outside"] or after["repo"]["tree"] or after["repo"]["refs"]:

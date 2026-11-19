@@ -157,7 +157,7 @@ def _run_variant(case_dir, case, variant, rubric, cwd, opts):
     prompt = rewrite(case["prompt"], rubric, case["sandbox"], cwd)
     (vdir / "prompt.txt").write_text(prompt)
     rv = harnesses.get("copilot").reviewer
-    argv, stdin, out_file = rv.argv(prompt, opts, str(vdir), 300)
+    argv, stdin, out_file = rv.argv(prompt, opts, str(vdir), 300, cwd)
     t0 = time.time()
     stdout, stderr, rc, timed_out = runner._spawn(argv, stdin, cwd, 300)
     result = None if timed_out else rv.parse(stdout, out_file)

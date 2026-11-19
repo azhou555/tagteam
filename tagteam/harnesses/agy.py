@@ -54,10 +54,22 @@ def logged_in():
     return base.signed_in_if(pathlib.Path.home() / ".gemini" / "oauth_creds.json")
 
 
-def argv(prompt, options, workdir, deadline):
+def _worktree_gitdir(cwd):
+    """A review checkout's `.git` is a file pointing at <repo>/.git/worktrees/<name>, outside agy's workspace."""
+    try:
+        line = (pathlib.Path(cwd) / ".git").read_text().strip()
+    except OSError:                                  # no .git, or a real .git directory: already in the workspace
+        return None
+    return line[len("gitdir:"):].strip() if line.startswith("gitdir:") else None
+
+
+def argv(prompt, options, workdir, deadline, cwd):
     model, effort = options.get("model"), options.get("effort")
     out = ["agy", "-p", prompt + NOTE, "--mode", "plan", "--output-format", "json", "--json-schema",
            str(base.schema_path()), "--print-timeout", f"{deadline}s"]
+    gitdir = _worktree_gitdir(cwd)
+    if gitdir:      # headless agy denies reads outside the workspace and returns nothing; it follows .git there
+        out += ["--settings", json.dumps({"permissions": {"allow": [f"read_file({gitdir})"]}})]
     return out + (["--model", model] if model else []) + (["--effort", effort] if effort else []), None, None
 
 
