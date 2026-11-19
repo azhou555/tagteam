@@ -12,7 +12,7 @@ import time
 import unittest
 from unittest import mock
 
-from tests.helpers import ALL_AGENTS, CFG, HookRig, make_repo  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
+from tests.helpers import ALL_AGENTS, CFG, HookRig, make_repo, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
 from tagteam import doctor, harnesses, heal, health, limits, quota, sandbox, state  # noqa: E402
 from tagteam.harnesses.base import TAG  # noqa: E402
 
@@ -471,6 +471,14 @@ class Wiring(HookRig, unittest.TestCase):
 
     def test_helpers_stub_the_launch(self):
         self.assertNotEqual(heal._launch.__module__, "tagteam.heal")
+
+    def test_doctor_fix_reports_a_config_error_without_a_traceback(self):
+        from tagteam import cli
+        write_user_config("[[[")
+        with mock.patch.object(heal, "tick") as t, self.assertRaises(SystemExit) as e:
+            cli.main(["doctor", "--fix"])
+        self.assertTrue(str(e.exception.code).startswith("config error: "), e.exception.code)
+        t.assert_not_called()
 
     def test_heal_command_runs_a_tick(self):
         from tagteam import cli

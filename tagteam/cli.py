@@ -36,7 +36,7 @@ def hook(agent, phase):
             return
         verdict = core.HANDLERS[ev.phase](ev, cfg)
         if ev.phase == "turn-end" and verdict and verdict.get("action") == "allow" and verdict.get("message"):
-            verdict = {**verdict, "message": verdict["message"] + health.notice()}
+            verdict = {**verdict, "message": verdict["message"] + _notice()}
         print(adapters.encode(agent, ev.phase, verdict))
         try:
             heal.maybe_start()
@@ -49,6 +49,15 @@ def hook(agent, phase):
         except Exception:
             pass
         print("{}")
+
+
+def _notice():
+    """health.notice(), or "" if it fails: an advisory line must never cost the verdict it rides on."""
+    try:
+        return health.notice()
+    except Exception as e:
+        state.log("health notice failed", error=repr(e))
+        return ""
 
 
 def background(job):
@@ -211,7 +220,11 @@ def main(argv=None):
         status(a.days)
     elif a.cmd == "doctor":
         if a.fix:
-            events = heal.tick(config.load())
+            try:
+                cfg = config.load()
+            except config.ConfigError as e:
+                sys.exit(f"config error: {e}")
+            events = heal.tick(cfg)
             print("a heal tick is already running" if events is None else
                   "\n".join(f"{e['reviewer'] or 'tagteam'} {e['action']}: {e['why']}" for e in events) or "nothing to fix")
         sys.exit(doctor.run(a.probe, a.clear))

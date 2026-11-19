@@ -446,6 +446,15 @@ class EndToEnd(HookRig, unittest.TestCase):
         self.assertTrue(outs[0].endswith(" · " + notice), outs[0])
         self.assertNotIn("⚠", outs[1])
 
+    def test_a_failing_notice_keeps_the_verdict_message(self):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+        pathlib.Path(self.repo, "f.py").write_text("x = 1\n" * 20)
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})), \
+                mock.patch.object(health, "notice", side_effect=OSError("disk")):
+            out = self.run_hook("claude", "x", self.claude("Stop", last_assistant_message="done"))
+        self.assertIn("tagteam", out.get("systemMessage", ""))
+        self.assertNotIn("hook error", state.path("tagteam.log").read_text())
+
     def test_copilot_allow_stays_silent(self):
         p = {"sessionId": "c2", "cwd": self.repo, "prompt": "write code"}
         self.run_hook("copilot", "turn-start", p)
