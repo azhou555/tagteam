@@ -86,8 +86,8 @@ routing, so a flaky `logged_in()` check can't silence a working one. A reviewer 
 then gets demoted or disabled by the existing mechanisms.
 
 **Demotion rule (builder may tune).** Computed from `history.jsonl`. A reviewer is demoted when at least 3 of its
-last 4 calls failed (timeouts count) **and** its latest call failed. Probes append history rows with
-`"probe": true`, so a passing probe or any real success clears demotion at once.
+last 4 calls failed (timeouts count) **and** its latest call failed. Probe results go to a separate `probes.jsonl`, so they never count toward load, spend or `status` tallies, and
+demotion reads both files. A passing probe or any real success clears demotion at once.
 - `ordered` mode (the default, and what the user runs): keep the user's order, but stable-sort `demoted` after `ok`.
 - `quota` mode: drop demoted reviewers from `eligible()`'s pool unless the pool would otherwise have fewer than the
   needed count.
@@ -116,7 +116,7 @@ foreground. Each tick:
    log it.
 2. **Probe** each `demoted` reviewer when its `next_probe` is due. Paused reviewers are not probed (see §1). The probe
    is `doctor.probe_one`, extended to also return the error text; `doctor`'s own output stays the same. The probe's
-   history row has `"probe": true`.
+   result is appended to `probes.jsonl`.
    - Pass: the demotion clears (§1).
    - Error matching an auth pattern (`unauthori[sz]ed|not logged in|log ?in|\b40[13]\b|authenticat|credentials`):
      `needs_you`.
