@@ -24,7 +24,8 @@ def _active_dir():
 
 @contextlib.contextmanager
 def tracking(rec):
-    """Publish `rec` as a running review until the block exits; yields update(reviewer, meta)."""
+    """Publish `rec` as a running review until the block exits; yields update(reviewer, meta), which also takes a
+    reviewer not in `rec` (a fallback)."""
     d = _active_dir()
     lock_path, json_path = d / f"{rec['run_id']}.lock", d / f"{rec['run_id']}.json"
     rec = {**rec, "pid": os.getpid(), "reviewers": {r: {"state": "running"} for r in rec["reviewers"]}}
@@ -33,8 +34,9 @@ def tracking(rec):
         state.write_json(json_path, rec)
 
         def update(reviewer, meta):
-            rec["reviewers"][reviewer] = {"state": "done" if meta.get("ok") else "failed",
-                                          "secs": meta.get("duration")}
+            rec["reviewers"][reviewer] = ({"state": "running"} if meta is None else        # None: a fallback starts
+                                          {"state": "done" if meta.get("ok") else "failed",
+                                           "secs": meta.get("duration")})
             state.write_json(json_path, rec)
         try:
             yield update
@@ -211,6 +213,12 @@ KINDS = {
 REASONS = {"no reviewers configured": "no reviewers configured; run tagteam install"}
 
 
+def reviewer_label(run, name):
+    """`copilot (for agy)` for a fallback, else the name."""
+    bad = run.get("fallback_for", {}).get(name)
+    return f"{name} (for {bad})" if bad else name
+
+
 def outcome(run):
     """(kind, detail) for a finished run, in plain words. `prior` is how many issues were open going in."""
     prior, m = run.get("prior") or 0, run.get("max_rounds")
@@ -282,10 +290,11 @@ class Paint:
         """An agent's name (or `text`, e.g. the name padded) in that agent's color."""
         return self.fg(AGENTS.get(name, BRAND)["ansi"], name if text is None else text)
 
-    def agents(self, names, width=0):
-        """Comma-joined agent names, each in its color, padded to `width` as if uncolored; "-" for none."""
-        plain = ",".join(names) or "-"
-        return (",".join(self.agent(n) for n in names) or "-") + " " * (width - len(plain))
+    def agents(self, names, width=0, label=str):
+        """Comma-joined agent names (as `label` words them), each in its color, padded to `width` as if
+        uncolored; "-" for none."""
+        plain = ",".join(map(label, names)) or "-"
+        return (",".join(self.agent(n, label(n)) for n in names) or "-") + " " * (width - len(plain))
 
     def kind(self, kind, text):
         return self.fg(KINDS[kind]["ansi"], text)
@@ -439,7 +448,7 @@ def render_watch(now=None, recent=5, color=False):
     for r in week[-recent:][::-1]:
         kind = outcome(r)[0]
         lines.append(f"  {_when(r['ts'], now):9}  {paint.agents([r['author']], 7)} -> "
-                     f"{paint.agents(r['reviewers'], 14)} "
+                     f"{paint.agents(r['reviewers'], 14, lambda n: reviewer_label(r, n))} "
                      f"{paint.kind(kind, summary(r))}  ({_mode(r)}, {_dur(r['duration'])})")
     if not week:
         lines.append("  none")
@@ -525,7 +534,7 @@ def render_swiftbar(now=None, recent=8):
     for r in week[-recent:][::-1]:
         kind_r = outcome(r)[0]
         run_dir = state.path("runs", r["run_id"], "x").parent
-        who = f"{_dot(r['author'])} → {', '.join(map(_dot, r['reviewers'])) or '—'}"
+        who = f"{_dot(r['author'])} → {', '.join(_dot(reviewer_label(r, n)) for n in r['reviewers']) or '—'}"
         lines.append(_sb_agents(f"{_when(r['ts'], now):9}  {who}: {summary(r)} · {_mode(r)}",
                                 [r["author"], *r["reviewers"]],
                                 color=KINDS[kind_r]["hex"], bash="/usr/bin/open", param1=f'"{run_dir}"',

@@ -103,6 +103,16 @@ class Routing(unittest.TestCase):
                 self.assertEqual(router.route("claude", {"code": [art("a.py")]}, cfg, FULL, {}),
                                  ({}, "no reviewers configured"))
 
+    def test_fallback_skips_taken_cooling_and_author(self):
+        cfg = cfg_with(["claude", "codex", "agy", "copilot"])
+        with mock.patch.object(quota, "cooling", side_effect=lambda a, now=None: a == "agy"):
+            self.assertEqual(router.fallback("claude", cfg, {"codex"}), "copilot")
+            self.assertIsNone(router.fallback("claude", cfg, {"codex", "copilot"}))
+        self.assertEqual(router.fallback("claude", cfg, {"codex"}), "agy")         # control: agy not cooling
+        with mock.patch.object(health, "is_demoted", side_effect=lambda a: a == "agy"):
+            self.assertEqual(router.fallback("claude", cfg, {"codex"}), "copilot")  # ok before demoted
+            self.assertEqual(router.fallback("claude", cfg, {"codex", "copilot"}), "agy")
+
     def test_undetected_listed_agent_is_unavailable(self):
         with mock.patch.object(harnesses, "detected", return_value=["claude"]):
             self.assertEqual(router.route("claude", {"code": [art("a.py")]}, cfg_with(["codex"]), FULL, {}),

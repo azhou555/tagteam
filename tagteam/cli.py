@@ -128,7 +128,8 @@ def status(days):
     if runs:
         print("\nRecent runs:")
         for r in runs[-5:]:
-            print(f"  {r['run_id']}  {r['author']:7} -> {','.join(r['reviewers']) or '-':20} {live.summary(r)}"
+            who = ",".join(live.reviewer_label(r, n) for n in r["reviewers"]) or "-"
+            print(f"  {r['run_id']}  {r['author']:7} -> {who:20} {live.summary(r)}"
                   f"  ({live._mode(r)})")
 
 

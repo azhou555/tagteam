@@ -459,6 +459,83 @@ class EndToEnd(HookRig, unittest.TestCase):
         self.assertFalse(state.path("sessions", "copilot-sub1.json").exists())
 
 
+class Fallback(HookRig, unittest.TestCase):
+    """A planned reviewer that fails fast hands its work to the next healthy listed one, in the same run."""
+
+    def setUp(self):
+        self.rig(use_toml(["agy", "copilot"]))
+        self.cwds, self.deadlines, self.clock = [], [], [1000.0]
+        p = mock.patch.object(core, "_clock", lambda: self.clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def tearDown(self):
+        self.unrig()
+
+    def fake(self, fail=(), timeout=(), write=(), took=5, results=None):
+        def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
+            self.calls.append(jobs)
+            self.cwds.append(cwd)
+            self.deadlines.append(deadline)
+            self.clock[0] += took
+            out = {}
+            for r in jobs:
+                if r in write:
+                    pathlib.Path(cwd[r], "scribble.py").write_text("x = 2\n")
+                meta = {"reviewer": r, "ok": r not in fail + timeout, "timed_out": r in timeout, "duration": took}
+                res = None if r in fail + timeout else (results or {}).get(r, {"verdict": "approve", "summary": "",
+                                                                                "findings": []})
+                out[r] = (meta, res)
+                on_done(r, meta)
+            return out
+        return run_all
+
+    def review(self, **kw):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+        pathlib.Path(self.repo, "f.py").write_text("a = 1\n" * 20)
+        with mock.patch.object(runner, "run_all", self.fake(**kw)):
+            out = self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        return out, state.read_jsonl(state.path("runs.jsonl"))[-1]
+
+    def test_fast_failure_gets_fallback(self):
+        bad = {"verdict": "changes_requested", "summary": "", "findings": [finding(file="f.py", line=2)]}
+        out, run = self.review(fail=("agy",), results={"copilot": bad})
+        self.assertEqual([list(c) for c in self.calls], [["agy"], ["copilot"]])
+        self.assertIn("copilot", self.calls[1]["copilot"])
+        self.assertNotIn(self.cwds[1]["copilot"], (self.repo, self.cwds[0]["agy"]))   # its own checkout
+        self.assertEqual(self.deadlines[1], self.deadlines[0] - 5)
+        self.assertEqual((run["fallback_for"], run["reviewers"], run["failed"]),
+                         ({"copilot": "agy"}, ["agy", "copilot"], ["agy"]))
+        self.assertNotEqual(live.outcome(run)[0], "failed")
+        self.assertEqual(out["decision"], "block")                          # copilot's finding reached the verdict
+        self.assertIn("off by one in loop", out["reason"])
+        for shown in (live.render_watch(), live.render_swiftbar()):
+            self.assertIn("copilot (for agy)", shown)
+
+    def test_timeout_gets_no_fallback(self):
+        _, run = self.review(timeout=("agy",))
+        self.assertEqual(len(self.calls), 1)
+        self.assertNotIn("fallback_for", run)
+
+    def test_no_fallback_under_90s_left(self):
+        self.review(fail=("agy",), took=160)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_failed_fallback_does_not_chain(self):
+        _, run = self.review(fail=("agy", "copilot"))
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(live.outcome(run)[0], "failed")
+
+    def test_fallback_that_writes_is_disabled(self):
+        from tagteam import limits
+        _, run = self.review(fail=("agy",), write=("copilot",))
+        self.assertEqual((sorted(limits.disabled()), run["disabled"]), (["copilot"], ["copilot"]))
+
+    def test_fallback_label(self):
+        run = {"reviewers": ["agy", "copilot"], "fallback_for": {"copilot": "agy"}}
+        self.assertEqual([live.reviewer_label(run, r) for r in run["reviewers"]], ["agy", "copilot (for agy)"])
+
+
 class GitActivity(unittest.TestCase):
     def commit(self, repo, msg):
         sh(repo, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", msg)

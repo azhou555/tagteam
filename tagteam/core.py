@@ -1,4 +1,5 @@
 """Hook phase handlers: turn-start snapshots, touch ledger, turn-end review, plan gate."""
+import contextlib
 import dataclasses
 import os
 import pathlib
@@ -293,7 +294,8 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         outside = sorted({p for p in s.get("touched", []) if os.path.isabs(p)} | {a["path"] for a in artifacts if os.path.isabs(a["path"])})
         before = changes.snapshot(repo) if repo else None
         watch = sandbox.Watch(repo, before, [p for p in outside if not changes.in_repo(p, repo)])
-    with sandbox.checkouts(repo, before, list(plan), repo or ev.cwd, max(7200, 2 * rv["deadline_s"])) as works:   # one disposable tree each
+    stale_s = max(7200, 2 * rv["deadline_s"])
+    with sandbox.checkouts(repo, before, list(plan), repo or ev.cwd, stale_s) as works, contextlib.ExitStack() as more:
         setup = _clock() - started                   # snapshots, stale sweep, worktree adds: all inside the hook timeout
         skip = (SLOW_SETUP if setup > min(60, rv["deadline_s"] / 2) else
                 NO_SANDBOX if pinned and any(works[r] == (repo or ev.cwd) for r in plan) else None)
@@ -303,17 +305,35 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
             live.record_run(run)
             return "allow", completion(run, lines_changed), run_dir, None
         deadline = rv["deadline_s"] - setup
-        jobs = {r: runner.build_prompt(r, ev.agent, works[r], s.get("prompt", ""), ts, rv["max_diff_chars"],
-                                       prior=s.get("prior") or None, author_reply=ev.last_message,
-                                       git_activity=git_activity)
-                for r, ts in plan.items()}
-        if repo:                                     # intent, replies and findings may quote the real path
-            jobs = {r: swap_root(p, repo, works[r]) for r, p in jobs.items()}
+        def ask(r):                                  # intent, replies and findings may quote the real path
+            p = runner.build_prompt(r, ev.agent, works[r], s.get("prompt", ""), plan[r], rv["max_diff_chars"],
+                                    prior=s.get("prior") or None, author_reply=ev.last_message,
+                                    git_activity=git_activity)
+            return swap_root(p, repo, works[r]) if repo else p
+        jobs = {r: ask(r) for r in plan}
         with live.tracking({"run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
                             "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "reviewers": list(plan),
                             "prior": run["prior"], "mode": mode, "background": bool(pinned), "started": now,
                             "expires": now + deadline + 60}) as update:
+            t_run = _clock()
             outcomes = runner.run_all(jobs, cfg, works, run_dir, deadline, on_done=update)
+            subs = {}                                # one fallback per fast failure, none for a fallback
+            for bad in [r for r, (m, _) in outcomes.items() if not m.get("ok") and not m.get("timed_out")]:
+                new = deadline - (_clock() - t_run) >= 90 and router.fallback(ev.agent, cfg, set(plan) | set(subs))
+                if new:
+                    subs[new] = bad
+            if subs:
+                works.update(more.enter_context(sandbox.checkouts(repo, before, list(subs), repo or ev.cwd, stale_s)))
+                if pinned:                           # a background review never reads the live tree
+                    subs = {n: b for n, b in subs.items() if works[n] != (repo or ev.cwd)}
+            if subs:
+                state.log("reviewer failed fast; handing its work on", run_id=run_id, fallback_for=subs)
+                run.update(fallback_for=subs, reviewers=run["reviewers"] + list(subs))
+                for n, b in subs.items():
+                    plan[n] = plan[b]
+                    update(n, None)
+                outcomes.update(runner.run_all({n: ask(n) for n in subs}, cfg, {n: works[n] for n in subs}, run_dir,
+                                               deadline - (_clock() - t_run), on_done=update))
         wrote = {r: sandbox.dirty(works[r], before) for r in plan if works[r] != (repo or ev.cwd)}
         guilty = {r: f"wrote in its sandbox: {', '.join(w[:5])}" for r, w in wrote.items() if w}
     seen = watch.after()
