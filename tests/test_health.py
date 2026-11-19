@@ -1,3 +1,4 @@
+import threading
 import time
 import unittest
 
@@ -56,6 +57,27 @@ class Health(unittest.TestCase):
     def test_save_load_roundtrip(self):
         health.save({"last_tick": 1.0, "reviewers": {}})
         self.assertEqual(health.load()["last_tick"], 1.0)
+
+    def test_update_holds_the_lock_across_read_and_write(self):
+        def bump(d):
+            time.sleep(0.001)                        # widen the read-modify-write window
+            return {**d, "n": d.get("n", 0) + 1}
+        ts = [threading.Thread(target=lambda: [health.update(bump) for _ in range(20)]) for _ in range(6)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(health.load()["n"], 120)
+        self.assertIsNone(health.update(lambda d: None))                       # None: nothing written
+        self.assertEqual(health.load()["n"], 120)
+
+    def test_last_real_call_ok_reads_history_only(self):
+        self.assertFalse(health.last_real_call_ok("agy"))
+        hist("agy", [True, False])
+        health.note_probe("agy", True, "probe")
+        self.assertFalse(health.last_real_call_ok("agy"))
+        state.append_jsonl(state.path("history.jsonl"), {"ts": time.time(), "reviewer": "agy", "ok": True})
+        self.assertTrue(health.last_real_call_ok("agy"))
 
     def test_events_roundtrip(self):
         health.event("agy", "demoted", "3 of 4 failed")

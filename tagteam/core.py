@@ -294,7 +294,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         outside = sorted({p for p in s.get("touched", []) if os.path.isabs(p)} | {a["path"] for a in artifacts if os.path.isabs(a["path"])})
         before = changes.snapshot(repo) if repo else None
         watch = sandbox.Watch(repo, before, [p for p in outside if not changes.in_repo(p, repo)])
-    stale_s = max(7200, 2 * rv["deadline_s"])
+    stale_s = sandbox.stale_s(cfg)
     with sandbox.checkouts(repo, before, list(plan), repo or ev.cwd, stale_s) as works, contextlib.ExitStack() as more:
         setup = _clock() - started                   # snapshots, stale sweep, worktree adds: all inside the hook timeout
         skip = (SLOW_SETUP if setup > min(60, rv["deadline_s"] / 2) else

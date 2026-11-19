@@ -1,5 +1,6 @@
 import contextlib
 import dataclasses
+import datetime
 import io
 import json
 import os
@@ -260,9 +261,83 @@ class Tick(Rig, unittest.TestCase):
         with mock.patch("time.time", return_value=time.time() - 10 * DAY):
             limits.disable("copilot", "x", "r1", repo=self.repo)
         self.result["copilot"] = self.canary(during=lambda: limits.disable("copilot", "x", "r2", repo=self.repo))
-        heal.tick(cfg())
+        t0 = time.time()
+        events = heal.tick(cfg(), now=t0)
         self.assertIn("copilot", limits.disabled())
         self.assertIs(limits.trips()["copilot"]["latched"], False)
+        self.assertEqual(rev("copilot")["next_probe"], t0 + 15 * 60)         # clean but not re-enabled: back off
+        self.assertIs(state.read_jsonl(state.path("probes.jsonl"))[-1]["ok"], False)
+        self.assertIn("not re-enabled copilot", acts(events))
+
+    def test_probe_that_raises_backs_off_and_counts_toward_the_copilot_cap(self):
+        demote("copilot")
+        self.result["copilot"] = lambda n, f: b"\xff".decode()             # after the request was spent
+        t = [datetime.datetime.combine(datetime.date.today(), datetime.time(1)).timestamp()]
+        with mock.patch("time.time", lambda: t[0]):
+            heal.tick(cfg(use=["copilot"]), now=t[0])
+            self.assertEqual(rev("copilot")["probe_backoff_min"], 15)
+            for _ in range(7):                                                # all due, all before midnight
+                t[0] = rev("copilot")["next_probe"]
+                heal.tick(cfg(use=["copilot"]), now=t[0])
+        self.assertEqual(len(self.probes), heal.COPILOT_PER_DAY)
+        self.assertEqual(len(state.read_jsonl(state.path("probes.jsonl"))), heal.COPILOT_PER_DAY)
+
+    def test_backoff_is_saved_when_a_later_step_raises(self):
+        demote("agy")
+        self.result["agy"] = ("timeout", "")
+        t0 = time.time()
+        def boom(*a):
+            raise RuntimeError("boom")
+        with mock.patch.object(heal, "_authors", boom):
+            heal.tick(cfg(), now=t0)
+        self.assertEqual((rev("agy")["probe_backoff_min"], health.load()["last_tick"]), (15, t0))
+        heal.tick(cfg(), now=t0 + 60)
+        self.assertEqual(len(self.probes), 1)
+
+    def test_canary_seed_error_is_inconclusive_and_spares_the_others(self):
+        bad = make_repo()
+        pathlib.Path(bad, ".mcp.json").write_bytes(b'{"x": "\xff"}')
+        git(bad, "add", "-A")
+        git(bad, "commit", "-qm", "latin-1")
+        limits.disable("copilot", "x", "r1", repo=bad)
+        limits.disable("codex", "x", "r2", repo=self.repo)
+        self.result["codex"] = self.canary()
+        t0 = time.time()
+        events = heal.tick(cfg(), now=t0)
+        self.assertEqual(self.probes, [("codex", True)])
+        self.assertIn("re-enabled codex", acts(events))
+        self.assertEqual((rev("copilot")["status"], rev("copilot")["next_probe"]), ("disabled", t0 + 15 * 60))
+        row = next(r for r in state.read_jsonl(state.path("probes.jsonl")) if r["reviewer"] == "copilot")
+        self.assertIn("inconclusive", row["detail"])
+
+    def test_cooling_reviewer_gets_no_canary(self):
+        limits.disable("copilot", "x", "r1", repo=self.repo)
+        quota.cooldown("copilot", 60)
+        heal.tick(cfg())
+        self.assertEqual(self.probes, [])
+
+    def test_probe_pass_keeps_backoff_until_a_real_success(self):
+        demote("agy")
+        t, seen = time.time(), []
+        for _ in range(3):                         # passes the probe, then fails real work again
+            heal.tick(cfg(), now=t)
+            seen.append(rev("agy")["probe_backoff_min"])
+            for _ in range(2):
+                state.append_jsonl(state.path("history.jsonl"), {"ts": time.time(), "reviewer": "agy", "ok": False})
+            heal.tick(cfg(), now=t + 60)
+            self.assertEqual(rev("agy")["status"], "demoted")                  # demoted again, but not yet due
+            t = rev("agy")["next_probe"]
+        self.assertEqual((seen, len(self.probes)), ([15, 30, 60], 3))
+        state.append_jsonl(state.path("history.jsonl"), {"ts": time.time(), "reviewer": "agy", "ok": True})
+        heal.tick(cfg(), now=t)
+        self.assertNotIn("probe_backoff_min", rev("agy"))
+        self.assertNotIn("next_probe", rev("agy"))
+
+    def test_future_last_tick_is_not_kept(self):
+        now = time.time()
+        health.save({"last_tick": now + 3600})
+        heal.tick(cfg(), now=now)
+        self.assertEqual(health.load()["last_tick"], now)
 
     def test_prune_worktrees_under_registry_lock(self):
         repo = make_repo()
@@ -294,8 +369,9 @@ class Tick(Rig, unittest.TestCase):
         self.assertEqual(heal.tick(cfg()), [])
 
     def test_migrated_entry_finds_its_repo_through_request_json(self):
+        ts = time.time() - 10 * DAY
         state.write_json(state.path("disabled.json"), {"copilot": {"reason": "wrote x (run 20261101T000000-ab12)",
-                                                                   "ts": time.time() - 10 * DAY}})
+                                                                   "ts": ts}})
         self.result["copilot"] = self.canary(status="timeout")
         heal.tick(cfg())
         self.assertEqual(rev("copilot")["status"], "needs_you")             # its run dir was pruned: no repo
@@ -305,6 +381,8 @@ class Tick(Rig, unittest.TestCase):
         heal.tick(cfg())
         self.assertEqual((self.probes, self.probed_repo), ([("copilot", True)], self.repo))
         self.assertEqual(rev("copilot")["status"], "disabled")
+        entry = limits.disabled()["copilot"]
+        self.assertEqual((entry["repo"], entry["ts"]), (self.repo, ts))                # kept for after pruning
 
 
 GOOD = json.dumps({"structured_output": {"verdict": "approve", "summary": "", "findings": []}})
@@ -418,6 +496,30 @@ class CanaryInRepo(Rig, unittest.TestCase):
         self.assertEqual(self.probe_kw[0]["stale_s"], 10000)
         self.assertEqual(calls[0], 10000)
 
+    def test_real_repo_change_during_canary_is_logged_and_inconclusive(self):
+        self.run_hooks = lambda cwd: pathlib.Path(self.repo, "notes.txt").write_text("the user's\n")
+        limits.disable("claude", "x", "r1", repo=self.repo)
+        t0 = time.time()
+        events = heal.tick(cfg(use=["claude"]), now=t0)
+        self.assertIn("claude", limits.disabled())
+        self.assertIs(limits.trips()["claude"]["latched"], False)
+        self.assertEqual(rev("claude")["next_probe"], t0 + 15 * 60)
+        self.assertIn({"reviewer": "claude", "action": "canary inconclusive",
+                       "why": f"{self.repo} changed during the test"}, events)
+        log = [json.loads(l) for l in state.path("tagteam.log").read_text().splitlines()]
+        self.assertIn(["notes.txt"], [e.get("changed") for e in log if e["msg"] == "canary: real repo changed"])
+
+    def test_canary_trap_landing_in_the_real_repo_latches(self):
+        def escape(cwd):
+            pathlib.Path(self.repo, ".github/hooks").mkdir(parents=True)
+            pathlib.Path(self.repo, ".github/hooks/tagteam-canary.json").write_text("{}")
+        self.run_hooks = escape
+        with mock.patch("time.time", return_value=time.time() - 10 * DAY):
+            limits.disable("claude", "x", "r1", repo=self.repo)
+        heal.tick(cfg(use=["claude"]))
+        self.assertIs(limits.trips()["claude"]["latched"], True)
+        self.assertEqual(rev("claude")["status"], "needs_you")
+
 
 class Start(unittest.TestCase):
     def setUp(self):
@@ -447,6 +549,12 @@ class Start(unittest.TestCase):
         self.assertEqual(self.launched, [])
         self.assertTrue(heal.maybe_start(now + heal.TICK_S))
         self.assertEqual(health.load()["last_tick"], now + heal.TICK_S)
+
+    def test_future_last_tick_is_due(self):
+        now = time.time()
+        health.save({"last_tick": now + 3600, "noticed": {"x": 1}})
+        self.assertTrue(heal.maybe_start(now))
+        self.assertEqual(health.load(), {"last_tick": now, "noticed": {"x": 1}})
 
     def test_maybe_start_never_raises(self):
         state.path("health.json").write_text('{"last_tick": "garbage"}')

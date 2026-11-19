@@ -22,7 +22,8 @@ COPILOT_PER_DAY = 4             # premium requests
 BACKOFF_MIN, BACKOFF_MAX = 15, 360
 KEEP_RUNS_S = 30 * 86400
 RECENT_S = 7 * 86400
-CLEAR_STATE = ("next_probe", "probe_backoff_min", "auth", "gone")
+BACKOFF = ("next_probe", "probe_backoff_min")     # kept through a probe pass; cleared by a real success
+TRAP = "tagteam-canary"                           # prefix of every canary trap and marker file name
 
 
 def _try_lock(name):
@@ -53,17 +54,19 @@ def maybe_start(now=None):
         if f is None:
             return False
         with f:
-            h = health.load()
-            last = h.get("last_tick")
-            if isinstance(last, (int, float)) and now - last < TICK_S:
+            if health.update(lambda h: None if _recent(h.get("last_tick"), now) else {**h, "last_tick": now}) is None:
                 return False
-            health.save({**h, "last_tick": now})
         _launch()
         return True
     except Exception as e:
         with contextlib.suppress(Exception):
             state.log("heal tick not started", error=repr(e))
         return False
+
+
+def _recent(last, now):
+    """A tick stamped less than TICK_S ago. A future stamp (the clock went back) doesn't count."""
+    return isinstance(last, (int, float)) and 0 <= now - last < TICK_S
 
 
 def _section(d, key):
@@ -88,26 +91,30 @@ def tick(cfg, now=None):
         def note(who, action, reason):
             health.event(who, action, reason)
             events.append({"reviewer": who, "action": action, "why": reason})
-        found = harnesses.detected()
-        _refresh(use, revs, found, now, note, why)                          # 1. needs-you and status changes
-        budget = [MAX_PROBES]
-        for step in (_probe_demoted, _canary_disabled):                     # 2. probes, 3. canaries
-            try:
-                step(cfg, use, revs, found, now, budget, why)
-            except Exception as e:
-                state.log("heal step failed", step=step.__name__, error=repr(e))
-        try:                                                                # 4. prune
-            if gone := _prune(cfg, now):
-                note(None, "pruned", f"{gone} run dirs older than 30 days")
-        except Exception as e:
-            state.log("heal prune failed", error=repr(e))
-        _refresh(use, revs, found, now, note, why)                          # 5. record
-        _authors(cfg, found, authors, now, note)
-        cur = health.load()
-        last = cur.get("last_tick")
-        health.save({**cur, "reviewers": {n: revs[n] for n in use}, "authors": authors,
-                     "last_tick": max(now, last) if isinstance(last, (int, float)) else now})
+        found, budget = harnesses.detected(), [MAX_PROBES]
+        try:
+            _safely(_refresh, use, revs, found, now, note, why)            # 1. needs-you and status changes
+            for step in (_probe_demoted, _canary_disabled):                 # 2. probes, 3. canaries
+                _safely(step, cfg, use, revs, found, now, budget, why, note)
+            _safely(_prune, cfg, now, note)                                 # 4. prune
+            _safely(_refresh, use, revs, found, now, note, why)             # 5. record
+            _safely(_authors, cfg, found, authors, now, note)
+        finally:                                                            # a probe's backoff must outlive any error
+            health.update(lambda cur: {**cur, "reviewers": {n: revs[n] for n in use}, "authors": authors,
+                                       "last_tick": _stamp(cur.get("last_tick"), now)})
         return events
+
+
+def _safely(step, *args):
+    try:
+        step(*args)
+    except Exception as e:
+        state.log("heal step failed", step=step.__name__, error=repr(e))
+
+
+def _stamp(last, now):
+    """The last_tick to save: one a hook wrote while this tick ran, else `now`; a future one is dropped."""
+    return last if isinstance(last, (int, float)) and now < last <= time.time() else now
 
 
 def _status(name, e, found, off, eligible, trips_ok):
@@ -137,7 +144,7 @@ def _refresh(use, revs, found, now, note, why):
         status, reason = _status(n, e, found, off, eligible, trips_ok)
         _transition(n, e, status, reason, now, note, why.pop(n, None))
         if status == "ok":
-            for k in CLEAR_STATE:
+            for k in ("auth", "gone") + (BACKOFF if health.last_real_call_ok(n) else ()):
                 e.pop(k, None)
 
 
@@ -194,7 +201,7 @@ def _may_probe(name, e, found, now, budget):
     return True
 
 
-def _probe_demoted(cfg, use, revs, found, now, budget, why):
+def _probe_demoted(cfg, use, revs, found, now, budget, why, note):
     off = limits.disabled()
     for n in use:
         e = revs[n]
@@ -203,21 +210,25 @@ def _probe_demoted(cfg, use, revs, found, now, budget, why):
             continue
         if not _may_probe(n, e, found, now, budget):
             continue
-        status, err = doctor.probe(n, cfg)
-        health.note_probe(n, status == "ok", "probe", "" if status == "ok" else f"{status}: {err}"[-300:])
+        try:
+            status, err = doctor.probe(n, cfg)
+        except Exception as x:                       # the request may be spent: it counts, and backs off
+            state.log("probe failed", reviewer=n, error=repr(x))
+            status, err = "failed", repr(x)
+        _back_off(e, now)                            # a pass too: if real work demotes it again, the next probe waits
         if status == "ok":
             why[n] = "probe passed"
-            continue
-        if AUTH_ERR.search(err or ""):
+        elif AUTH_ERR.search(err or ""):
             e["auth"] = f"auth error on probe ({(err.strip().splitlines() or [''])[-1][:80]}) → log in to {n}"
         else:
             e.pop("auth", None)
-        _back_off(e, now)
+        health.note_probe(n, status == "ok", "probe", "" if status == "ok" else f"{status}: {err}"[-300:])
 
 
-def _canary_disabled(cfg, use, revs, found, now, budget, why):
+def _canary_disabled(cfg, use, revs, found, now, budget, why, note):
     """Re-test in a sandbox worktree of the repo the trip happened in, with every known trap added. A clean canary
-    needs a parsed review, no marker and a clean sandbox; a marker or a write latches. No repo: no canary."""
+    needs a parsed review, no marker and a clean sandbox; a marker or a write latches. No repo or a quota cooldown:
+    no canary. Anything but a re-enable backs off."""
     eligible = limits.canary_eligible()
     for n in use:
         e = revs[n]
@@ -229,28 +240,46 @@ def _canary_disabled(cfg, use, revs, found, now, budget, why):
             continue
         e.pop("gone", None)
         trips = limits.trip_count(n)
-        if trips is None or not _may_probe(n, e, found, now, budget):
+        if trips is None or quota.cooling(n) or not _may_probe(n, e, found, now, budget):
             continue
-        marker_dir = tempfile.mkdtemp(prefix="tagteam-canary-")
+        marker_dir = tempfile.mkdtemp(prefix=f"{TRAP}-")
         try:
-            status, err = doctor.probe(n, cfg, repo=repo, files=canary_seed(repo, marker_dir),
-                                       stale_s=max(7200, 2 * cfg["review"]["deadline_s"]))
-            try:
-                marks = sorted(os.listdir(marker_dir))
-            except OSError:
-                marks = None                         # can't tell: inconclusive
+            detail = _canary(n, cfg, repo, marker_dir, trips, note)
+        except Exception as x:                       # e.g. a non-UTF-8 config at HEAD: inconclusive, like any error
+            state.log("canary failed", reviewer=n, error=repr(x))
+            detail = f"inconclusive: {x!r}"
         finally:
             shutil.rmtree(marker_dir, ignore_errors=True)
-        if marks or status == "wrote-files":
-            health.note_probe(n, False, "canary", f"wrote: {', '.join(marks or [status])}")
-            limits.disable(n, "wrote in canary", run_id="canary", latch=True, repo=repo)
-        elif status == "ok" and marks == []:
-            health.note_probe(n, True, "canary")
-            if limits.reenable(n, trips):
-                why[n] = "canary clean"
+        if detail is None:
+            why[n] = "canary clean"
         else:
-            health.note_probe(n, False, "canary", f"inconclusive: {status}: {err}"[-300:])
             _back_off(e, now)
+        health.note_probe(n, detail is None, "canary", (detail or "")[-300:])
+
+
+def _canary(name, cfg, repo, marker_dir, trips, note):
+    """One canary: None if it came back clean and `name` is re-enabled, else the probes.jsonl detail. Our own trap
+    or marker file turning up in the real repo is a write; any other real-repo change is inconclusive."""
+    status, err = doctor.probe(name, cfg, repo=repo, files=canary_seed(repo, marker_dir), stale_s=sandbox.stale_s(cfg))
+    try:
+        marks = sorted(os.listdir(marker_dir))
+    except OSError:
+        marks = None                                 # can't tell: inconclusive
+    changed = err.splitlines() if status == doctor.REPO_CHANGED else []
+    if changed:
+        state.log("canary: real repo changed", reviewer=name, repo=repo, changed=changed[:50])
+    escaped = [p for p in changed if os.path.basename(p).startswith(TRAP)]
+    if marks or escaped or status == "wrote-files":
+        limits.disable(name, "wrote in canary", run_id="canary", latch=True, repo=repo)
+        return f"wrote: {', '.join(marks or escaped or [status])}"
+    if status == "ok" and marks == []:
+        if limits.reenable(name, trips):
+            return None
+        note(name, "not re-enabled", "canary clean, but a newer trip or a latch keeps it off")
+        return "clean, but not re-enabled"
+    if changed:
+        note(name, "canary inconclusive", f"{repo} changed during the test")
+    return f"inconclusive: {status}: {err}"
 
 
 def _trip_repo(name):
@@ -260,16 +289,18 @@ def _trip_repo(name):
     e, h = d.get(name), t.get(name)
     e = e if isinstance(e, dict) else {}
     last = next((x for x in reversed(h.get("trips") or []) if isinstance(x, dict)), {}) if isinstance(h, dict) else {}
-    repo = e.get("repo") or last.get("repo")
+    repo, via_run = e.get("repo") or last.get("repo"), False
     if not repo:
         m = re.search(r"\(run ([\w-]+)\)", str(e.get("reason", "")))
         run_id = last.get("run_id") or (m and m.group(1))
         if isinstance(run_id, str) and re.fullmatch(r"[\w-]+", run_id):
             req = state.read_json(state.path("runs", run_id, "request.json"), {})
-            repo = req.get("repo") if isinstance(req, dict) else None
-    if isinstance(repo, str) and os.path.isdir(repo) and changes.repo_root(repo):
-        return repo
-    return None
+            repo, via_run = req.get("repo") if isinstance(req, dict) else None, True
+    if not (isinstance(repo, str) and os.path.isdir(repo) and changes.repo_root(repo)):
+        return None
+    if via_run:
+        limits.set_repo(name, repo)                  # before pruning takes the run dir
+    return repo
 
 
 def _json_at(repo, rel):
@@ -288,8 +319,8 @@ def canary_seed(repo, marker_dir):
     """{path: text}: the repo's own agent config at HEAD with every write trap seen so far added (each touches a
     file in `marker_dir` if it runs). A file that isn't a JSON object is left as the repo has it."""
     def touch(name):
-        return f"touch {shlex.quote(os.path.join(marker_dir, name))}"
-    out = {".github/hooks/tagteam-canary.json": json.dumps({"version": 1, "hooks": {
+        return f"touch {shlex.quote(os.path.join(marker_dir, f'{TRAP}-{name}'))}"
+    out = {f".github/hooks/{TRAP}.json": json.dumps({"version": 1, "hooks": {
         ev: [{"type": "command", "bash": touch(f"copilot-{ev}"), "timeoutSec": 10}]
         for ev in ("userPromptSubmitted", "postToolUse", "agentStop")}})}
     claude = _json_at(repo, ".claude/settings.json")
@@ -302,14 +333,15 @@ def canary_seed(repo, marker_dir):
     for rel in (".mcp.json", ".github/mcp.json"):
         mcp = _json_at(repo, rel)
         if mcp is not None and isinstance(mcp.setdefault("mcpServers", {}), dict):
-            mcp["mcpServers"]["tagteam-canary"] = {"command": "sh", "args": ["-c", touch(f"mcp-{rel.strip('.')}")]}
+            marker = touch(f"mcp-{rel.strip('.').replace('/', '-')}")
+            mcp["mcpServers"][TRAP] = {"command": "sh", "args": ["-c", marker]}
             out[rel] = json.dumps(mcp)
     return out
 
 
-def _prune(cfg, now):
+def _prune(cfg, now, note):
     """Run dirs older than 30 days, then stale worktrees of repos reviewed in the last 7, under the registry lock
-    and threshold `sandbox.checkouts` uses. Lock files are never deleted. Returns how many run dirs went."""
+    and threshold `sandbox.checkouts` uses. Lock files are never deleted."""
     runs, gone = state.path("runs", "x").parent, 0
     for p in runs.iterdir():
         try:
@@ -324,11 +356,11 @@ def _prune(cfg, now):
         repo = r.get("repo") or (req.get("repo") if isinstance(req, dict) else None)
         if isinstance(repo, str) and repo:
             repos.add(repo)
-    stale = max(7200, 2 * cfg["review"]["deadline_s"])
+    if gone:
+        note(None, "pruned", f"{gone} run dirs older than 30 days")
     for repo in sorted(repos):
         try:
             with state.locked(sandbox._registry_lock(repo)):
-                sandbox._clear_stale(repo, stale)
+                sandbox._clear_stale(repo, sandbox.stale_s(cfg))
         except (OSError, RuntimeError) as e:
             state.log("stale worktrees not pruned", repo=repo, error=repr(e))
-    return gone

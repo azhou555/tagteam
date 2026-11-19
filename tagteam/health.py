@@ -15,6 +15,13 @@ def calls(reviewer, n=4):
     return [bool(r.get("ok")) for r in rows[-n:]]
 
 
+def last_real_call_ok(reviewer):
+    """Whether `reviewer`'s latest real call (history.jsonl, not a probe) in the window succeeded."""
+    rows = [r for r in state.read_jsonl(state.path("history.jsonl"), time.time() - WINDOW)
+            if r.get("reviewer") == reviewer]
+    return bool(rows) and bool(max(rows, key=lambda r: r.get("ts", 0)).get("ok"))
+
+
 def is_demoted(reviewer):
     c = calls(reviewer)
     return len(c) >= 4 and c.count(False) >= 3 and not c[-1]
@@ -34,6 +41,16 @@ def load():
 def save(d):
     with state.locked("health"):
         state.write_json(state.path("health.json"), d)
+
+
+def update(fn):
+    """Write fn(current dict) unless it returns None, all under the health lock; returns what fn returned.
+    Lock order: heal / heal-run, then health; never take those while holding this one."""
+    with state.locked("health"):
+        d = fn(load())
+        if d is not None:
+            state.write_json(state.path("health.json"), d)
+        return d
 
 
 def event(reviewer, action, why):
@@ -59,11 +76,11 @@ def needs_you(d=None):
 def notice(now=None):
     """" · ⚠ text; text" for needs-you items not shown in the last day (stamped as shown), else ""."""
     now = time.time() if now is None else now
-    with state.locked("health"):
-        d = load()
+    fresh = []
+
+    def stamp(d):
         seen = d.get("noticed") if isinstance(d.get("noticed"), dict) else {}
-        fresh = [(k, t) for k, t in needs_you(d) if now - seen.get(k, 0) >= 86400 or seen.get(k, 0) > now]
-        if not fresh:
-            return ""
-        state.write_json(state.path("health.json"), {**d, "noticed": {**seen, **{k: now for k, _ in fresh}}})
-    return " · ⚠ " + "; ".join(t for _, t in fresh)
+        fresh.extend((k, t) for k, t in needs_you(d) if now - seen.get(k, 0) >= 86400 or seen.get(k, 0) > now)
+        return {**d, "noticed": {**seen, **{k: now for k, _ in fresh}}} if fresh else None
+    update(stamp)
+    return " · ⚠ " + "; ".join(t for _, t in fresh) if fresh else ""

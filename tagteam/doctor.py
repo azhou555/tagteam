@@ -15,6 +15,7 @@ PROBE_DIFF = "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
 PROBE_PROMPT = ("Review this one-line diff. Reply with only the JSON findings object; do not run commands "
                 "or edit files.\n\n" + PROBE_DIFF)
 PROBE_TIMEOUT_S = 120
+REPO_CHANGED = "unknown (the real repo changed during the probe)"     # its error text: the changed paths, one a line
 
 
 def _commands(node):
@@ -86,7 +87,8 @@ def probe(name, cfg, repo=None, files=None, stale_s=7200):
     """One tiny real review in a sandbox checkout: (status, error text). status is 'ok', 'timeout', 'wrote-files',
     'failed' or 'unknown …'. With no `repo` it reviews a throwaway repo. With one (a real repo) it reviews a
     worktree of its HEAD plus `files` ({path: text}), built without touching its tree, index or refs; it never runs
-    the reviewer in place there, and a change to the real repo (maybe the user's) is 'unknown'. No state is touched."""
+    the reviewer in place there, and a change to the real repo (maybe the user's) is REPO_CHANGED, with the changed
+    paths as the error text. No state is touched."""
     tmp = None
     try:
         if repo is None:
@@ -111,7 +113,8 @@ def probe(name, cfg, repo=None, files=None, stale_s=7200):
             if after["git"] or after["outside"]:
                 return "wrote-files", err
             if after["repo"]["tree"] or after["repo"]["refs"]:
-                return ("wrote-files" if tmp else "unknown (the real repo changed during the probe)"), err
+                return ("wrote-files", err) if tmp else (REPO_CHANGED, "\n".join(after["repo"]["tree"] +
+                                                                                   after["repo"]["refs"]))
             try:
                 if sandbox.written(work, tree):
                     return "wrote-files", err

@@ -20,6 +20,11 @@ _GIT_ENV = {"GIT_AUTHOR_NAME": "tagteam", "GIT_COMMITTER_NAME": "tagteam",
             "GIT_AUTHOR_DATE": "@0 +0000", "GIT_COMMITTER_DATE": "@0 +0000"}
 
 
+def stale_s(cfg):
+    """Idle time after which a tagteam-review-* worktree is a leftover: well past any live review's deadline."""
+    return max(7200, 2 * cfg["review"]["deadline_s"])
+
+
 def _remove(repo, path):
     try:
         changes.git(repo, "worktree", "remove", "-f", "-f", path)
