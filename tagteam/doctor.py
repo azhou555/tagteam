@@ -82,14 +82,18 @@ def paused_minutes(now):
     return None if c is None else {a: math.ceil((t - now) / 60) for a, t in c.items() if t > now}
 
 
-def probe_one(name, cfg):
-    """One tiny real review in a throwaway checkout: 'ok', 'timeout', 'wrote-files' or 'failed'. No state is touched."""
+def probe(name, cfg, seed=None):
+    """One tiny real review in a throwaway checkout: (status, error text). status is 'ok', 'timeout', 'wrote-files',
+    'failed' or 'unknown …'. `seed(repo, marker_dir)` plants files before the first commit; marker_dir is a fresh
+    empty dir outside the repo, which the seed's owner inspects and removes. No state is touched."""
     repo = tempfile.mkdtemp(prefix="tagteam-probe-")
     try:
         for cmd in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
             changes.git(repo, *cmd)
         with open(os.path.join(repo, "a.py"), "w") as f:
             f.write("x = 1\n")
+        if seed:
+            seed(repo, tempfile.mkdtemp(prefix="tagteam-canary-"))
         changes.git(repo, "add", "-A")
         changes.git(repo, "commit", "-qm", "init")
         tree = changes.snapshot(repo)
@@ -97,22 +101,28 @@ def probe_one(name, cfg):
         watch = sandbox.Watch(repo, tree)
         with sandbox.checkout(repo, tree, cwd=repo) as work, tempfile.TemporaryDirectory() as run_dir:
             argv, stdin, out_file = reviewer.argv(PROBE_PROMPT, options, run_dir, PROBE_TIMEOUT_S, work)
-            stdout, _, _, timed_out = runner._spawn(argv, stdin, work, PROBE_TIMEOUT_S)
+            stdout, stderr, _, timed_out = runner._spawn(argv, stdin, work, PROBE_TIMEOUT_S)
+            err = runner._why(stderr, stdout)
             after = watch.after()
             if after["git"] or after["outside"] or after["repo"]["tree"] or after["repo"]["refs"]:
-                return "wrote-files"
+                return "wrote-files", err
             try:
                 if sandbox.written(work, tree):
-                    return "wrote-files"
+                    return "wrote-files", err
             except (RuntimeError, OSError):
-                return "unknown (could not re-check the checkout)"
+                return "unknown (could not re-check the checkout)", err
             if timed_out:
-                return "timeout"
-            return "ok" if reviewer.parse(stdout, out_file) is not None else "failed"
+                return "timeout", err
+            return ("ok", "") if reviewer.parse(stdout, out_file) is not None else ("failed", err)
     except (OSError, RuntimeError) as e:
-        return f"failed ({e})"
+        return f"failed ({e})", str(e)
     finally:
         shutil.rmtree(repo, ignore_errors=True)
+
+
+def probe_one(name, cfg):
+    """`probe`'s status alone: 'ok', 'timeout', 'wrote-files' or 'failed'."""
+    return probe(name, cfg)[0]
 
 
 def run(probe, clear):

@@ -1,5 +1,5 @@
 """tagteam CLI: `hook <agent> <phase> [--check]`, `statusline`, `swiftbar`, `config`, `status`, `watch`, `install`, `uninstall`, `doctor`;
-`background <job>` is the hook's own detached review."""
+`background <job>` is the hook's own detached review; `heal` its detached self-heal tick."""
 import argparse
 import json
 import os
@@ -8,7 +8,7 @@ import sys
 import time
 import traceback
 
-from . import adapters, config, core, doctor, harnesses, install, live, quota, state
+from . import adapters, config, core, doctor, harnesses, heal, install, live, quota, state
 
 
 def hook(agent, phase):
@@ -36,6 +36,10 @@ def hook(agent, phase):
             return
         verdict = core.HANDLERS[ev.phase](ev, cfg)
         print(adapters.encode(agent, ev.phase, verdict))
+        try:
+            heal.maybe_start()
+        except Exception:
+            pass
     except Exception as e:
         state.log("hook error", agent=agent, phase=phase, error=repr(e), tb=traceback.format_exc()[-2000:])
         try:
@@ -55,6 +59,14 @@ def background(job):
             live.note_error()
         except Exception:
             pass
+
+
+def heal_tick():
+    """The detached self-heal tick a hook started; never raises."""
+    try:
+        heal.tick(config.load())
+    except Exception as e:
+        state.log("heal tick error", error=repr(e), tb=traceback.format_exc()[-2000:])
 
 
 def check(agent, phase):
@@ -177,6 +189,7 @@ def main(argv=None):
     sub.add_parser("uninstall", help="remove tagteam's hooks, status line, menu bar item and launcher")
     b = sub.add_parser("background", help="internal: a non-blocking review, started by the Stop hook")
     b.add_argument("job")
+    sub.add_parser("heal", help="internal: the detached self-heal tick")
     a = p.parse_args(argv)
     if a.cmd is None:
         p.print_help()
@@ -210,5 +223,7 @@ def main(argv=None):
         sys.exit(rc)
     elif a.cmd == "background":
         background(a.job)
+    elif a.cmd == "heal":
+        heal_tick()
     elif a.cmd == "uninstall":
         install.uninstall()
