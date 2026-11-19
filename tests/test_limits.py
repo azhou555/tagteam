@@ -213,6 +213,50 @@ class Trips(unittest.TestCase):
         self.assertFalse(limits.reenable("copilot", 1))
         self.assertIn("copilot", limits.disabled())
 
+    def lost_trip_then_reenable(self, age, break_trips):
+        now = time.time()
+        self.disable_at(now - age * self.DAY, "copilot", "x", "r1")
+        n = limits.trip_count("copilot")
+        with break_trips():
+            limits.disable("copilot", "x", "r2")
+        self.assertEqual(limits.trips()["copilot"]["trips"][-1]["run_id"], "r1")      # the new trip really was lost
+        self.assertFalse(limits.reenable("copilot", n))
+        self.assertIn("copilot", limits.disabled())
+
+    def trips_none_once(self):
+        real, calls = limits.trips, []
+        return mock.patch.object(limits, "trips", lambda: None if not calls.append(1) and len(calls) == 1 else real())
+
+    def trips_write_fails_once(self):
+        real = state.write_json
+
+        def write(p, data):
+            if pathlib.Path(p).name == "trips.json":
+                raise OSError("disk")
+            real(p, data)
+        return mock.patch.object(state, "write_json", write)
+
+    def test_lost_trip_read_failure_blocks_reenable(self):
+        self.lost_trip_then_reenable(10, self.trips_none_once)
+
+    def test_lost_trip_write_failure_blocks_reenable(self):
+        self.lost_trip_then_reenable(10, self.trips_write_fails_once)
+
+    def test_lost_trip_within_7d_of_previous_latches(self):
+        self.lost_trip_then_reenable(3, self.trips_write_fails_once)
+        self.assertEqual(limits.canary_eligible(), [])
+        self.assertEqual(limits.trip_count("copilot"), 2)
+
+    def test_lost_trip_8d_after_previous_stays_eligible(self):
+        self.lost_trip_then_reenable(8, self.trips_write_fails_once)
+        self.assertEqual(limits.canary_eligible(), ["copilot"])
+        self.assertEqual(limits.trip_count("copilot"), 2)
+
+    def test_recorded_trip_is_not_double_counted(self):
+        limits.disable("copilot", "x", "r1")
+        self.assertEqual(limits.trip_count("copilot"), 1)
+        self.assertTrue(limits.reenable("copilot", 1))
+
     def test_unreadable_disabled_blocks_canary(self):
         limits.disable("copilot", "x", "r1")
         state.path("disabled.json").write_text("{")

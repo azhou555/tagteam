@@ -146,15 +146,22 @@ def trips():
 
 
 def _history(t, d, reviewer):
-    """(trip list, latched) for `reviewer`; a `disabled.json` entry with no record is one unlatched trip at its ts.
+    """(trip list, latched) for `reviewer`. A `disabled.json` entry newer than the last recorded trip (no record at
+    all, or a trip lost to a failed write) counts as one more trip, latched if within TRIP_WINDOW of the one before.
+    `disable` stamps both files with the same time, so a recorded trip is never counted twice.
     None if the record is malformed (fail closed)."""
     h = t.get(reviewer)
-    if h is None:
-        e = d.get(reviewer)
-        return ([{"ts": e.get("ts"), "run_id": None}], False) if isinstance(e, dict) else ([], False)
-    if not isinstance(h, dict) or not isinstance(h.get("trips"), list):
+    if h is not None and (not isinstance(h, dict) or not isinstance(h.get("trips"), list)):
         return None
-    return h["trips"], bool(h.get("latched"))
+    past, latched = (h["trips"], bool(h.get("latched"))) if h else ([], False)
+    e = d.get(reviewer)
+    if isinstance(e, dict):
+        stamps = [x.get("ts") for x in past if isinstance(x, dict) and isinstance(x.get("ts"), (int, float))]
+        ts = e.get("ts")
+        if not past or isinstance(ts, (int, float)) and (not stamps or ts > max(stamps)):
+            near = isinstance(ts, (int, float)) and any(ts - x <= TRIP_WINDOW for x in stamps)
+            past, latched = past + [{"ts": ts, "run_id": None}], latched or near
+    return past, latched
 
 
 def disable(reviewer, reason, run_id=None, latch=False):
