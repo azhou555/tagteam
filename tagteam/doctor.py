@@ -9,7 +9,7 @@ import shutil
 import tempfile
 import time
 
-from . import changes, config, harnesses, install, limits, quota, runner, sandbox
+from . import changes, config, harnesses, health, install, limits, quota, runner, sandbox
 
 PROBE_DIFF = "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
 PROBE_PROMPT = ("Review this one-line diff. Reply with only the JSON findings object; do not run commands "
@@ -156,7 +156,7 @@ def run(probe, clear):
     off, paused, found = limits.disabled(), paused_minutes(time.time()), harnesses.detected()
     for name, h in harnesses.ALL.items():
         if name not in found:
-            print(f"{name:8}not installed")
+            print(f"{name:9}not installed")
             continue
         parts, entries = [], hook_entries(h.hooks_path())
         for text, healthy in (author_part(h, entries), reviewer_part(name, h, use, off, paused)):
@@ -171,7 +171,11 @@ def run(probe, clear):
         if trust != "trusted":
             parts.append({"unapproved": f"⚠ approve hooks in {name} (/hooks)",
                           "stale": f"⚠ re-approve hooks in {name} (/hooks)"}.get(trust, f"? approve hooks in {name} (/hooks)"))
-        print(f"{name:8}" + " · ".join(parts))
+        if (e := (health.load().get("reviewers") or {}).get(name)) and e.get("status", "ok") != "ok":
+            probe_at = e.get("next_probe")
+            parts.append(f"health {e['status']}" + (f" (next probe {time.strftime('%H:%M', time.localtime(probe_at))})"
+                                                     if isinstance(probe_at, (int, float)) else ""))
+        print(f"{name:9}" + " · ".join(parts))
     if probe:
         for name in use:
             if name in found and off is not None and name not in off and harnesses.get(name).reviewer:

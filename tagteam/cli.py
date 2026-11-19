@@ -8,7 +8,7 @@ import sys
 import time
 import traceback
 
-from . import adapters, config, core, doctor, harnesses, heal, install, live, quota, state
+from . import adapters, config, core, doctor, harnesses, heal, health, install, live, quota, state
 
 
 def hook(agent, phase):
@@ -35,6 +35,8 @@ def hook(agent, phase):
             print(adapters.encode(agent, ev.phase, notice if ev.phase in ("turn-end", "plan-gate") else None))
             return
         verdict = core.HANDLERS[ev.phase](ev, cfg)
+        if ev.phase == "turn-end" and verdict and verdict.get("action") == "allow" and verdict.get("message"):
+            verdict = {**verdict, "message": verdict["message"] + health.notice()}
         print(adapters.encode(agent, ev.phase, verdict))
         try:
             heal.maybe_start()
@@ -184,6 +186,7 @@ def main(argv=None):
     d = sub.add_parser("doctor", help="check each agent's hooks and reviewer status; read-only")
     d.add_argument("--probe", action="store_true", help="also run one tiny real review per listed reviewer (costs money)")
     d.add_argument("--clear", action="store_true", help="re-enable reviewers the sandbox disabled and resume paused ones, then check")
+    d.add_argument("--fix", action="store_true", help="run one self-heal pass now (may probe reviewers), then check")
     w = sub.add_parser("watch", help="live view of running and recent reviews")
     w.add_argument("--once", action="store_true")
     sub.add_parser("uninstall", help="remove tagteam's hooks, status line, menu bar item and launcher")
@@ -207,6 +210,10 @@ def main(argv=None):
     elif a.cmd == "status":
         status(a.days)
     elif a.cmd == "doctor":
+        if a.fix:
+            events = heal.tick(config.load())
+            print("a heal tick is already running" if events is None else
+                  "\n".join(f"{e['reviewer'] or 'tagteam'} {e['action']}: {e['why']}" for e in events) or "nothing to fix")
         sys.exit(doctor.run(a.probe, a.clear))
     elif a.cmd == "watch":
         live.watch(once=a.once)

@@ -4,6 +4,9 @@ import unittest
 from tests.helpers import CFG  # noqa: F401  # isort: skip
 from tagteam import health, state  # noqa: E402
 
+NEEDS = {"reviewers": {"copilot": {"status": "needs_you", "reason": "not logged in → copilot login"},
+                        "agy": {"status": "ok", "reason": ""}}}
+
 
 def hist(reviewer, oks):
     now = time.time()
@@ -12,6 +15,19 @@ def hist(reviewer, oks):
 
 
 class Health(unittest.TestCase):
+    def test_notice_once_per_day(self):
+        self.assertEqual(health.notice(), "")
+        health.save(NEEDS)
+        self.assertEqual(health.needs_you(), [("copilot", "copilot: not logged in → copilot login")])
+        t = time.time()
+        self.assertEqual(health.notice(t), " · ⚠ copilot: not logged in → copilot login")
+        self.assertEqual(health.notice(t + 10), "")
+        self.assertEqual(health.notice(t + 86401), " · ⚠ copilot: not logged in → copilot login")
+
+    def test_authors_need_you_in_their_own_namespace(self):
+        health.save({"authors": {"claude": {"status": "needs_you", "reason": "stale hooks → tagteam install"}}})
+        self.assertEqual(health.needs_you(), [("author:claude", "claude: stale hooks → tagteam install")])
+
     def test_no_files_means_healthy(self):
         self.assertFalse(health.is_demoted("agy"))
         self.assertEqual(health.load(), {})

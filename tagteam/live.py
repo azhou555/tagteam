@@ -12,7 +12,7 @@ import os
 import sys
 import time
 
-from . import state
+from . import health, state
 
 ERROR_WINDOW = 86400
 SESSION_TTL = 7 * 86400
@@ -365,6 +365,7 @@ def segment(agent, session_id, now=None, color=False):
         parts.append(paint.kind("running", f"+{len(running) - len(mine)} running elsewhere"))
     if s["errors"]:
         parts.append(paint.kind("blocked", f"⚠ {_plural(len(s['errors']), 'hook error')} (24h)"))
+    parts += [paint.kind("blocked", "⚠ " + text) for _, text in health.needs_you()]
     return " · ".join(parts)
 
 
@@ -429,6 +430,19 @@ def _when(ts, now):
     return time.strftime("%H:%M" if _day(ts) == _day(now) else "%a %H:%M", time.localtime(ts))
 
 
+def _health_rows():
+    """(rows, events) for the Health block: one (name, status, reason) per tracked reviewer or author, and the last
+    five heal events; ([], []) while all is ok and nothing was healed."""
+    d, evs = health.load(), health.events(5)
+    rows = [(n, e.get("status", "ok"), e.get("reason") or "") for sec in ("reviewers", "authors")
+            for n, e in (d.get(sec) if isinstance(d.get(sec), dict) else {}).items() if isinstance(e, dict)]
+    return (rows, evs) if evs or any(st != "ok" for _, st, _ in rows) else ([], [])
+
+
+def _heal_line(e, now):
+    return f"{_when(e.get('ts', 0), now)} {e.get('reviewer') or 'tagteam'} {e.get('action')}: {e.get('why')}"
+
+
 def render_watch(now=None, recent=5, color=False):
     now = now or time.time()
     paint = Paint(color)
@@ -438,6 +452,12 @@ def render_watch(now=None, recent=5, color=False):
     lines.append(f"Running ({len(running)}):")
     lines += [f"  {paint.kind('running', _doing(r))}  {paint.agents([r['author']], 7)} {_progress(r, now, paint)}"
               for r in running] or ["  none"]
+    rows, evs = _health_rows()
+    if rows or evs:
+        lines.append("\nHealth:")
+        lines += ["  " + (paint.kind("blocked", t) if st == "needs_you" else t)
+                  for n, st, why in rows if (t := f"{n:8} {st}" + (f": {why}" if why else ""))]
+        lines += [f"  {_heal_line(e, now)}" for e in evs]
     today, week = _today_and_week(now)
     lines.append(f"\nReviews today: {len(today)}")
     for key, label in (("author", "by author"), ("reviewers", "by reviewer")):
@@ -500,8 +520,8 @@ def render_swiftbar(now=None, recent=8):
     if kind:
         head["sfcolor2"] = KINDS[kind]["hex"]
     icon = f":{BRAND['sf']}: :{KINDS[kind]['sf'] if kind else 'checkmark.seal'}:"
-    if s["errors"]:
-        title += " :exclamationmark.triangle.fill:"
+    if s["errors"] or health.needs_you():
+        title += " :exclamationmark.triangle.fill: ⚠"
         head["sfcolor3"] = KINDS["blocked"]["hex"]
     tip = "tagteam: " + (f"{len(running)} review(s) running" if running else
                          summary(last) if last else "no reviews yet")
@@ -521,6 +541,13 @@ def render_swiftbar(now=None, recent=8):
             lines += [_sb(f"[{f.get('severity')}] {f.get('file') or '(general)'}: {f.get('claim')} ({a})",
                           color=KINDS[kind]["hex"]) for a, f in mine[:8]]
     if issues:
+        lines.append("---")
+    rows, evs = _health_rows()
+    if rows or evs:
+        lines.append(_sb("Health", size=11, color="gray"))
+        lines += [_sb(f"{n}: {st}" + (f" · {why}" if why else ""),
+                      color=KINDS["blocked"]["hex"] if st == "needs_you" else "gray") for n, st, why in rows]
+        lines += [_sb(_heal_line(e, now), size=12, font="Menlo") for e in evs]
         lines.append("---")
     lines.append(_sb(f"Reviews today: {len(today)}", size=11, color="gray"))
     if today:

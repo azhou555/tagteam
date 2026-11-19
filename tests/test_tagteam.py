@@ -12,7 +12,7 @@ import warnings
 from unittest import mock
 
 from tests.helpers import CFG, FULL, ROOT, HookRig, art, finding, fx, make_repo, sh, use_toml, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
-from tagteam import adapters, changes, classify, core, harnesses, install, live, router, runner, state, verdict  # noqa: E402
+from tagteam import adapters, changes, classify, core, harnesses, health, install, live, router, runner, state, verdict  # noqa: E402
 from tagteam.harnesses import agy as agy_h, base as harness_base, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
 
 
@@ -432,6 +432,19 @@ class EndToEnd(HookRig, unittest.TestCase):
         self.assertIn("1 new commit(s)", prompt)
         self.assertIn("c2", prompt)
 
+    def test_turn_end_allow_carries_notice(self):
+        health.save({"reviewers": {"copilot": {"status": "needs_you", "reason": "not logged in → copilot login"}}})
+        notice = "⚠ copilot: not logged in → copilot login"
+        outs = []
+        for sid in ("a", "b"):
+            self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature", session_id=sid))
+            pathlib.Path(self.repo, f"f{sid}.py").write_text("x = 1\n" * 20)
+            with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+                outs.append(self.run_hook("claude", "x", self.claude("Stop", last_assistant_message="done",
+                                                                     session_id=sid)).get("systemMessage", ""))
+        self.assertTrue(outs[0].endswith(" · " + notice), outs[0])
+        self.assertNotIn("⚠", outs[1])
+
     def test_copilot_allow_stays_silent(self):
         p = {"sessionId": "c2", "cwd": self.repo, "prompt": "write code"}
         self.run_hook("copilot", "turn-start", p)
@@ -582,6 +595,40 @@ class Live(unittest.TestCase):
         return {"ts": time.time(), "run_id": "x", "author": "claude", "session_id": "s", "tag": "turn", "round": 1,
                 "max_rounds": 2, "reviewers": ["copilot"], "action": "allow", "blocking": 0, "advisory": 0, "failed": [],
                 "duration": 3.0, **kw}
+
+    NEED = {"reviewers": {"copilot": {"status": "needs_you", "reason": "not logged in → copilot login"},
+                          "agy": {"status": "demoted", "reason": "most recent calls failed", "next_probe": 1e9}}}
+
+    def test_statusline_shows_needs_you_and_is_silent_when_healthy(self):
+        self.assertNotIn("⚠", live.segment("claude", "s"))
+        health.save({"reviewers": {"copilot": {"status": "demoted", "reason": "x"}}})
+        self.assertNotIn("⚠", live.segment("claude", "s"))
+        health.save(self.NEED)
+        self.assertIn("⚠ copilot: not logged in → copilot login", live.segment("claude", "s"))
+        self.assertNotIn("agy:", live.segment("claude", "s"))
+
+    def test_swiftbar_title_flags_and_health_block(self):
+        self.assertNotIn("⚠", live.render_swiftbar().splitlines()[0])
+        self.assertNotIn("Health", live.render_swiftbar())
+        health.save(self.NEED)
+        for i in range(7):
+            health.event("agy", "demoted", f"why {i}")
+        out = live.render_swiftbar().splitlines()
+        self.assertIn("⚠", out[0])
+        i = next(i for i, l in enumerate(out) if l.startswith("Health"))
+        self.assertIn("copilot: needs_you", out[i + 1])
+        self.assertIn("agy: demoted", out[i + 2])
+        self.assertEqual(sum("demoted: why" in l for l in out[i:]), 5)
+        self.assertLess(i, next(i for i, l in enumerate(out) if l.startswith("Recent reviews")))
+
+    def test_watch_health_block(self):
+        self.assertNotIn("Health", live.render_watch())
+        health.save(self.NEED)
+        health.event("agy", "demoted", "most recent calls failed")
+        out = live.render_watch()
+        self.assertIn("Health:\n  copilot  needs_you: not logged in → copilot login\n  agy      demoted", out)
+        self.assertIn("agy demoted: most recent calls failed", out)
+        self.assertLess(out.index("Running"), out.index("Health"))
 
     def test_tracking_lifecycle_and_progress(self):
         with live.tracking(self.rec()) as update:
