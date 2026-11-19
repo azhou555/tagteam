@@ -132,6 +132,98 @@ class Breaker(unittest.TestCase):
         self.assertEqual((rec["ok"], result), (False, None))
 
 
+class Trips(unittest.TestCase):
+    DAY = 86400
+
+    def setUp(self):
+        for n in ("disabled.json", "trips.json"):
+            state.path(n).unlink(missing_ok=True)
+
+    def disable_at(self, t, *a, **kw):
+        with mock.patch("time.time", return_value=t):
+            limits.disable(*a, **kw)
+
+    def test_first_trip_is_canary_eligible(self):
+        limits.disable("copilot", "x", "r1")
+        self.assertEqual(limits.canary_eligible(), ["copilot"])
+        self.assertIs(limits.trips()["copilot"]["latched"], False)
+        self.assertEqual(limits.trips()["copilot"]["trips"][0]["run_id"], "r1")
+
+    def test_second_trip_within_7d_latches(self):
+        now = time.time()
+        self.disable_at(now, "copilot", "x", "r1")
+        self.disable_at(now + 3 * self.DAY, "copilot", "x", "r2")
+        self.assertIs(limits.trips()["copilot"]["latched"], True)
+        self.assertEqual(limits.canary_eligible(), [])
+
+    def test_trips_8d_apart_do_not_latch(self):
+        now = time.time()
+        self.disable_at(now, "copilot", "x", "r1")
+        self.disable_at(now + 8 * self.DAY, "copilot", "x", "r2")
+        self.assertIs(limits.trips()["copilot"]["latched"], False)
+        self.assertEqual(limits.trip_count("copilot"), 2)
+        self.assertEqual(limits.canary_eligible(), ["copilot"])
+
+    def test_old_disabled_entry_without_trips_is_eligible(self):
+        state.path("disabled.json").write_text(json.dumps({"copilot": {"reason": "x", "ts": time.time() - 15 * 86400}}))
+        self.assertEqual(limits.canary_eligible(), ["copilot"])
+        self.assertEqual(limits.trip_count("copilot"), 1)
+
+    def test_canary_write_latches_old_and_migrated(self):
+        now = time.time()
+        self.disable_at(now - 15 * self.DAY, "copilot", "x", "r1")
+        limits.disable("copilot", "canary", "c1", latch=True)
+        self.assertIs(limits.trips()["copilot"]["latched"], True)
+        self.assertEqual(limits.canary_eligible(), [])
+        state.path("disabled.json").write_text(json.dumps({"codex": {"reason": "x", "ts": now - 15 * self.DAY}}))
+        limits.disable("codex", "canary", "c2", latch=True)
+        self.assertIs(limits.trips()["codex"]["latched"], True)
+        self.assertEqual(limits.canary_eligible(), [])
+
+    def test_reenable_refuses_after_newer_trip_or_latch(self):
+        now = time.time()
+        self.disable_at(now - 20 * self.DAY, "copilot", "x", "r1")
+        n = limits.trip_count("copilot")
+        self.disable_at(now, "copilot", "x", "r2")
+        self.assertFalse(limits.reenable("copilot", n))
+        self.assertIn("copilot", limits.disabled())
+        self.assertIs(limits.trips()["copilot"]["latched"], False)
+        limits.disable("copilot", "canary", "c1", latch=True)
+        self.assertFalse(limits.reenable("copilot", limits.trip_count("copilot") - 1))
+        self.assertFalse(limits.reenable("copilot", limits.trip_count("copilot")))      # latched
+        self.assertIn("copilot", limits.disabled())
+
+    def test_reenable_keeps_history(self):
+        now = time.time()
+        self.disable_at(now, "copilot", "x", "r1")
+        self.assertTrue(limits.reenable("copilot", limits.trip_count("copilot")))
+        self.assertNotIn("copilot", limits.disabled())
+        self.assertEqual(len(limits.trips()["copilot"]["trips"]), 1)
+        self.disable_at(now + 2 * self.DAY, "copilot", "x", "r2")
+        self.assertIs(limits.trips()["copilot"]["latched"], True)
+
+    def test_unreadable_trips_blocks_canary_and_is_not_rewritten(self):
+        state.path("trips.json").write_text("{")
+        limits.disable("copilot", "x", "r1")
+        self.assertIn("copilot", limits.disabled())
+        self.assertEqual(state.path("trips.json").read_text(), "{")
+        self.assertIsNone(limits.trips())
+        self.assertEqual(limits.canary_eligible(), [])
+        self.assertIsNone(limits.trip_count("copilot"))
+        self.assertFalse(limits.reenable("copilot", 1))
+        self.assertIn("copilot", limits.disabled())
+
+    def test_unreadable_disabled_blocks_canary(self):
+        limits.disable("copilot", "x", "r1")
+        state.path("disabled.json").write_text("{")
+        self.assertEqual(limits.canary_eligible(), [])
+
+    def test_clear_resets_trips(self):
+        limits.disable("copilot", "x", "r1")
+        limits.clear_disabled()
+        self.assertEqual(limits.trips(), {})
+
+
 class Guards(HookRig, unittest.TestCase):
     def setUp(self):
         from tagteam import core

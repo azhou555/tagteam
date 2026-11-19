@@ -326,7 +326,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
                   why=guilty, git=seen["git"], outside=seen["outside"], tree=seen["repo"]["tree"][:50],
                   refs=seen["repo"]["refs"])
         for r, why in guilty.items():
-            limits.disable(r, f"{why} (run {run_id})")
+            limits.disable(r, f"{why} (run {run_id})", run_id=run_id)
         run["disabled"] = list(guilty)
     if changed:
         state.log("repo changed during review", run_id=run_id, blamed=list(guilty), tree=seen["repo"]["tree"][:50],
