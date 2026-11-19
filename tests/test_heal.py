@@ -4,6 +4,8 @@ import io
 import json
 import os
 import pathlib
+import shlex
+import subprocess
 import tempfile
 import threading
 import time
@@ -27,6 +29,15 @@ def demote(name):
         state.append_jsonl(state.path("history.jsonl"), {"ts": time.time() - 100 + i, "reviewer": name, "ok": False})
 
 
+def marker_dir(files):
+    cmd = json.loads(files[".github/hooks/tagteam-canary.json"])["hooks"]["agentStop"][0]["bash"]
+    return os.path.dirname(shlex.split(cmd)[1])
+
+
+def git(repo, *args):
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=True).stdout
+
+
 def rev(name):
     return health.load()["reviewers"][name]
 
@@ -35,9 +46,10 @@ def acts(events):
     return [f"{e['action']} {e['reviewer']}" for e in events]
 
 
-class Tick(unittest.TestCase):
+class Rig:
     def setUp(self):
         self.d = pathlib.Path(tempfile.mkdtemp())
+        self.repo = make_repo()
         self.found, self.logged, self.result, self.probes = list(ALL_AGENTS), {}, {}, []
         self.ps = [mock.patch.object(harnesses, "detected", side_effect=lambda: list(self.found)),
                    mock.patch.object(harnesses, "ALL", {n: dataclasses.replace(
@@ -48,23 +60,24 @@ class Tick(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def fake_probe(self, name, cfg, seed=None):
-        self.probes.append((name, seed is not None))
+    def fake_probe(self, name, cfg, repo=None, files=None, stale_s=7200):
+        self.probes.append((name, files is not None))
+        self.probed_repo = repo
         r = self.result.get(name, ("ok", ""))
-        return r(name, seed) if callable(r) else r
+        return r(name, files) if callable(r) else r
 
     def canary(self, status="ok", touch=None, during=None):
-        def run(name, seed):
-            repo, md = tempfile.mkdtemp(), tempfile.mkdtemp()
-            seed(repo, md)
-            self.seeded = repo
+        def run(name, files):
+            self.files = files
             if touch:
-                pathlib.Path(md, touch).touch()
+                pathlib.Path(marker_dir(files), touch).touch()
             if during:
                 during()
             return status, ""
         return run
 
+
+class Tick(Rig, unittest.TestCase):
     def test_tick_on_empty_state(self):
         self.assertEqual(heal.tick(cfg()), [])
         self.assertIsInstance(health.load()["last_tick"], float)
@@ -107,7 +120,7 @@ class Tick(unittest.TestCase):
         demote("agy")
         quota.cooldown("agy", 15)
         demote("codex")
-        limits.disable("codex", "x", "r1")
+        limits.disable("codex", "x", "r1", repo=self.repo)
         self.result["codex"] = self.canary(status="timeout")
         heal.tick(cfg())
         self.assertEqual(self.probes, [("codex", True)])
@@ -135,7 +148,7 @@ class Tick(unittest.TestCase):
         self.assertEqual(self.probes, [])
 
     def test_canary_pass_reenables(self):
-        limits.disable("copilot", "wrote outside read-only", "r1")
+        limits.disable("copilot", "wrote outside read-only", "r1", repo=self.repo)
         self.result["copilot"] = self.canary()
         events = heal.tick(cfg())
         self.assertEqual(self.probes, [("copilot", True)])
@@ -143,12 +156,13 @@ class Tick(unittest.TestCase):
         self.assertEqual(limits.trips()["copilot"]["trips"][0]["run_id"], "r1")
         self.assertIn("re-enabled copilot", acts(events))
         self.assertEqual(rev("copilot")["status"], "ok")
-        for f in (".claude/settings.json", ".github/hooks/tagteam-canary.json", ".mcp.json"):
-            self.assertTrue(os.path.exists(os.path.join(self.seeded, f)), f)
+        self.assertEqual(self.probed_repo, self.repo)
+        self.assertEqual(sorted(self.files), [".claude/settings.json", ".github/hooks/tagteam-canary.json",
+                                              ".github/mcp.json", ".mcp.json"])
 
     def test_canary_marker_means_trip_and_latch(self):
         with mock.patch("time.time", return_value=time.time() - 10 * DAY):      # an old trip: only the canary latches
-            limits.disable("copilot", "x", "r1")
+            limits.disable("copilot", "x", "r1", repo=self.repo)
         self.result["copilot"] = self.canary(touch="mcp")
         events = heal.tick(cfg())
         self.assertIn("copilot", limits.disabled())
@@ -160,13 +174,13 @@ class Tick(unittest.TestCase):
         self.assertEqual(len(self.probes), 1)          # latched: no more canaries
 
     def test_canary_wrote_files_means_trip(self):
-        limits.disable("copilot", "x", "r1")
+        limits.disable("copilot", "x", "r1", repo=self.repo)
         self.result["copilot"] = self.canary(status="wrote-files")
         heal.tick(cfg())
         self.assertIs(limits.trips()["copilot"]["latched"], True)
 
     def test_canary_inconclusive_stays_disabled(self):
-        limits.disable("copilot", "x", "r1")
+        limits.disable("copilot", "x", "r1", repo=self.repo)
         self.result["copilot"] = self.canary(status="timeout")
         t0 = time.time()
         heal.tick(cfg(), now=t0)
@@ -177,14 +191,8 @@ class Tick(unittest.TestCase):
         heal.tick(cfg(), now=t0 + 60)
         self.assertEqual(len(self.probes), 1)
 
-    def test_canary_without_planted_traps_is_inconclusive(self):
-        limits.disable("copilot", "x", "r1")
-        self.result["copilot"] = ("ok", "")             # a probe that never called seed proves nothing
-        heal.tick(cfg())
-        self.assertIn("copilot", limits.disabled())
-
     def test_unlisted_reviewer_gets_no_canary_or_probe(self):
-        limits.disable("claude", "x", "r1")
+        limits.disable("claude", "x", "r1", repo=self.repo)
         demote("opencode")
         heal.tick(cfg())
         self.assertEqual(self.probes, [])
@@ -222,7 +230,7 @@ class Tick(unittest.TestCase):
         (self.d / "claude.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
             {"command": f": {TAG}; {entry} hook claude turn-end"}]}]}}))
         for n in ("codex", "agy"):
-            limits.disable(n, "x", "r")
+            limits.disable(n, "x", "r", repo=self.repo)
         self.result = {n: self.canary(status="timeout") for n in ("codex", "agy")}
         heal.tick(cfg(use=["codex", "agy"], authors=["claude"]))
         a = health.load()["authors"]["claude"]
@@ -237,7 +245,7 @@ class Tick(unittest.TestCase):
         self.assertIn("tagteam install", health.load()["authors"]["codex"]["reason"])
 
     def test_concurrent_ticks_serialize(self):
-        limits.disable("copilot", "x", "r1")
+        limits.disable("copilot", "x", "r1", repo=self.repo)
         inside, release = threading.Event(), threading.Event()
         self.result["copilot"] = self.canary(status="timeout", during=lambda: (inside.set(), release.wait(10)))
         t = threading.Thread(target=heal.tick, args=(cfg(),))
@@ -250,8 +258,8 @@ class Tick(unittest.TestCase):
 
     def test_canary_pass_does_not_undo_a_newer_trip(self):
         with mock.patch("time.time", return_value=time.time() - 10 * DAY):
-            limits.disable("copilot", "x", "r1")
-        self.result["copilot"] = self.canary(during=lambda: limits.disable("copilot", "x", "r2"))
+            limits.disable("copilot", "x", "r1", repo=self.repo)
+        self.result["copilot"] = self.canary(during=lambda: limits.disable("copilot", "x", "r2", repo=self.repo))
         heal.tick(cfg())
         self.assertIn("copilot", limits.disabled())
         self.assertIs(limits.trips()["copilot"]["latched"], False)
@@ -285,19 +293,130 @@ class Tick(unittest.TestCase):
         state.append_jsonl(state.path("runs.jsonl"), {"ts": time.time(), "run_id": "r1"})
         self.assertEqual(heal.tick(cfg()), [])
 
-    def test_real_probe_plants_traps_and_heal_sees_the_marker(self):
-        """doctor.probe seeds the repo and hands the marker dir to heal; a trap that runs trips the canary."""
-        def spawn(argv, stdin, cwd, timeout):         # a reviewer that runs the repo's Claude Stop hook
-            hooks = json.loads(pathlib.Path(cwd, ".claude/settings.json").read_text())["hooks"]["Stop"]
-            os.system(hooks[0]["hooks"][0]["command"])
-            good = {"structured_output": {"verdict": "approve", "summary": "", "findings": []}}
-            return json.dumps(good), "", 0, False
-        limits.disable("claude", "x", "r1")
-        self.result["claude"] = lambda name, seed: REAL_PROBE(name, cfg(), seed=seed)
-        with mock.patch.object(doctor.runner, "_spawn", spawn):
-            heal.tick(cfg(use=["claude"]))
+    def test_migrated_entry_finds_its_repo_through_request_json(self):
+        state.write_json(state.path("disabled.json"), {"copilot": {"reason": "wrote x (run 20261101T000000-ab12)",
+                                                                   "ts": time.time() - 10 * DAY}})
+        self.result["copilot"] = self.canary(status="timeout")
+        heal.tick(cfg())
+        self.assertEqual(rev("copilot")["status"], "needs_you")             # its run dir was pruned: no repo
+        self.assertIn("can't re-test copilot: its repo is gone", rev("copilot")["reason"])
+        self.assertEqual(self.probes, [])
+        state.write_json(state.path("runs", "20261101T000000-ab12", "request.json"), {"repo": self.repo})
+        heal.tick(cfg())
+        self.assertEqual((self.probes, self.probed_repo), ([("copilot", True)], self.repo))
+        self.assertEqual(rev("copilot")["status"], "disabled")
+
+
+GOOD = json.dumps({"structured_output": {"verdict": "approve", "summary": "", "findings": []}})
+
+
+class CanaryInRepo(Rig, unittest.TestCase):
+    """The real doctor.probe on the trip repo; only the reviewer CLI (runner._spawn) is faked."""
+
+    def setUp(self):
+        super().setUp()
+        self.spawned, self.run_hooks, self.probe_kw = [], None, []
+
+        def probe(name, cfg, **kw):
+            self.probe_kw.append(kw)
+            return REAL_PROBE(name, cfg, **kw)
+
+        def spawn(argv, stdin, cwd, timeout):
+            self.spawned.append(cwd)
+            if self.run_hooks:
+                self.run_hooks(cwd)
+            return GOOD, "", 0, False
+        for p in (mock.patch.object(doctor, "probe", probe), mock.patch.object(doctor.runner, "_spawn", spawn)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def git_state(self):
+        return [git(self.repo, *a) for a in (["status", "--porcelain"], ["rev-parse", "HEAD"], ["ls-files", "-s"],
+                                              ["for-each-ref"])]
+
+    def test_canary_runs_in_a_worktree_of_the_trip_repo_and_leaves_it_alone(self):
+        pathlib.Path(self.repo, "a.py").write_text("x = 2\n")             # the user's own work in progress
+        pathlib.Path(self.repo, "staged.py").write_text("s\n")
+        git(self.repo, "add", "staged.py")
+        pathlib.Path(self.repo, "untracked.txt").write_text("u\n")
+        before = self.git_state()
+        seen = {}
+
+        def look(cwd):
+            seen.update(name=os.path.basename(cwd), a=pathlib.Path(cwd, "a.py").read_text(),
+                        common=os.path.realpath(os.path.join(cwd, git(cwd, "rev-parse", "--git-common-dir").strip())),
+                        traps=[f for f in (".claude/settings.json", ".github/hooks/tagteam-canary.json", ".mcp.json",
+                                           ".github/mcp.json") if os.path.exists(os.path.join(cwd, f))])
+        self.run_hooks = look
+        limits.disable("claude", "x", "r1", repo=self.repo)
+        events = heal.tick(cfg(use=["claude"]))
+        self.assertTrue(seen["name"].startswith(sandbox.PREFIX))
+        self.assertEqual(seen["common"], os.path.realpath(os.path.join(self.repo, ".git")))
+        self.assertEqual(len(seen["traps"]), 4)
+        self.assertEqual(seen["a"], "x = 1\n")                                 # HEAD, not the user's edit
+        self.assertIn("re-enabled claude", acts(events))
+        self.assertEqual(self.git_state(), before)
+        self.assertFalse(os.path.exists(self.spawned[0]))
+
+    def test_trip_repo_hook_writing_into_the_checkout_is_a_write(self):
+        own = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo log >> course.log"}]}]}}
+        pathlib.Path(self.repo, ".claude").mkdir()
+        pathlib.Path(self.repo, ".claude/settings.json").write_text(json.dumps(own))
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "course hooks")
+
+        def run_repo_hooks(cwd):                      # a reviewer that runs the repo's own Stop hook, not our traps
+            stop = json.loads(pathlib.Path(cwd, ".claude/settings.json").read_text())["hooks"]["Stop"]
+            self.assertEqual(len(stop), 2)                                      # ours added, the repo's kept
+            subprocess.run(stop[0]["hooks"][0]["command"], shell=True, cwd=cwd, check=True)
+        self.run_hooks = run_repo_hooks
+        with mock.patch("time.time", return_value=time.time() - 10 * DAY):
+            limits.disable("claude", "x", "r1", repo=self.repo)
+        heal.tick(cfg(use=["claude"]))
         self.assertIs(limits.trips()["claude"]["latched"], True)
         self.assertEqual(rev("claude")["status"], "needs_you")
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "course.log")))
+
+    def test_our_trap_running_is_a_write(self):
+        self.run_hooks = lambda cwd: subprocess.run(json.loads(pathlib.Path(cwd, ".mcp.json").read_text())[
+            "mcpServers"]["tagteam-canary"]["args"][1], shell=True, check=True)
+        with mock.patch("time.time", return_value=time.time() - 10 * DAY):
+            limits.disable("claude", "x", "r1", repo=self.repo)
+        heal.tick(cfg(use=["claude"]))
+        self.assertIs(limits.trips()["claude"]["latched"], True)
+
+    def test_unknown_or_missing_repo_is_inconclusive_and_never_spawns(self):
+        for repo in (None, "/nonexistent/tagteam-repo"):
+            limits.clear_disabled()
+            limits.disable("claude", "x", "r1", repo=repo)
+            heal.tick(cfg(use=["claude"]))
+            self.assertEqual(self.spawned, [])
+            self.assertIn("claude", limits.disabled())
+            self.assertEqual(rev("claude")["status"], "needs_you")
+            self.assertEqual(rev("claude")["reason"],
+                             "can't re-test claude: its repo is gone → tagteam doctor --clear")
+
+    def test_no_sandbox_means_inconclusive_and_never_spawns(self):
+        @contextlib.contextmanager
+        def in_place(repo, tree, names, cwd=None, stale_s=7200):
+            yield {n: cwd for n in names}
+        limits.disable("claude", "x", "r1", repo=self.repo)
+        t0 = time.time()
+        with mock.patch.object(sandbox, "checkouts", in_place):
+            heal.tick(cfg(use=["claude"]), now=t0)
+        self.assertEqual(self.spawned, [])
+        self.assertIn("claude", limits.disabled())
+        self.assertIs(limits.trips()["claude"]["latched"], False)
+        self.assertEqual(rev("claude")["next_probe"], t0 + 15 * 60)
+
+    def test_stale_s_reaches_the_worktree_cleanup(self):
+        calls, real = [], sandbox._clear_stale
+        limits.disable("claude", "x", "r1", repo=self.repo)
+        c = {**cfg(use=["claude"]), "review": {**CFG["review"], "deadline_s": 5000}}
+        with mock.patch.object(sandbox, "_clear_stale", lambda r, s: (calls.append(s), real(r, s))):
+            heal.tick(c)
+        self.assertEqual(self.probe_kw[0]["stale_s"], 10000)
+        self.assertEqual(calls[0], 10000)
 
 
 class Start(unittest.TestCase):

@@ -82,30 +82,36 @@ def paused_minutes(now):
     return None if c is None else {a: math.ceil((t - now) / 60) for a, t in c.items() if t > now}
 
 
-def probe(name, cfg, seed=None):
-    """One tiny real review in a throwaway checkout: (status, error text). status is 'ok', 'timeout', 'wrote-files',
-    'failed' or 'unknown …'. `seed(repo, marker_dir)` plants files before the first commit; marker_dir is a fresh
-    empty dir outside the repo, which the seed's owner inspects and removes. No state is touched."""
-    repo = tempfile.mkdtemp(prefix="tagteam-probe-")
+def probe(name, cfg, repo=None, files=None, stale_s=7200):
+    """One tiny real review in a sandbox checkout: (status, error text). status is 'ok', 'timeout', 'wrote-files',
+    'failed' or 'unknown …'. With no `repo` it reviews a throwaway repo. With one (a real repo) it reviews a
+    worktree of its HEAD plus `files` ({path: text}), built without touching its tree, index or refs; it never runs
+    the reviewer in place there, and a change to the real repo (maybe the user's) is 'unknown'. No state is touched."""
+    tmp = None
     try:
-        for cmd in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
-            changes.git(repo, *cmd)
-        with open(os.path.join(repo, "a.py"), "w") as f:
-            f.write("x = 1\n")
-        if seed:
-            seed(repo, tempfile.mkdtemp(prefix="tagteam-canary-"))
-        changes.git(repo, "add", "-A")
-        changes.git(repo, "commit", "-qm", "init")
-        tree = changes.snapshot(repo)
+        if repo is None:
+            repo = tmp = tempfile.mkdtemp(prefix="tagteam-probe-")
+            for cmd in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+                changes.git(repo, *cmd)
+            with open(os.path.join(repo, "a.py"), "w") as f:
+                f.write("x = 1\n")
+            changes.git(repo, "add", "-A")
+            changes.git(repo, "commit", "-qm", "init")
+        before = changes.snapshot(repo)
+        tree = sandbox.overlay(repo, files) if files else before
         reviewer, options = harnesses.get(name).reviewer, cfg["reviewers"].get(name, {})
-        watch = sandbox.Watch(repo, tree)
-        with sandbox.checkout(repo, tree, cwd=repo) as work, tempfile.TemporaryDirectory() as run_dir:
+        watch = sandbox.Watch(repo, before)
+        with sandbox.checkout(repo, tree, cwd=repo, stale_s=stale_s) as work, tempfile.TemporaryDirectory() as run_dir:
+            if not tmp and os.path.realpath(work) == os.path.realpath(repo):
+                return "unknown (no sandbox for the real repo; not run)", ""
             argv, stdin, out_file = reviewer.argv(PROBE_PROMPT, options, run_dir, PROBE_TIMEOUT_S, work)
             stdout, stderr, _, timed_out = runner._spawn(argv, stdin, work, PROBE_TIMEOUT_S)
             err = runner._why(stderr, stdout)
             after = watch.after()
-            if after["git"] or after["outside"] or after["repo"]["tree"] or after["repo"]["refs"]:
+            if after["git"] or after["outside"]:
                 return "wrote-files", err
+            if after["repo"]["tree"] or after["repo"]["refs"]:
+                return ("wrote-files" if tmp else "unknown (the real repo changed during the probe)"), err
             try:
                 if sandbox.written(work, tree):
                     return "wrote-files", err
@@ -117,7 +123,8 @@ def probe(name, cfg, seed=None):
     except (OSError, RuntimeError) as e:
         return f"failed ({e})", str(e)
     finally:
-        shutil.rmtree(repo, ignore_errors=True)
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 def probe_one(name, cfg):

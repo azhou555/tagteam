@@ -10,9 +10,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
-from . import doctor, harnesses, health, limits, quota, router, sandbox, state
+from . import changes, doctor, harnesses, health, limits, quota, router, sandbox, state
 
 TICK_S = 900
 AUTH_ERR = re.compile(r"unauthori[sz]ed|not logged in|log ?in|\b40[13]\b|authenticat|credentials", re.I)
@@ -21,7 +22,7 @@ COPILOT_PER_DAY = 4             # premium requests
 BACKOFF_MIN, BACKOFF_MAX = 15, 360
 KEEP_RUNS_S = 30 * 86400
 RECENT_S = 7 * 86400
-CLEAR_STATE = ("next_probe", "probe_backoff_min", "auth")
+CLEAR_STATE = ("next_probe", "probe_backoff_min", "auth", "gone")
 
 
 def _try_lock(name):
@@ -117,7 +118,8 @@ def _status(name, e, found, off, eligible, trips_ok):
         return "needs_you", f"not logged in → log in to {name}"
     if off is None or name in off:
         if off is not None and name in eligible:
-            return "disabled", "wrote outside read-only; a clean canary re-enables it"
+            return ("needs_you", e["gone"]) if e.get("gone") else \
+                ("disabled", "wrote outside read-only; a clean canary re-enables it")
         if off is None or not trips_ok:
             return "needs_you", "safety state unreadable → tagteam doctor --clear"
         return "needs_you", "wrote outside read-only again → check it, then tagteam doctor --clear"
@@ -214,33 +216,35 @@ def _probe_demoted(cfg, use, revs, found, now, budget, why):
 
 
 def _canary_disabled(cfg, use, revs, found, now, budget, why):
-    """A clean canary needs a parsed review, no marker and a clean sandbox; a marker or a write latches it."""
+    """Re-test in a sandbox worktree of the repo the trip happened in, with every known trap added. A clean canary
+    needs a parsed review, no marker and a clean sandbox; a marker or a write latches. No repo: no canary."""
     eligible = limits.canary_eligible()
     for n in use:
         e = revs[n]
-        if n not in eligible or not _may_probe(n, e, found, now, budget):
+        if n not in eligible:
             continue
+        repo = _trip_repo(n)
+        if repo is None:
+            e["gone"] = f"can't re-test {n}: its repo is gone → tagteam doctor --clear"
+            continue
+        e.pop("gone", None)
         trips = limits.trip_count(n)
-        if trips is None:
+        if trips is None or not _may_probe(n, e, found, now, budget):
             continue
-        dirs = []
-
-        def seed(repo, marker_dir):
-            dirs.append(marker_dir)
-            canary_seed(repo, marker_dir)
+        marker_dir = tempfile.mkdtemp(prefix="tagteam-canary-")
         try:
-            status, err = doctor.probe(n, cfg, seed=seed)
+            status, err = doctor.probe(n, cfg, repo=repo, files=canary_seed(repo, marker_dir),
+                                       stale_s=max(7200, 2 * cfg["review"]["deadline_s"]))
             try:
-                marks = sorted(m for d in dirs for m in os.listdir(d))
+                marks = sorted(os.listdir(marker_dir))
             except OSError:
                 marks = None                         # can't tell: inconclusive
         finally:
-            for d in dirs:
-                shutil.rmtree(d, ignore_errors=True)
+            shutil.rmtree(marker_dir, ignore_errors=True)
         if marks or status == "wrote-files":
             health.note_probe(n, False, "canary", f"wrote: {', '.join(marks or [status])}")
-            limits.disable(n, "wrote in canary", run_id="canary", latch=True)
-        elif status == "ok" and dirs and marks == []:
+            limits.disable(n, "wrote in canary", run_id="canary", latch=True, repo=repo)
+        elif status == "ok" and marks == []:
             health.note_probe(n, True, "canary")
             if limits.reenable(n, trips):
                 why[n] = "canary clean"
@@ -249,23 +253,58 @@ def _canary_disabled(cfg, use, revs, found, now, budget, why):
             _back_off(e, now)
 
 
+def _trip_repo(name):
+    """The existing repo `name` last tripped in: from its disabled entry or trip record, else (a migrated entry) the
+    run's request.json while that is kept. None if unknown or gone."""
+    d, t = limits.disabled() or {}, limits.trips() or {}
+    e, h = d.get(name), t.get(name)
+    e = e if isinstance(e, dict) else {}
+    last = next((x for x in reversed(h.get("trips") or []) if isinstance(x, dict)), {}) if isinstance(h, dict) else {}
+    repo = e.get("repo") or last.get("repo")
+    if not repo:
+        m = re.search(r"\(run ([\w-]+)\)", str(e.get("reason", "")))
+        run_id = last.get("run_id") or (m and m.group(1))
+        if isinstance(run_id, str) and re.fullmatch(r"[\w-]+", run_id):
+            req = state.read_json(state.path("runs", run_id, "request.json"), {})
+            repo = req.get("repo") if isinstance(req, dict) else None
+    if isinstance(repo, str) and os.path.isdir(repo) and changes.repo_root(repo):
+        return repo
+    return None
+
+
+def _json_at(repo, rel):
+    """`rel` at the repo's HEAD as parsed JSON: {} if absent, None if it isn't a JSON object."""
+    text = changes.git(repo, "show", f"HEAD:{rel}", check=False)
+    if not text:
+        return {}
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
 def canary_seed(repo, marker_dir):
-    """Plant every write trap seen so far; each touches a file in `marker_dir` if it runs."""
+    """{path: text}: the repo's own agent config at HEAD with every write trap seen so far added (each touches a
+    file in `marker_dir` if it runs). A file that isn't a JSON object is left as the repo has it."""
     def touch(name):
         return f"touch {shlex.quote(os.path.join(marker_dir, name))}"
-    files = {
-        ".claude/settings.json": {"hooks": {ev: [{"hooks": [{"type": "command", "command": touch(f"claude-{ev}")}]}]
-                                            for ev in ("SessionStart", "UserPromptSubmit", "Stop")}},
-        ".github/hooks/tagteam-canary.json": {"version": 1, "hooks": {
-            ev: [{"type": "command", "bash": touch(f"copilot-{ev}"), "timeoutSec": 10}]
-            for ev in ("userPromptSubmitted", "postToolUse", "agentStop")}},
-        ".mcp.json": {"mcpServers": {"tagteam-canary": {"command": "sh", "args": ["-c", touch("mcp")]}}},
-    }
-    for rel, data in files.items():
-        p = os.path.join(repo, rel)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w") as fh:
-            json.dump(data, fh)
+    out = {".github/hooks/tagteam-canary.json": json.dumps({"version": 1, "hooks": {
+        ev: [{"type": "command", "bash": touch(f"copilot-{ev}"), "timeoutSec": 10}]
+        for ev in ("userPromptSubmitted", "postToolUse", "agentStop")}})}
+    claude = _json_at(repo, ".claude/settings.json")
+    if claude is not None and isinstance(claude.setdefault("hooks", {}), dict):
+        for ev in ("SessionStart", "UserPromptSubmit", "Stop"):
+            hooks = claude["hooks"].setdefault(ev, [])
+            if isinstance(hooks, list):
+                hooks.append({"hooks": [{"type": "command", "command": touch(f"claude-{ev}")}]})
+        out[".claude/settings.json"] = json.dumps(claude)
+    for rel in (".mcp.json", ".github/mcp.json"):
+        mcp = _json_at(repo, rel)
+        if mcp is not None and isinstance(mcp.setdefault("mcpServers", {}), dict):
+            mcp["mcpServers"]["tagteam-canary"] = {"command": "sh", "args": ["-c", touch(f"mcp-{rel.strip('.')}")]}
+            out[rel] = json.dumps(mcp)
+    return out
 
 
 def _prune(cfg, now):

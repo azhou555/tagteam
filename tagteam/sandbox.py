@@ -134,9 +134,24 @@ def _remove_all(repo, lock, paths):
 
 
 @contextlib.contextmanager
-def checkout(repo, tree, cwd=None):
-    with checkouts(repo, tree, ["_"], cwd) as m:
+def checkout(repo, tree, cwd=None, stale_s=7200):
+    with checkouts(repo, tree, ["_"], cwd, stale_s) as m:
         yield m["_"]
+
+
+def overlay(repo, files, base="HEAD"):
+    """Tree id of `base` plus `files` ({path: text}), built in a scratch index: the repo's working tree, index and
+    refs are untouched; only new objects land in its store."""
+    with tempfile.TemporaryDirectory() as d:
+        env = {"GIT_INDEX_FILE": os.path.join(d, "index")}
+        changes.git(repo, "read-tree", base, env=env)
+        for i, (rel, text) in enumerate(files.items()):
+            src = os.path.join(d, f"f{i}")
+            with open(src, "w") as f:
+                f.write(text)
+            sha = changes.git(repo, "hash-object", "-w", "--no-filters", src).strip()
+            changes.git(repo, "update-index", "--add", "--cacheinfo", f"100644,{sha},{rel}", env=env)
+        return changes.git(repo, "write-tree", env=env).strip()
 
 
 def _common_dir(repo):

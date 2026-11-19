@@ -252,6 +252,12 @@ class Trips(unittest.TestCase):
         self.assertEqual(limits.canary_eligible(), ["copilot"])
         self.assertEqual(limits.trip_count("copilot"), 2)
 
+    def test_disable_records_the_repo(self):
+        limits.disable("copilot", "x", "r1", repo="/r")
+        self.assertEqual(limits.disabled()["copilot"]["repo"], "/r")
+        self.assertEqual(limits.trips()["copilot"]["trips"][-1], {"ts": limits.disabled()["copilot"]["ts"],
+                                                                  "run_id": "r1", "repo": "/r"})
+
     def test_canary_latch_survives_a_failed_trips_write(self):
         self.disable_at(time.time() - 10 * self.DAY, "copilot", "x", "r1")
         with self.trips_write_fails_once():

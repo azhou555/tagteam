@@ -186,22 +186,6 @@ class Doctor(unittest.TestCase):
             with mock.patch.object(doctor.runner, "_spawn", return_value=out):
                 self.assertEqual(doctor.probe("claude", config.load()), want)
 
-    def test_probe_seed_runs_before_the_first_commit(self):
-        seen = []
-
-        def seed(repo, marker_dir):
-            pathlib.Path(repo, "trap.txt").write_text("t")
-            seen.append(marker_dir)
-
-        def spawn(argv, stdin, cwd, timeout):
-            seen.append(pathlib.Path(cwd, "trap.txt").exists())
-            return "", "", 1, False
-        with mock.patch.object(doctor.runner, "_spawn", spawn):
-            doctor.probe("claude", config.load(), seed=seed)
-        self.assertTrue(pathlib.Path(seen[0]).is_dir())       # left for the seed's owner
-        self.assertEqual(seen[1], True)                       # in the reviewed tree, so the checkout has it
-        pathlib.Path(seen[0]).rmdir()
-
 
 class CodexTrust(unittest.TestCase):
     def setUp(self):

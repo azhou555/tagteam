@@ -166,8 +166,9 @@ def _history(t, d, reviewer):
     return past, latched
 
 
-def disable(reviewer, reason, run_id=None, latch=False):
-    """Also records a trip; latches on `latch` (a canary write) or a trip within 7 days of the last.
+def disable(reviewer, reason, run_id=None, latch=False, repo=None):
+    """Also records a trip, with the repo it happened in (the canary re-tests there); latches on `latch` (a canary
+    write) or a trip within 7 days of the last.
     Best effort: a failed write is logged, never raised. An unreadable trips file is left alone."""
     try:
         with state.locked("disabled"):
@@ -181,14 +182,16 @@ def disable(reviewer, reason, run_id=None, latch=False):
                 h = None if t is None else _history(t, d, reviewer)
                 was = d.get(reviewer)
                 keep = latch or isinstance(was, dict) and was.get("latched") is True     # survives a lost trips write
-                d[reviewer] = {"reason": reason, "ts": now, **({"latched": True} if keep else {})}
+                where = {"repo": repo} if repo else {}
+                d[reviewer] = {"reason": reason, "ts": now, **where, **({"latched": True} if keep else {})}
                 state.write_json(state.path("disabled.json"), d)
                 if h is None:
                     state.log("trips unreadable; history left as is", reviewer=reviewer, run_id=run_id)
                     return
                 past, latched = h
                 recent = any(isinstance(x.get("ts"), (int, float)) and now - x["ts"] <= TRIP_WINDOW for x in past)
-                t[reviewer] = {"trips": past + [{"ts": now, "run_id": run_id}], "latched": latched or latch or recent}
+                t[reviewer] = {"trips": past + [{"ts": now, "run_id": run_id, **where}],
+                               "latched": latched or latch or recent}
                 state.write_json(state.path("trips.json"), t)
     except OSError as e:
         state.log("reviewer not disabled", reviewer=reviewer, error=repr(e))

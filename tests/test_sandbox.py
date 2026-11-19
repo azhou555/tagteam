@@ -228,6 +228,7 @@ class EndToEnd(HookRig, unittest.TestCase):
         self.stop("echo x > pwned.txt")
         self.assertFalse(os.path.exists(os.path.join(self.repo, "pwned.txt")))
         self.assertEqual(list(limits.disabled()), ["copilot"])
+        self.assertEqual(limits.disabled()["copilot"]["repo"], self.repo)      # where a canary re-tests it
         self.assertEqual(len(worktrees(self.repo)), 1)
         self.assertEqual(subprocess.run(["git", "-C", self.repo, "status", "--porcelain"], capture_output=True,
                                         text=True).stdout.split(), ["??", "feature.py"])
@@ -565,6 +566,20 @@ class BackgroundStop(HookRig, unittest.TestCase):
             self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
         prompt = next(iter(self.calls[-1].values()))
         self.assertEqual([f in prompt for f in ("bg.py", "b.py", "c.py")], [True, True, True])
+
+
+class Overlay(unittest.TestCase):
+    def test_overlay_adds_files_to_head_and_touches_nothing_else(self):
+        repo = make_repo()
+        pathlib.Path(repo, "a.py").write_text("dirty\n")
+        g = lambda *a: subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True, check=True).stdout
+        before = [g("status", "--porcelain"), g("ls-files", "-s"), g("for-each-ref"), g("rev-parse", "HEAD")]
+        tree = sandbox.overlay(repo, {".mcp.json": "{}", "deep/x.json": "[1]"})
+        self.assertEqual([g("status", "--porcelain"), g("ls-files", "-s"), g("for-each-ref"), g("rev-parse", "HEAD")],
+                         before)
+        self.assertEqual(sorted(g("ls-tree", "-r", "--name-only", tree).split()), [".mcp.json", "a.py", "deep/x.json"])
+        self.assertEqual(g("show", f"{tree}:a.py"), "x = 1\n")
+        self.assertEqual(g("show", f"{tree}:deep/x.json"), "[1]")
 
 
 class Router(unittest.TestCase):
