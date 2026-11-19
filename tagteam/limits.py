@@ -152,13 +152,14 @@ def _history(t, d, reviewer):
     `latched` flag (a canary write) latches too, so a failed trips write can't drop it.
     None if the record is malformed (fail closed)."""
     h = t.get(reviewer)
-    if h is not None and (not isinstance(h, dict) or not isinstance(h.get("trips"), list)):
+    if h is not None and (not isinstance(h, dict) or not isinstance(h.get("trips"), list)
+                          or not all(isinstance(x, dict) for x in h["trips"])):
         return None
     past, latched = (h["trips"], bool(h.get("latched"))) if h else ([], False)
     e = d.get(reviewer)
     if isinstance(e, dict):
         latched = latched or e.get("latched") is True
-        stamps = [x.get("ts") for x in past if isinstance(x, dict) and isinstance(x.get("ts"), (int, float))]
+        stamps = [x.get("ts") for x in past if isinstance(x.get("ts"), (int, float))]
         ts = e.get("ts")
         if not past or isinstance(ts, (int, float)) and (not stamps or ts > max(stamps)):
             near = isinstance(ts, (int, float)) and any(ts - x <= TRIP_WINDOW for x in stamps)
@@ -195,6 +196,20 @@ def disable(reviewer, reason, run_id=None, latch=False, repo=None):
                 state.write_json(state.path("trips.json"), t)
     except OSError as e:
         state.log("reviewer not disabled", reviewer=reviewer, error=repr(e))
+
+
+def set_repo(reviewer, repo):
+    """Record the repo of a disabled entry that has none (a migrated one, found through its run's request.json) before
+    that run dir is pruned. Leaves ts and latched alone; best effort."""
+    try:
+        with state.locked("disabled"):
+            d = disabled()
+            e = (d or {}).get(reviewer)
+            if isinstance(e, dict) and not e.get("repo"):
+                d[reviewer] = {**e, "repo": repo}
+                state.write_json(state.path("disabled.json"), d)
+    except OSError as e:
+        state.log("trip repo not recorded", reviewer=reviewer, error=repr(e))
 
 
 def canary_eligible():

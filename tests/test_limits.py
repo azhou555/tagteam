@@ -277,6 +277,29 @@ class Trips(unittest.TestCase):
         state.path("disabled.json").write_text("{")
         self.assertEqual(limits.canary_eligible(), [])
 
+    def test_non_dict_trip_item_fails_closed(self):
+        limits.disable("copilot", "x", "r1")
+        t = limits.trips()
+        t["copilot"]["trips"].append("garbage")
+        state.write_json(state.path("trips.json"), t)
+        self.assertEqual((limits.canary_eligible(), limits.trip_count("copilot")), ([], None))
+        self.assertFalse(limits.reenable("copilot", 2))
+        limits.disable("copilot", "again", "r2")                                    # no crash; history left as is
+        self.assertEqual(limits.disabled()["copilot"]["reason"], "again")
+        self.assertEqual(limits.trips(), t)
+
+    def test_set_repo_fills_a_missing_repo_only(self):
+        state.write_json(state.path("disabled.json"), {"copilot": {"reason": "x", "ts": 5, "latched": True},
+                                                       "codex": {"reason": "y", "ts": 6, "repo": "/old"}})
+        limits.set_repo("copilot", "/r")
+        limits.set_repo("codex", "/r")
+        limits.set_repo("agy", "/r")
+        self.assertEqual(limits.disabled(), {"copilot": {"reason": "x", "ts": 5, "latched": True, "repo": "/r"},
+                                             "codex": {"reason": "y", "ts": 6, "repo": "/old"}})
+        state.path("disabled.json").write_text("{")
+        limits.set_repo("copilot", "/r")
+        self.assertEqual(state.path("disabled.json").read_text(), "{")
+
     def test_clear_resets_trips(self):
         limits.disable("copilot", "x", "r1")
         limits.clear_disabled()
