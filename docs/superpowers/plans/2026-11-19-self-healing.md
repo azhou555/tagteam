@@ -101,13 +101,19 @@ in `core._review` inside the existing sandbox block. The views (`live.py`, `doct
 **Interfaces:**
 - Produces:
   - `limits.trips() -> dict | None`: `{reviewer: {"trips": [{"ts", "run_id"}], "latched": bool}}`, read fail-closed.
-  - `limits.disable(reviewer, reason, run_id=None)`: unchanged behavior, plus it records a trip under
-    `state.locked("trips")`. It latches when another trip is within 7×86400s. If `trips()` is None, it logs the problem
+  - `limits.disable(reviewer, reason, run_id=None, latch=False)`: unchanged behavior, plus it records a trip. It
+    latches when `latch` is True (a canary write) or when another trip is within 7×86400s. Lock order everywhere:
+    `state.locked("disabled")`, then `state.locked("trips")` nested inside it. If `trips()` is None, it logs the problem
     and leaves the file alone, but the disable still happens.
   - `limits.canary_eligible() -> list[str]`: reviewers in `disabled()` that are not latched. Returns `[]` if either
     file is unreadable. An entry missing from `trips.json` counts as one trip at the `disabled.json` entry's `ts`,
     unlatched (the migration case).
-  - `limits.reenable(reviewer) -> bool`: removes only the `disabled.json` entry. `trips.json` is untouched.
+  - `limits.trip_count(reviewer) -> int | None`: the number of recorded trips (1 for a migrated entry), or None if
+    unreadable.
+  - `limits.reenable(reviewer, expect_trips: int) -> bool`: holds both locks (same order). It removes the
+    `disabled.json` entry only when `trips.json` is readable, the reviewer is not latched, and its trip count still
+    equals `expect_trips` (no newer trip landed). Otherwise it returns False and changes nothing. `trips.json` is never
+    modified.
   - `limits.clear_disabled()` also writes `trips.json` as `{}`.
 - Consumes: the `core.py:299` call site passes `run_id=run_id`.
 
@@ -118,7 +124,11 @@ in `core._review` inside the existing sandbox block. The views (`live.py`, `doct
   - `test_trips_8d_apart_do_not_latch`.
   - `test_old_disabled_entry_without_trips_is_eligible`: write `disabled.json` by hand with
     `{"copilot": {"reason": "x", "ts": now - 15*86400}}` and no `trips.json`. The result is `["copilot"]`.
-  - `test_reenable_keeps_history`: disable, then `reenable`. Copilot is out of `disabled()`, and `trips()` still has
+  - `test_canary_write_latches_old_and_migrated`: two cases, both with `disable(..., latch=True)`. First, a real
+    trip 15 days old. Second, a migrated `disabled.json` entry only. Each ends latched with `canary_eligible() == []`.
+  - `test_reenable_refuses_after_newer_trip_or_latch`: take `n = trip_count`, then `disable` again (or latch it).
+    `reenable(r, n)` returns False and the reviewer stays in `disabled()`.
+  - `test_reenable_keeps_history`: disable, then `reenable(r, trip_count(r))`. Copilot is out of `disabled()`, and `trips()` still has
     one trip. A second `disable` within 7 days then latches.
   - `test_unreadable_trips_blocks_canary_and_is_not_rewritten`: write `"{"` to `trips.json`, then call `disable`. The
     reviewer is in `disabled()`, the file still reads `"{"`, and `canary_eligible() == []`.
@@ -195,7 +205,11 @@ in `core._review` inside the existing sandbox block. The views (`live.py`, `doct
     non-blocking `flock` on `locks/heal.lock` only to check-and-stamp `last_tick`. If it stamped, it calls `_launch()`.
     It never raises.
   - `heal._launch()`: a detached `Popen([sys.executable, "-m", "tagteam", "heal"], start_new_session=True, …)`.
-  - `heal.tick(cfg, now=None) -> list[dict]`: runs the spec's steps 1–5 in order and returns the events it logged.
+  - `heal.tick(cfg, now=None) -> list[dict] | None`: takes a non-blocking `flock` on `locks/heal-run.lock` and holds
+    it for the whole tick. Returns None at once if another tick holds it. Every entry point goes through it: the
+    detached `heal` command and `doctor --fix`, which prints "a heal tick is already running" on None. Runs the
+    spec's steps 1–5 in order and returns the events it logged. A canary reads `n = limits.trip_count(name)` before
+    running and re-enables only through `limits.reenable(name, n)`.
   - `heal.canary_seed(repo, marker_dir)`: writes a `.claude/settings.json` Stop hook and a `.github/hooks/` hook, each
     `touch`ing `marker_dir/<name>`, plus a `.mcp.json` server whose command touches `marker_dir/mcp`.
   - `cli`: the `heal` subcommand (help `"internal: the detached self-heal tick"`) runs `heal.tick(config.load())`
@@ -222,6 +236,12 @@ in `core._review` inside the existing sandbox block. The views (`live.py`, `doct
   - `test_missing_cli_and_not_logged_in_need_you`: a listed reviewer not in `detected()`, and one whose `logged_in()`
     is False, both get `needs_you`. Fixing them flips both back to `ok` on the next tick with a `restored` event.
   - `test_no_reviewer_for_author_needs_you`: every listed reviewer is disabled, so `needs_you` is keyed by author.
+  - `test_concurrent_ticks_serialize`: one tick blocks inside a mocked canary, so a second `tick()` returns None.
+  - `test_canary_pass_does_not_undo_a_newer_trip`: during the canary, the fake probe calls `limits.disable(name, …)`.
+    The pass then fails to re-enable, and the reviewer stays disabled.
+  - `test_prune_worktrees_under_registry_lock`: wrap `state.locked` and `sandbox._clear_stale` with recorders.
+    `_clear_stale` is called only while `sandbox._registry_lock(repo)` is held, with
+    `stale_s == max(7200, 2 * cfg["review"]["deadline_s"])`.
   - `test_maybe_start_launches_once_under_contention`: two threads call `maybe_start` together, and `_launch` is
     called exactly once.
   - `test_maybe_start_not_due`: `last_tick` is 60s ago, so the result is False and nothing launches.
@@ -230,11 +250,12 @@ in `core._review` inside the existing sandbox block. The views (`live.py`, `doct
       tail as `error_text` (stdout's last error line when stderr is empty; reuse `runner._why`).
 - [ ] **Step 4: Implement `tagteam/heal.py` per spec §3.**
   - Canary pass needs all three: `status == "ok"`, an empty `marker_dir`, and no `wrote-files`.
-  - On a marker or `wrote-files`, call `limits.disable(name, "wrote in canary", run_id="canary")`, which latches.
+  - On a marker or `wrote-files`, call `limits.disable(name, "wrote in canary", run_id="canary", latch=True)`.
   - Stale hooks: reuse `doctor.author_part(h, doctor.hook_entries(h.hooks_path()))`. A `False` healthy flag gives
     `needs_you` with `→ tagteam install`.
-  - Prune `state.path("runs")` children by mtime, then `sandbox._clear_stale` for each repo that `runs.jsonl` saw
-    in the last 7 days (skip a repo when that fails).
+  - Prune `state.path("runs")` children by mtime, then, for each repo that `runs.jsonl` saw in the last 7 days,
+    `with state.locked(sandbox._registry_lock(repo)): sandbox._clear_stale(repo, max(7200, 2 * deadline_s))`. That is
+    the same lock and threshold `sandbox.checkouts` uses. Skip a repo when this fails.
 - [ ] **Step 5: Wire it up.**
   - In `cli.hook`, after `print(...)` on every handled phase, call `heal.maybe_start()` inside its own try.
   - Add the `heal` subcommand.
