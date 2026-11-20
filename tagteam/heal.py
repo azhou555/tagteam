@@ -40,6 +40,8 @@ def _try_lock(name):
 
 
 def _launch():
+    if os.environ.get("TAGTEAM_NO_HEAL"):            # the test suite's subprocess hooks must not probe real reviewers
+        return
     subprocess.Popen([sys.executable, "-m", "tagteam", "heal"],
                      cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),     # finds this tagteam
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

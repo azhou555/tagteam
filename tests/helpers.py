@@ -27,6 +27,7 @@ def _no_detach(argv, fd):
 core._detach = _no_detach                            # a detached child has no stubs: it would run real reviewers
 HEAL_LAUNCHES = []
 heal._launch = lambda: HEAL_LAUNCHES.append(1)       # a detached heal tick would probe real reviewers
+os.environ["TAGTEAM_NO_HEAL"] = "1"                  # ...and so would one from a hook run in a subprocess
 
 _run = unittest.TestCase.run
 

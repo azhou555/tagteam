@@ -881,7 +881,7 @@ class OnReview(unittest.TestCase):
         summary = "✗ Changes requested: 1 issue to fix (round 1/2)"
         self.assertEqual(json.loads((out / "run.json").read_text()), {**self.RUN, "outcome": "blocked", "summary": summary})
         env = (out / "env").read_text().splitlines()
-        self.assertEqual([e for e in env if not e.startswith("TAGTEAM_HOME=")],
+        self.assertEqual([e for e in env if not e.startswith(("TAGTEAM_HOME=", "TAGTEAM_NO_HEAL="))],
                          ["TAGTEAM_AUTHOR=claude", "TAGTEAM_DEPTH=1", "TAGTEAM_MODE=block", "TAGTEAM_OUTCOME=blocked",
                           f"TAGTEAM_SUMMARY={summary}"])
 
