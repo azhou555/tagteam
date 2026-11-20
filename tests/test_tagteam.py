@@ -593,6 +593,18 @@ class Fallback(HookRig, unittest.TestCase):
                       [{k: e.get(k) for k in ("fallback", "failed")} for e in log
                        if e["msg"] == "fallback skipped: no sandbox"])
 
+    def test_every_checkout_uses_the_shared_stale_threshold(self):
+        self.unrig()
+        self.rig("review.deadline_s = 5000\n" + use_toml(["agy", "copilot"]))
+        seen, real = [], sandbox.checkouts
+
+        def checkouts(repo, tree, names, cwd=None, stale_s=7200):
+            seen.append(stale_s)
+            return real(repo, tree, names, cwd, stale_s)
+        with mock.patch.object(sandbox, "checkouts", checkouts):
+            _, run = self.review(fail=("agy",))
+        self.assertEqual((run["fallback_for"], seen), ({"copilot": "agy"}, [10000, 10000]))
+
     def test_a_fallback_that_cannot_start_keeps_the_write_checks(self):
         from tagteam import limits
         with mock.patch.object(router, "fallback", side_effect=RuntimeError("boom")):

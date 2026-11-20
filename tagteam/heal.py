@@ -23,7 +23,7 @@ BACKOFF_MIN, BACKOFF_MAX = 15, 360
 KEEP_RUNS_S = 30 * 86400
 RECENT_S = 7 * 86400
 BACKOFF = ("next_probe", "probe_backoff_min")     # kept through a probe pass; cleared by a real success
-TRAP = "tagteam-canary"                           # prefix of every canary trap and marker file name
+TRAP = "tagteam-canary"                           # prefix of our own trap file and every marker
 
 
 def _try_lock(name):
@@ -258,9 +258,11 @@ def _canary_disabled(cfg, use, revs, found, now, budget, why, note):
 
 
 def _canary(name, cfg, repo, marker_dir, trips, note):
-    """One canary: None if it came back clean and `name` is re-enabled, else the probes.jsonl detail. Our own trap
-    or marker file turning up in the real repo is a write; any other real-repo change is inconclusive."""
-    status, err = doctor.probe(name, cfg, repo=repo, files=canary_seed(repo, marker_dir), stale_s=sandbox.stale_s(cfg))
+    """One canary: None if it came back clean and `name` is re-enabled, else the probes.jsonl detail. A trap file or
+    marker changing in the real repo is a write (even if it was the user's edit: that fails safe); any other
+    real-repo change is inconclusive."""
+    files = canary_seed(repo, marker_dir)
+    status, err = doctor.probe(name, cfg, repo=repo, files=files, stale_s=sandbox.stale_s(cfg))
     try:
         marks = sorted(os.listdir(marker_dir))
     except OSError:
@@ -268,7 +270,7 @@ def _canary(name, cfg, repo, marker_dir, trips, note):
     changed = err.splitlines() if status == doctor.REPO_CHANGED else []
     if changed:
         state.log("canary: real repo changed", reviewer=name, repo=repo, changed=changed[:50])
-    escaped = [p for p in changed if os.path.basename(p).startswith(TRAP)]
+    escaped = [p for p in changed if p in files or os.path.basename(p).startswith(TRAP)]
     if marks or escaped or status == "wrote-files":
         limits.disable(name, "wrote in canary", run_id="canary", latch=True, repo=repo)
         return f"wrote: {', '.join(marks or escaped or [status])}"

@@ -39,6 +39,9 @@ from tagteam.adapters import HookEvent  # noqa: E402
 
 
 class Checkout(unittest.TestCase):
+    def test_stale_s_outlasts_any_deadline(self):
+        self.assertEqual([sandbox.stale_s({"review": {"deadline_s": d}}) for d in (240, 5000)], [7200, 10000])
+
     def test_sandbox_works_without_git_identity(self):
         repo = make_repo()
         tree = changes.snapshot(repo)

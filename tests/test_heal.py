@@ -283,14 +283,16 @@ class Tick(Rig, unittest.TestCase):
         self.assertEqual(len(state.read_jsonl(state.path("probes.jsonl"))), heal.COPILOT_PER_DAY)
 
     def test_backoff_is_saved_when_a_later_step_raises(self):
-        demote("agy")
-        self.result["agy"] = ("timeout", "")
+        demote("copilot")
+        self.result["copilot"] = ("timeout", "")
         t0 = time.time()
+
         def boom(*a):
             raise RuntimeError("boom")
         with mock.patch.object(heal, "_authors", boom):
             heal.tick(cfg(), now=t0)
-        self.assertEqual((rev("agy")["probe_backoff_min"], health.load()["last_tick"]), (15, t0))
+        self.assertEqual((rev("copilot")["probe_backoff_min"], health.load()["last_tick"]), (15, t0))
+        self.assertEqual([r["reviewer"] for r in state.read_jsonl(state.path("probes.jsonl"))], ["copilot"])
         heal.tick(cfg(), now=t0 + 60)
         self.assertEqual(len(self.probes), 1)
 
@@ -508,6 +510,13 @@ class CanaryInRepo(Rig, unittest.TestCase):
                        "why": f"{self.repo} changed during the test"}, events)
         log = [json.loads(l) for l in state.path("tagteam.log").read_text().splitlines()]
         self.assertIn(["notes.txt"], [e.get("changed") for e in log if e["msg"] == "canary: real repo changed"])
+
+    def test_a_trap_file_changing_in_the_real_repo_latches(self):
+        self.run_hooks = lambda cwd: pathlib.Path(self.repo, ".mcp.json").write_text('{"mcpServers": {}}')
+        with mock.patch("time.time", return_value=time.time() - 10 * DAY):
+            limits.disable("claude", "x", "r1", repo=self.repo)
+        heal.tick(cfg(use=["claude"]))
+        self.assertIs(limits.trips()["claude"]["latched"], True)
 
     def test_canary_trap_landing_in_the_real_repo_latches(self):
         def escape(cwd):
