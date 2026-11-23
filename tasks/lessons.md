@@ -32,3 +32,9 @@
   The user labeled 14/15 past blocking findings real; the stricter rubric dropped real bugs.
 - Rule: before changing review prompts to cut false positives, get a labeled sample (scripts/rubric_eval.py
   writes labels.md) and measure recall on real findings, not just block rate.
+
+## Project docs are Markdown in the repo, not published pages
+- What happened (2026-11-20): I wrote the attribution redesign as a published HTML artifact in the scratchpad.
+  It was deleted, and the user said to keep docs in .md files.
+- Rule: design notes and proposals go in `docs/*.md` (or `DESIGN.md`) in the repo, using mermaid for diagrams.
+  Don't make an HTML page unless asked.
