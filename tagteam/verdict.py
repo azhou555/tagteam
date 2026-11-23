@@ -30,6 +30,12 @@ def gated(issues, gate="block"):
     return [f for f in issues if f.get("gate", "block") == gate]
 
 
+def demote(issues):
+    """After the confirm round nothing blocks again this cycle, but an issue it still found is real: it stays open
+    as a suggestion instead of being dropped."""
+    return [{**f, "gate": "advise"} for f in issues]
+
+
 def decide(results, cfg, round_no, mode="block", carried=()):
     """results: {reviewer: result-or-None}. Returns (action, issues, advisory): issues are the findings at or
     above `block_at`, each with a `gate`, and only `block`-gated ones block. A blocker always blocks, a

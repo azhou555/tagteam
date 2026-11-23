@@ -1,5 +1,39 @@
 # tagteam — implementation plan
 
+## Attribution redesign (2026-11-20) — awaiting go-ahead
+Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable.
+
+### Phase A — independent fixes (no dependency on the redesign)
+- [ ] F4: blame a reviewer only for writes inside its own sandbox; other real-tree or git-config changes warn, never disable
+- [x] Confirm round: carry its major/blocker findings forward as suggestions instead of dropping them (verdict.demote; 322 tests OK)
+- [ ] ~~F5: agy reads every `workspacePaths` root~~ — moved to Phase E (agy is a non-Claude harness; needs one session spanning several repos, which the ledger's per-repo-root keys provide)
+
+### Installer bugs (found 2026-11-22, reinstalling from main)
+- [ ] `tagteam install` rewrites `~/.claude/settings.json` with every non-ASCII character escaped (`—` → `—`) while the plan line says "already up to date". `base.save` uses `json.dumps` without `ensure_ascii=False`. The content is equal JSON, but the file churns on every install. Keep non-ASCII as-is, and write nothing when the parsed content is unchanged.
+- [ ] The menu bar step isn't idempotent. `install.py` `_menubar`'s plan always says "write ~/SwiftBar/tagteam.1s.sh; add ~/Applications/tagteam.app", even right after an install. Compare the plugin and launcher bytes and report "already up to date" when they match.
+
+### Phase B — verify the assumptions (gates C–E)
+- [ ] Claude: fixtures for foreground, parallel, background and worktree subagents (session_id shared? agent_id? cwd? tool_use_id on Pre and Post?)
+- [~] Codex, Copilot, agy: does a PreToolUse-equivalent exist? Event names present in all (codex 0.166 PreToolUse+SubagentStart/Stop, copilot 1.0.114 preToolUse+subagentStop, agy 1.5.13 PreToolUse; agy subagents default to `workspace: "inherit"` = the parent's tree, only `"branch"` makes an isolated git worktree, `"share"` unverified). Payload shape still uncaptured
+- [ ] Measure the hook overhead of a snapshot on every Bash call on a real large repo
+
+### Phase C — shadow ledger, Claude only (no behavior change)
+- [ ] Pre/Post brackets → pending + owned ledger + repo journal
+- [ ] Span merging + chain reconciliation, computed but not acted on
+- [ ] Log per Stop: own / foreign / ambiguous / unattributed hunks vs today's diff; run for a week
+
+### Phase D — Claude cutover (the safety net ships with it)
+- [ ] Whole-tree diff stays; unclaimed hunks reviewed as unattributed suggestions (spec: "Safety net")
+- [ ] turn_start keeps the oldest unreviewed baseline (F2); worktree deltas as their own group (F3)
+- [ ] Own hunks block; foreign, ambiguous, unattributed advise
+- [ ] Tests: every attribution test case in the spec, incl. missing PostToolUse → change still reviewed (unattributed until recovery ships)
+
+### Phase E — better labels (coverage already guaranteed by D's net)
+- [ ] Abandoned-call recovery (uncertain instead of unattributed), open background jobs, orphans
+- [ ] Other harnesses (chained Post→Pre fallback where no Pre hook, labelled approximate)
+- [ ] F5: agy sessions cover every `workspacePaths` root (one repo-root group per root); resolve touch paths against the root that contains them, not `[0]`
+- [ ] Reviewed-ledger reuse with re-gating
+
 Spec: `../DESIGN.md`. Each phase ends in something verifiable.
 
 ## Phase 0 — Spike: pin down each agent's real hook protocol
@@ -542,8 +576,14 @@ Evidence: 125 past verdicts; median finding confidence 0.98, none under 0.6 (`mi
       in any of the five, all exited 0. In-place reviews (no sandbox) still can run Copilot's repo hooks; Watch
       catches what they write. A repo's committed .github/copilot/settings.json with disableAllHooks false and
       inline hooks: hooks ran without the fix, none with it (local wins). A symlinked .github leaves them on.
-- [ ] Not probed: repo MCP servers, plugins and skills, which Copilot loads in a trusted folder, and whether
-      Claude with --setting-sources user still loads a project .mcp.json. MCP servers are processes they start.
+- [x] Repo MCP servers (2026-11-04). Probe repo under ~/Coding with a server that writes a marker in .mcp.json,
+      .github/mcp.json, .vscode/mcp.json, .codex/config.toml, .gemini/settings.json, .agents/mcp.json,
+      .antigravity/mcp_config.json, opencode.json, plus .claude/settings.json enableAllProjectMcpServers.
+      Only Copilot started one (.mcp.json; .github/mcp.json when there is no .mcp.json). Claude did too without
+      --setting-sources user, none with it. `--disable-mcp-server '*'` is not a wildcard. Fix: the sandbox's
+      settings.local.json also lists the servers from both files in `disabledMcpServers` (the key `copilot mcp
+      disable` writes); re-probe with both files and with .github/mcp.json alone: none started.
+- [ ] Not probed: plugins Copilot might load from a trusted repo (only user-installed plugins are documented).
 - [x] Reviewer order agy, opencode, copilot, codex, claude; opencode pinned to free opencode/big-pickle
 - [x] Reviewer order agy, copilot, opencode, codex, claude: a blocking round waits for its slowest reviewer (agy
       ~128s, opencode ~166s and 2/7 timeouts vs copilot ~30s), so copilot pairs with agy on large changes

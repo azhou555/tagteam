@@ -16,6 +16,29 @@ QUOTA_ERR = re.compile(r"rate.?limit|quota|usage limit|too many requests|\b429\b
                        r"limit (reached|exceeded)|out of credits", re.I)
 
 
+DENIED = re.compile(r'\{"action":\s*"([a-z_]+)"')     # agy's `denied_actions` entries
+RETRY_AFTER_MS = re.compile(r'retryAfterMs\\*"\s*:\s*(\d+)')     # OpenCode's, raw or inside escaped JSON
+MAX_QUOTA_MIN = 24 * 60
+
+
+def _quota_minutes(text, default):
+    """Honor the provider's retry-after (OpenCode sends `retryAfterMs`, hours on the free tier), within a day."""
+    waits = [int(m) for m in RETRY_AFTER_MS.findall(text)]
+    return min(MAX_QUOTA_MIN, max(default, max(waits) / 60000)) if waits else default
+
+
+def _errors(stderr, stdout):
+    """What the reviewer CLI itself said went wrong: stderr's tail and stdout's error lines (event streams)."""
+    err_lines = [l for l in (stdout or "").splitlines()[-200:] if '"error"' in l or l.lower().startswith("error")]
+    return (stderr or "")[-2000:] + "\n" + "\n".join(err_lines)[-4000:]
+
+
+def _why(stderr, stdout):
+    """The reason a reviewer failed: its stderr, else the last stdout line naming an error (not a trailing event)."""
+    lines = (stdout or "").strip().splitlines()
+    return ((stderr or "").strip() or next((l for l in reversed(lines) if "error" in l.lower()), "\n".join(lines)))[-500:]
+
+
 def _tilde(path):
     """Out-of-repo artifacts are absolute paths; show them ~-relative so no prompt carries the home path."""
     home = os.path.expanduser("~")
@@ -71,13 +94,15 @@ def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
     t0 = time.time()
     reviewer, options = harnesses.get(agent).reviewer, cfg["reviewers"].get(agent, {})
     for attempt in (1, 2):
-        argv, stdin, out_file = reviewer.argv(prompt, options, workdir, int(deadline - (time.time() - t0)))
+        argv, stdin, out_file = reviewer.argv(prompt, options, workdir, int(deadline - (time.time() - t0)), cwd)
         stdout, stderr, rc, timed_out = _spawn(argv, stdin, cwd, deadline - (time.time() - t0))
         result = None if timed_out else reviewer.parse(stdout, out_file)
         retryable = agent == "agy" and '"denied_actions"' in (stdout or "") and deadline - (time.time() - t0) > 60
         if result is not None or not retryable:
             break
-        prompt += "\n\nYour previous attempt ran a shell command, was denied, and produced nothing. Do not run any."
+        denied = ", ".join(sorted(set(DENIED.findall(stdout)))) or "a tool call"
+        prompt += (f"\n\nYour previous attempt was denied {denied} and produced nothing. Run no shell commands and "
+                   "read only files inside this checkout.")
     rec = {"reviewer": agent, "ok": result is not None, "timed_out": timed_out, "rc": rc, "attempts": attempt,
            "duration": round(time.time() - t0, 1)}
     try:
@@ -92,11 +117,11 @@ def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
     if result is not None:
         limits.note_result(agent, True, cfg)
     else:
-        tail = (stderr or "")[-2000:] + (stdout or "")[-2000:]
-        rec["error"] = tail[-500:]
-        if QUOTA_ERR.search(tail):
+        rec["error"] = "timed out" if timed_out else _why(stderr, stdout)
+        said = _errors(stderr, None if timed_out else stdout)   # a cut-off stdout may end mid-way through a file it read
+        if QUOTA_ERR.search(said):
             rec["quota_error"] = True
-            quota.cooldown(agent, cfg["limits"]["cooldown_min"] * 4)
+            quota.cooldown(agent, _quota_minutes(said, cfg["limits"]["cooldown_min"] * 4))
         else:
             limits.note_result(agent, False, cfg)
     state.write_json(os.path.join(workdir, "result.json"), {"meta": rec, "result": result,

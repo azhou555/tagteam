@@ -215,7 +215,9 @@ class Background(HookRig, unittest.TestCase):
             self.assertEqual(self.stop(other, lines=200 + i, name="other.py").get("decision"), "block")
         # round 3 is the confirm: it can't block, so the author doesn't wait for it
         self.assertEqual(self.stop(other, lines=202, name="other.py"), {"systemMessage": core.BACKGROUND})
-        self.assertEqual(self.open_issues(), [("the loop skips the last item", "major", "advise")])
+        # what the confirm still found stays open as a suggestion, beside the untouched one
+        self.assertEqual(sorted(self.open_issues()), [("the cache never expires", "major", "advise"),
+                                                      ("the loop skips the last item", "major", "advise")])
         run = state.read_jsonl(state.path("runs.jsonl"))[-1]
         self.assertEqual((run["round"], run["confirm"], run["action"], run["blocking"]), (3, True, "allow", 1))
         self.assertEqual((self.session()["round"], self.session()["owed"]), (3, None))

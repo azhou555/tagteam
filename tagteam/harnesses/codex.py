@@ -92,7 +92,7 @@ def install(entry_cmd, stop_timeout, dry_run):
     return change
 
 
-def argv(prompt, options, workdir, deadline):
+def argv(prompt, options, workdir, deadline, cwd):
     model = options.get("model")
     out = os.path.join(workdir, "out.json")
     # approval_policy=never matters: with the user's auto_review approver, read-only alone let apply_patch through.
