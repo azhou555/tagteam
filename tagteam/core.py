@@ -431,8 +431,8 @@ def _turn_end(ev, cfg, lock, fd):
 
     if open_issues is None:                          # no verdict: what was open stays open
         open_issues = s.get("prior") or []
-    elif confirm:                                    # a confirm verdict is the last word on the blocking cycle
-        open_issues = verdict.gated(open_issues, "advise")
+    elif confirm:                                    # the last word on the blocking cycle: what's left stays a suggestion
+        open_issues = verdict.demote(open_issues)
 
     def advance(cur):
         cur["round"] = round_no
@@ -496,8 +496,8 @@ def background(path, alarm=False):
     action, msg, run_dir, open_issues = review(ev, cfg, s, job["artifacts"], confirm_round or 1, "turn", limits.HELD,
                                                bool(confirm_round), job["rebuttal"], mode=job.get("mode", "advise"),
                                                pinned=tuple(job["pinned"]))
-    if confirm_round and open_issues is not None:  # the last word on the blocking cycle: only suggestions stay open
-        open_issues = verdict.gated(open_issues, "advise")
+    if confirm_round and open_issues is not None:  # the last word on the blocking cycle: what's left stays a suggestion
+        open_issues = verdict.demote(open_issues)
     verdict_in = open_issues is not None and (run_dir is not None or msg)   # not: no verdict, or already reviewed
     notice = msg if msg and action != "block" and not _has_status_line(ev.agent) else None   # a blocker blocks instead
     if not (verdict_in or notice):

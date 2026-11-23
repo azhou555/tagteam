@@ -145,11 +145,15 @@ class FollowThrough(HookRig, unittest.TestCase):
         for _ in range(3):
             self.stop(issues(1))
         self.assertIn("⚠ Unresolved: 1 issue still open after 2 fix rounds", self.seg())
-        self.assertEqual(self.session()["prior"], [])
+        # nothing blocks again this cycle, but the issue it still found stays open as a suggestion
+        self.assertEqual([(f["claim"], f["gate"]) for f in self.session()["prior"]],
+                         [("alpha breaks when input is empty", "advise")])
         self.start()
-        self.small_fix()
-        self.stop(change=False)
-        self.assertEqual(len(self.calls), 3)
+        self.small_fix()                                     # a fix to its file re-checks it, without blocking
+        out = self.stop(change=False)
+        self.assertNotIn("decision", out)
+        self.assertIn("✓ Issues resolved: all 1 fixed and re-checked", out["systemMessage"])
+        self.assertEqual((len(self.calls), self.session()["prior"]), (4, []))
 
     def test_confirm_round_with_no_verdict_leaves_the_issues_open(self):
         def failing(jobs, cfg, cwd, run_dir, deadline, on_done=None):
