@@ -444,6 +444,15 @@ class Attribution(Session, unittest.TestCase):
         pathlib.Path(self.p("notes.py")).write_text(FEATURE)
         self.assertEqual(self.stop_with({"copilot": BLOCKER("mine.py")})["decision"], "block")
 
+    def test_an_open_blocker_on_a_symlink_quoted_absolute_stays_blocking(self):
+        pathlib.Path(self.p("target.py")).write_text(FEATURE)
+        self.prompt()
+        self.tool("Bash", {"command": "ln -s target.py link.py"}, lambda: os.symlink("target.py", self.p("link.py")))
+        self.write(self.p("mine.py"), FEATURE)               # past the trivial-change skip
+        self.assertEqual(self.stop_with({"copilot": BLOCKER(self.p("link.py"))})["decision"], "block")
+        pathlib.Path(self.p("notes.py")).write_text(FEATURE)
+        self.assertEqual(self.stop_with({"copilot": BLOCKER("link.py")})["decision"], "block")
+
 
 class Journal(unittest.TestCase):
     def test_an_append_racing_a_prune_is_never_lost(self):

@@ -44,13 +44,13 @@ def _update(ev, change):
         state.write_json(f, d)
 
 
-def _norm(path):
+def norm(path):
     """Resolve the directories (macOS /var is /private/var), not the file itself: a symlink stays the link."""
     return os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
 
 
 def _real(paths):
-    return [_norm(p) for p in paths]
+    return [norm(p) for p in paths]
 
 
 def _journal_key(repo):
@@ -228,13 +228,13 @@ def owners(ev, cfg, s, base, since, head, artifacts):
     for c in calls:
         mine.update(c["deltas"])
     for a in in_repo:
-        path = _norm(os.path.join(repo, a["path"]))
+        path = norm(os.path.join(repo, a["path"]))
         b, now = blobs.get(a["path"], [None, None])
         labels[a["path"]] = _label(calls, path, b, now, others)
     skipped = sum(c["kind"] == "skipped" for c in calls)
     trusted = repo and not skipped and d.get("untrusted", 0) < since
-    by = lambda label: sorted(_norm(os.path.join(repo, p)) for p, v in labels.items() if v == label)
-    today = sorted(_norm(os.path.join(repo or "", a["path"])) for a in in_repo)
+    by = lambda label: sorted(norm(os.path.join(repo, p)) for p, v in labels.items() if v == label)
+    today = sorted(norm(os.path.join(repo or "", a["path"])) for a in in_repo)
     _sweep_dead_ledgers()
     _append_pruned(state.path("shadow.jsonl"), "shadow", {
         "ts": time.time(), "session": ev.session_id, "turn_id": s.get("turn_id"), "repo": repo, "today": today,
