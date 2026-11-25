@@ -322,6 +322,50 @@ class Attribution(Session, unittest.TestCase):
         self.assertEqual((line["own"], line["unattributed"]), ([self.p("new.py")], [self.p("old.py")]))
         self.assertEqual(self.last_run()["blocking"], 0)
 
+    def test_a_finding_naming_no_file_blocks_when_every_file_is_own(self):
+        self.prompt()
+        self.write(self.p("mine.py"), FEATURE)
+        out = self.stop_with({"copilot": {"verdict": "changes_requested", "summary": "",
+                                          "findings": [finding(sev="blocker", file="", line=None, claim="general")]}})
+        self.assertEqual(out["decision"], "block")
+
+    def test_another_sessions_write_inside_an_own_bash_call_is_contested(self):
+        self.prompt()
+
+        def other_writes():
+            self.write(self.p("theirs.py"), FEATURE, sid="other", call="toolu_other")
+        self.tool("Bash", {"command": "sleep 1"}, other_writes, call="bash1")
+        self.assertEqual(self.stop_with({"copilot": BLOCKER("theirs.py")}), {"systemMessage": core.BACKGROUND})
+        self.assertEqual(self.shadow()["foreign"], [self.p("theirs.py")])
+
+    def worktree_blocked(self):
+        wt = self.p(".claude/worktrees/x")
+        sh(self.repo, "git", "worktree", "add", "-q", wt)
+        self.prompt()
+        self.write(os.path.join(wt, "empty.txt"), "", cwd=wt, agent_id="a1", call="t0")
+        self.write(os.path.join(wt, "wt.py"), FEATURE, cwd=wt, agent_id="a1")
+        out = self.stop_with({"copilot": BLOCKER(".claude/worktrees/x/wt.py")})
+        self.assertEqual(out["decision"], "block")
+        return wt
+
+    def test_an_empty_worktree_file_does_not_hide_the_worktrees_other_changes(self):
+        self.worktree_blocked()
+        self.assertIn("wt.py", self.calls[0]["copilot"])
+
+    def test_an_unchanged_stop_after_a_worktree_blocker_rechecks_instead_of_resolving(self):
+        self.worktree_blocked()
+        out = self.stop_with({"copilot": BLOCKER(".claude/worktrees/x/wt.py")})
+        self.assertEqual(out["decision"], "block")
+        self.assertEqual(len(self.calls), 2)
+        self.assertNotEqual(self.last_run().get("reason"), "reverted")
+
+    def test_a_partial_worktree_fix_is_reviewed(self):
+        wt = self.worktree_blocked()
+        self.write(os.path.join(wt, "wt.py"), FEATURE + "y = 1\n", cwd=wt, agent_id="a1", call="fix")
+        self.stop_with({})
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn("+y = 1", self.calls[1]["copilot"])
+
 
 class Journal(unittest.TestCase):
     def test_an_append_racing_a_prune_is_never_lost(self):

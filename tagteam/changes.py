@@ -64,7 +64,10 @@ def blob_diff(repo, rel, a, b):
     """(lines changed, diff text) between two blob ids (None = absent), labelled as `rel`; lines None = binary."""
     empty = git(repo, "hash-object", "-w", "/dev/null").strip()
     a, b = a or empty, b or empty
-    added, deleted = git(repo, "diff", "--numstat", a, b).split("\t")[:2]
+    stat = git(repo, "diff", "--numstat", a, b)
+    if not stat.strip():                             # e.g. an empty file created: absent and empty share one blob
+        return 0, ""
+    added, deleted = stat.split("\t")[:2]
     text = git(repo, "diff", a, b).replace(f"a/{a}", f"a/{rel}").replace(f"b/{b}", f"b/{rel}")
     return (None if added == "-" else int(added) + int(deleted)), text
 

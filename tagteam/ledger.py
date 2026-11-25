@@ -216,8 +216,8 @@ def owners(ev, cfg, s, base, since, head, artifacts):
     for a in in_repo:
         path = _norm(os.path.join(repo, a["path"]))
         b, now = blobs.get(a["path"], [None, None])
-        labels[a["path"]] = ("own" if _chain(_spans(calls, path), b, now) else
-                             "foreign" if path in others else "unattributed")
+        labels[a["path"]] = ("foreign" if path in others else     # contested: another session's call wrote it too
+                             "own" if _chain(_spans(calls, path), b, now) else "unattributed")
     skipped = sum(c["kind"] == "skipped" for c in calls)
     trusted = repo and not skipped and d.get("unbracketed", 0) < since    # a call with no Pre wrote unseen
     by = lambda label: sorted(_norm(os.path.join(repo, p)) for p, v in labels.items() if v == label)
@@ -251,7 +251,7 @@ def worktree_artifacts(ev, s, since, ignore):
         if spans[0][0] == now[path] or changes.ignored(rel, ignore):
             continue
         lines, diff = changes.blob_diff(repo, rel, spans[0][0], now[path])
-        if lines is None:
+        if not lines:                                # binary, or nothing to read
             continue
         arts.append({"path": rel, "status": "added" if spans[0][0] is None else "deleted" if now[path] is None
                      else "modified", "lines_changed": lines, "diff": diff})

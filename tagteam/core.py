@@ -459,12 +459,14 @@ def _turn_end(ev, cfg, lock, fd):
     confirm = round_no == m + 1 and bool(prior)      # the last word on the issues still open; it can't block
     if round_no > m and not confirm:
         return None
-    whole = None                                     # the turn's whole change so far, for rebuttals and the revert check
+    whole, worktree_labels = None, {}                # the turn's whole change so far, for rebuttals and the revert check
     if prior and ev.agent in cfg["authors"]["review"]:
         ignore, repo = cfg["review"]["ignore"], s.get("repo")
         outside = changes.outside_changes(s.get("outside_touched", []), {}, ignore)
         if repo and s.get("turn_baseline") and head:
-            whole = changes.diff_trees(repo, s["turn_baseline"], head, ignore) + outside
+            worktrees, worktree_labels = _ledger(ev, cfg, lambda: ledger.worktree_artifacts(
+                ev, s, s.get("turn_baseline_ts", s["started"]), ignore), ([], {}))
+            whole = changes.diff_trees(repo, s["turn_baseline"], head, ignore) + outside + worktrees
             if not whole and not s.get("carried") and not changes.ref_activity(repo, s.get("refs", {}), changes.refs(repo)):
                 return _reverted(ev, cfg, s, sf, round_no, head)   # carried issues: undoing this turn fixes nothing
         elif outside:
@@ -476,6 +478,8 @@ def _turn_end(ev, cfg, lock, fd):
             return None
         artifacts, changed = whole, sum(a["lines_changed"] for a in whole)
         labels = _owners(ev, cfg, s, s.get("turn_baseline"), s.get("turn_baseline_ts", s["started"]), head, whole)
+        if labels is not None:
+            labels.update(worktree_labels)
     elif changed == 0:
         return None
     # Round 1 skips trivial edits; later rounds and carried issues re-check any fix, however small.
@@ -483,7 +487,8 @@ def _turn_end(ev, cfg, lock, fd):
             or not wanted(ev, cfg, artifacts):       # skipped by choice: the next review starts after this change
         _write_back(sf, s.get("turn_id"), lambda cur: _advance(cur, head, head_ts, artifacts))
         return None
-    owned = None if labels is None else {p for p, v in labels.items() if v == "own"}
+    owned = None if labels is None or all(v == "own" for v in labels.values()) else {   # None: all own, so a finding
+        p for p, v in labels.items() if v == "own"}                                      # naming no file can block
     mode = _mode(cfg, artifacts, prior, owned)
     # A confirm can't block either, so the author doesn't wait for it; it still spends its round.
     if ((mode == "advise" or confirm) and s.get("repo") and head and lock == limits.HELD and cfg["reviewers"].get("use")
