@@ -533,10 +533,13 @@ def _owned(s, labels, prior):
     repo = s.get("repo")
     roots = {repo, os.path.realpath(repo)} if repo else set()
 
+    real_repo = os.path.realpath(repo) if repo else None
+
     def aliases(p):                                  # the directories resolve, a symlink itself stays the link
         p = os.path.normpath(p)
-        root = next((r for r in roots if changes.in_repo(p, r)), None) if os.path.isabs(p) else None
-        return {p, os.path.relpath(ledger.norm(p), os.path.realpath(root))} if root else {p}
+        n = ledger.norm(p) if os.path.isabs(p) and real_repo else None
+        inside = n and n.startswith(real_repo + os.sep)
+        return {p, os.path.relpath(n, real_repo)} if inside else {p}
     rel = {p for p, v in labels.items() if v == "own"}.union(
         *(aliases(f["file"]) for f in verdict.gated(prior) if f.get("file")))
     return rel | {os.path.join(r, p) for r in roots for p in rel if not os.path.isabs(p)}
