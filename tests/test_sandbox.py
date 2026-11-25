@@ -306,6 +306,36 @@ class EndToEnd(HookRig, unittest.TestCase):
             self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
         self.assertIn("feature.py", next(iter(self.calls[-1].values())))
 
+    def test_stopped_review_still_records_reviewer_spend_and_names_nobody_as_reviewed(self):
+        out = self.stop("git config tagteam.x 1")
+        run = state.read_jsonl(state.path("runs.jsonl"))[-1]
+        spent = [h for h in state.read_jsonl(state.path("history.jsonl")) if h["run_id"] == run["run_id"]]
+        self.assertEqual([h["reviewer"] for h in spent], ["copilot"])
+        self.assertEqual((run["reviewers"], run["stopped_reviewers"]), ([], ["copilot"]))
+        self.assertNotIn("changed lines", out["systemMessage"])
+
+    def test_review_that_passes_after_a_stop_clears_the_kept_baseline(self):
+        self.stop("git config tagteam.x 1")
+        self.stop("true", name="second.py")                               # same turn: covers both, and passes
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="next"))
+        self.calls.clear()
+        pathlib.Path(self.repo, "third.py").write_text("c = 3\n" * 20)
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        prompt = next(iter(self.calls[-1].values()))
+        self.assertIn("third.py", prompt)
+        self.assertNotIn("feature.py", prompt)
+
+    def test_three_stops_in_a_row_escalate_the_notice(self):
+        for i in range(3):
+            self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt=f"turn {i}"))
+            out = self.stop(f"git config tagteam.x {i}", name=f"f{i}.py")
+        self.assertIn("⚠ 3 reviews in a row stopped in this repo by git config or hook changes", out["systemMessage"])
+        self.stop("true", name="ok.py")
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="again"))
+        out = self.stop("git config tagteam.x 9", name="g.py")
+        self.assertNotIn("in a row", out["systemMessage"])
+
     def test_git_config_change_is_logged_by_key(self):
         self.stop_two("git config core.hooksPath /evil")
         entry = [e for e in state.read_jsonl(state.path("tagteam.log")) if e["msg"].startswith("review stopped")][-1]
@@ -477,6 +507,27 @@ class NonGit(unittest.TestCase):
         self.assertEqual((action, run_dir, open_issues, limits.disabled()), ("allow", None, None, {}))
         self.assertIn(core.STOPPED_IN_PLACE, msg)
         write_user_config("")
+
+
+class BackgroundStop(HookRig, unittest.TestCase):
+    def setUp(self):
+        self.rig(small_blocks=False)
+        write_user_config(use_toml(["copilot"]))
+
+    def tearDown(self):
+        self.unrig()
+
+    def test_stopped_background_review_leaves_the_change_for_the_next_turn(self):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+        pathlib.Path(self.repo, "bg.py").write_text("a = 1\n" * 20)
+        with mock.patch.object(harnesses, "get", fake_harness("git config tagteam.x 1")):
+            self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        self.assertEqual(state.read_jsonl(state.path("runs.jsonl"))[-1]["reason"], core.STOPPED)
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="next"))
+        pathlib.Path(self.repo, "other.py").write_text("b = 2\n" * 20)
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        self.assertIn("bg.py", next(iter(self.calls[-1].values())))
 
 
 class Router(unittest.TestCase):

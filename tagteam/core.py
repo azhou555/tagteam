@@ -145,6 +145,7 @@ STILL_RUNNING = "earlier review still running"
 # Nothing proves who changed shared git state or an unsandboxed tree: the run stops, nobody is disabled.
 STOPPED = "git config or hooks changed during review, see tagteam.log"
 STOPPED_IN_PLACE = "the repo changed during an unsandboxed review, see tagteam.log"
+STOPS_TO_ESCALATE = 3
 
 
 def _git_activity(s):
@@ -303,26 +304,31 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         state.log("repo changed during review", run_id=run_id, blamed=list(guilty), tree=seen["repo"]["tree"][:50],
                   refs=seen["repo"]["refs"], config=seen["repo"]["config"], outside=seen["outside"])
         run["real_repo_changed"] = changed
-    if stopped:
-        state.log("review stopped: change nobody can attribute", run_id=run_id, git=seen["git"],
-                  tree=seen["repo"]["tree"][:50], outside=seen["outside"])
-        run.update(reason=stopped, duration=round(time.time() - now, 1))
-        live.record_run(run)
-        if not pinned:                               # the change stays unreviewed: the next Stop covers it
-            _write_back(_session_file(ev), s.get("turn_id"),
-                        lambda cur: cur.update(pending_baseline=cur.get("baseline"), pending_touched=cur.get("touched", [])))
-        warn = f" · ⚠ disabled {', '.join(guilty)}: wrote outside read-only (tagteam doctor --clear)" if guilty else ""
-        return "allow", completion(run, lines_changed) + warn, None, None
     warn = ""
     if guilty:
         warn += f" · ⚠ disabled {', '.join(guilty)}: wrote outside read-only (tagteam doctor --clear)"
     if changed:
         warn += " · ⚠ your repo changed during review (see tagteam.log)"
-    with state.locked("history"):
+    with state.locked("history"):                    # spend counts whether or not the run stops
         for r, (meta, _) in outcomes.items():
             state.append_jsonl(state.path("history.jsonl"),
                                {"ts": now, "run_id": run_id, "author": ev.agent, **meta,
                                 "kinds": [t["kind"] for t in plan[r]]})
+    run["usage"] = {r: meta["usage"] for r, (meta, _) in outcomes.items() if meta.get("usage")}
+    in_a_row = _count_stop(repo or ev.cwd, bool(stopped))
+    if stopped:
+        state.log("review stopped: change nobody can attribute", run_id=run_id, git=seen["git"],
+                  tree=seen["repo"]["tree"][:50], outside=seen["outside"], in_a_row=in_a_row)
+        run.update(reason=stopped, stopped_reviewers=run["reviewers"], reviewers=[],
+                   duration=round(time.time() - now, 1))
+        live.record_run(run)
+        if run_tag == "turn":                        # the change stays unreviewed: the next turn covers it
+            _write_back(_session_file(ev), s.get("turn_id"),
+                        lambda cur: cur.update(pending_baseline=cur.get("baseline"), pending_touched=cur.get("touched", [])))
+        if in_a_row >= STOPS_TO_ESCALATE:
+            warn += (f" · ⚠ {in_a_row} reviews in a row stopped in this repo by git config or hook changes:"
+                     " check `git config --list --show-origin` and .git/hooks")
+        return "allow", completion(run, lines_changed) + warn, None, None
     results = {r: res for r, (_, res) in outcomes.items()}
     for r, res in results.items():
         if res and works[r] != (repo or ev.cwd):
@@ -335,12 +341,20 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
     blocking, suggestions = verdict.gated(issues), verdict.gated(issues, "advise")
     state.write_json(run_dir / "verdict.json", {"action": action, "blocking": blocking, "suggestions": suggestions,
                                                 "advisory": advisory, "failed": failed, "message": msg})
-    run["usage"] = {r: meta["usage"] for r, (meta, _) in outcomes.items() if meta.get("usage")}
     run.update(action=action, blocking=len(blocking), suggestions=len(suggestions), advisory=len(advisory),
                failed=failed, duration=round(time.time() - now, 1))
     live.record_run(run)
     open_issues = issues if len(failed) < len(results) else None
     return action, (msg if action == "block" else completion(run, lines_changed)) + warn, run_dir, open_issues
+
+
+def _count_stop(repo, stopped):
+    """Consecutive stopped runs in this repo: nobody is disabled for a stop, so a repeat must at least be loud."""
+    with state.locked("stops"):
+        counts = state.read_json(state.path("stops.json")) or {}
+        counts[repo] = counts.get(repo, 0) + 1 if stopped else 0
+        state.write_json(state.path("stops.json"), {k: v for k, v in counts.items() if v})
+    return counts[repo]
 
 
 def wanted(ev, cfg, artifacts):
@@ -454,6 +468,8 @@ def _turn_end(ev, cfg, lock, fd):
             if os.path.isabs(a["path"]):
                 cur["reviewed_digests"][a["path"]] = changes.file_digest(a["path"])
         cur["touched"] = []
+        cur.pop("pending_baseline", None)            # this review covered what a stopped one left behind
+        cur.pop("pending_touched", None)
     _write_back(sf, s.get("turn_id"), advance, _carry(open_issues, s.get("owed")))
     state.log("review", run=str(run_dir), action=action, author=ev.agent, round=round_no)
     return {"action": action, "message": msg}
