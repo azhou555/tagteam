@@ -186,7 +186,7 @@ A Bash call can start a process that writes after the call returns. No hook fire
 | F2 interrupt, crash, hook timeout | A call without PostToolUse is recovered from its pending entry once it's abandoned. See "Calls that never finish". | partial: suggestions only |
 | F2 background Bash | See "Background shell jobs". | partial: suggestions only |
 | F3 worktree | Deltas are keyed by `repo_root(tool cwd)`. A worktree subagent's payload `cwd` is the worktree, and its Write `file_path` is absolute inside it (captured). | fixed |
-| F6 split subagent sessions | A session whose first event names a parent (Copilot `parentAgentId`) is not a session of its own: its calls go to the root's ledger and its Stop reviews nothing. agy sends no parent field, so a conversation that starts while another conversation in the same workspace is inside an `invoke_subagent` call is treated as its child. | fixed for Copilot; agy by timing, labelled approximate |
+| F6 split subagent sessions | A session whose first event names a parent (Copilot `parentAgentId`) is not a session of its own: its calls go to the root's ledger and its Stop reviews nothing. agy sends no parent field. Its parent's transcript (`transcriptPath`) records `Created the following subagent: {"conversationId": …}`, so at the child's Stop tagteam looks for its ID in the transcripts of the workspace's other live agy sessions. Only a found ID suppresses the child's review. When none is found, or more than one matches, the child is reviewed as today: a double review, never a miss. | fixed for Copilot; agy depends on its transcript format, falls back to today |
 | F2b late background result | Results are keyed by the deltas they reviewed, not the turn. A result that lands after a new turn started still closes those deltas. | fixed |
 | F4 disable | A reviewer is blamed only for writes in its own sandbox. Other real-tree changes produce a warning. | fixed |
 | Residual | A foreign write inside this session's Bash window is still claimed unless the writer named the path explicitly. | narrowed to one tool call |
@@ -221,8 +221,8 @@ untracked file is never in the real index, so every snapshot hashes it again.
   shell calls take two tree snapshots: about 0.1 s at 10k files and **1.1–1.5 s at 100k files**.
   Read-only tools aren't hooked.
 - **Cheap wins before a watcher:** fold the nested-repo scan into the `add -A` pass (≈ 145 ms per
-  snapshot at 100k), and reuse the Pre snapshot of one call as the baseline for the next call when
-  no other writer touched the tree in between.
+  snapshot at 100k), and reuse a Bash call's Post snapshot as the next Bash call's Pre when
+  no other writer touched the tree in between (the next call's Pre would otherwise re-scan the same tree).
 - **N sessions:** cost is linear, and nothing is serialized across the machine. Each session writes its
   own ledger file. Journal appends take a short per-repo lock. Git's object store handles concurrent
   writers.
@@ -253,7 +253,7 @@ is the one talking to the user. Reviewing each subagent at SubagentStop goes wro
 | Running at the root's Stop | Review only closed calls. Open windows roll over to the `<task-notification>` turn's Stop. The root's Stop payload lists running subagents in `background_tasks`, which marks the open window. | lost (F2, captured) |
 | Worktree subagent | Deltas are keyed by the worktree root and reviewed as their own group from a sandbox of the worktree's snapshot. A later merge reuses the findings when the before and after content match. | lost (F3, captured) |
 | Nested subagents | Walk up to the root. OpenCode already does this (`opencode-plugin.js:50`). | OpenCode only |
-| Subagent as its own session (Copilot, agy) | Fold it into the root: its calls go to the root ledger, its turn start takes no baseline, and its Stop reviews nothing. Copilot names the parent (`parentAgentId`). agy doesn't, so link by timing (below). | reviewed twice (F6, captured) |
+| Subagent as its own session (Copilot, agy) | Fold it into the root: its calls go to the root ledger, its turn start takes no baseline, and its Stop reviews nothing. Copilot names the parent (`parentAgentId`). agy doesn't, so link through the parent's transcript, with today's review as the fallback (see F6). | reviewed twice (F6, captured) |
 | Subagent session with no parent link | Its ledger never sees a user turn. Surface its deltas at the next Stop of any session in the repo as unattributed suggestions. | Codex uncaptured |
 
 ### Hook payloads (captured 2026-11-24)
@@ -266,9 +266,9 @@ Live headless runs with logging hooks next to tagteam's own. The sanitized captu
 | Subagent identity | same `session_id` as the root; `agent_id` + `agent_type` on every subagent event | own `sessionId` = `agentId`; `parentAgentId` = root `sessionId` | own `conversationId`; no parent field anywhere in the payload |
 | Subagent lifecycle events | `SubagentStart`/`SubagentStop` (root `session_id`, `agent_id`) | `subagentStart`/`subagentStop` on the root, plus the subagent's own `userPromptSubmitted` and `agentStop` | the subagent's own `PreInvocation` (invocationNum 0) and `Stop` |
 | Call ID on Pre and Post | `tool_use_id` | `toolCallId` | `toolCall.id`, `stepIdx` |
-| Launching call → subagent | Agent Post `tool_response.agentId` (foreground and background) | Pre/Post of the `task` tool bracket the subagent | `invoke_subagent` Pre/Post bracket it; the subagent's first `PreInvocation` falls inside |
+| Launching call → subagent | Agent Post `tool_response.agentId` (foreground and background) | Pre/Post of the `task` tool bracket the subagent | none in the payload. `invoke_subagent` is asynchronous: its Post (`t=…860.405`) comes *before* the subagent's first `PreInvocation` (`…860.419`). The link is in the parent's transcript: `Created the following subagent: {"conversationId": …}` |
 | Worktree subagent `cwd` | the worktree path | — | default `workspace: "inherit"` = parent's tree |
-| Background | Agent Post returns at once (`isAsync`); root Stop lists `background_tasks`; a `<task-notification>` prompt + Stop follow | not captured | not captured |
+| Background | Agent Post returns at once (`isAsync`); root Stop lists `background_tasks`; a `<task-notification>` prompt + Stop follow | not captured | every agy subagent is asynchronous (see above); a long-running one was not captured |
 | PreToolUse reply | `{}` allows | `{}` allows | `{}` **denies**; must reply `{"decision": "allow"}` |
 
 Claude also produced a same-session overlap worth keeping as a fixture: the root's `until [ -f bg.txt ]`

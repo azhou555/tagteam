@@ -6,7 +6,7 @@ Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable
 ### Phase A — independent fixes (no dependency on the redesign)
 - [ ] F4: blame a reviewer only for writes inside its own sandbox; other real-tree or git-config changes warn, never disable
 - [x] Confirm round: carry its major/blocker findings forward as suggestions instead of dropping them (verdict.demote; 322 tests OK)
-- [ ] F6 (Copilot): a session whose payload has `parentAgentId` is a subagent. Its `userPromptSubmitted` takes no baseline and its `agentStop` reviews nothing, so the root's Stop reviews its work once. Today the work is reviewed twice, and a blocking finding would start a fix loop inside the subagent (live capture: `sub2.py`, two runs). No dependency on the ledger
+- [ ] F6 (Copilot): a session whose payload has `parentAgentId` is a subagent. Its `userPromptSubmitted` takes no baseline and its `agentStop` reviews nothing, so the root's Stop reviews its work once. Its `postToolUse` touches are added to the root session's `touched`, so out-of-repo files it writes still reach the root's review. Today the work is reviewed twice, and a blocking finding would start a fix loop inside the subagent (live capture: `sub2.py`, two runs). No dependency on the ledger
 - [ ] ~~F5: agy reads every `workspacePaths` root~~ — moved to Phase E (agy is a non-Claude harness; needs one session spanning several repos, which the ledger's per-repo-root keys provide)
 
 ### Installer bugs (found 2026-11-22, reinstalling from main)
@@ -15,7 +15,7 @@ Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable
 
 ### Phase B — verify the assumptions (gates C–E)
 - [x] Claude: live capture of foreground, parallel, worktree and background subagents (2026-11-24). Subagents share the root `session_id`, and every subagent event carries `agent_id`. `tool_use_id` matches on Pre and Post. A worktree subagent's `cwd` is the worktree. The Agent Post's `tool_response.agentId` links the launching call to its subagent. The root's Stop lists running subagents in `background_tasks`. F2 and F3 reproduced live, and F2b (a late background result discarded) found. Spec: "Hook payloads"
-- [x] Copilot, agy: live capture via repo-local hooks (`.github/hooks/`, `.agents/hooks.json`) in a throwaway trusted repo. Both have a PreToolUse with a call ID that matches on Post. Both run a subagent as its own session, which gives F6. Copilot links it with `parentAgentId`. agy has no parent field, only timing inside `invoke_subagent`. agy's PreToolUse denies the tool unless the hook replies `{"decision": "allow"}`
+- [x] Copilot, agy: live capture via repo-local hooks (`.github/hooks/`, `.agents/hooks.json`) in a throwaway trusted repo. Both have a PreToolUse with a call ID that matches on Post. Both run a subagent as its own session, which gives F6. Copilot links it with `parentAgentId`. agy has no parent field. `invoke_subagent` returns before the child starts, so timing can't link them. The parent's transcript names the child's `conversationId`. agy's PreToolUse denies the tool unless the hook replies `{"decision": "allow"}`
 - [ ] Codex: payload capture. Blocked on an interactive hook approval (Codex skips unapproved hooks in `exec`, and approvals can't be scripted)
 - [x] Hook overhead on a real large repo (Linux, 97k files): 0.56–0.75 s per snapshot, so 1.1–1.5 s per Bash call. Breakdown and cheap wins are in the spec under "Scaling"
 
@@ -33,7 +33,7 @@ Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable
 ### Phase E — better labels (coverage already guaranteed by D's net)
 - [ ] Abandoned-call recovery (uncertain instead of unattributed), open background jobs, orphans
 - [ ] Other harnesses (chained Post→Pre fallback where no Pre hook, labelled approximate)
-- [ ] F6 (agy): fold a subagent conversation into its root by timing (its first `PreInvocation` falls inside the root's `invoke_subagent` window in the same workspace), labelled approximate
+- [ ] F6 (agy): at a conversation's Stop, look for its `conversationId` in the transcripts (`transcriptPath`) of the workspace's other live agy sessions ("Created the following subagent"). Only exactly one match suppresses its review. No match or several means review as today. Depends on agy's transcript format: test that format against the fixture
 - [ ] F5: agy sessions cover every `workspacePaths` root (one repo-root group per root); resolve touch paths against the root that contains them, not `[0]`
 - [ ] Reviewed-ledger reuse with re-gating
 
