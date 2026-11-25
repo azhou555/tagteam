@@ -150,7 +150,8 @@ servers, even in a checkout of it). A repo whose `.github` is a symlink out of t
 If a reviewer writes in its own checkout, it is disabled and the turn's notice says so:
 `⚠ disabled codex: wrote outside read-only (tagteam doctor --clear)`. When the shared git config or hooks
 change during a review, nothing shows who changed them (another session or you could have). The run stops,
-its results are discarded, no reviewer is disabled, and the next turn reviews the change again:
+its results are discarded, no reviewer is disabled, and the next turn's review covers the code this
+turn changed (the git config change itself is not reviewed):
 `⚠ Not reviewed: git config or hooks changed during review, see tagteam.log`. Your own edits during a
 review only warn: `⚠ your repo changed during review (see tagteam.log)`.
 
