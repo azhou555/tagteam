@@ -42,6 +42,14 @@ class Adapters(unittest.TestCase):
         self.assertEqual([os.path.basename(p) for p in ev.paths], ["hello.txt"])
         self.assertEqual(adapters.parse("copilot", "turn-end", fx("copilot-stop-1")).phase, "turn-end")
 
+    def test_copilot_subagent_events_route_to_the_root_session(self):
+        phases = {"userPromptSubmitted": "turn-start", "postToolUse": "touch", "agentStop": "turn-end"}
+        lines = pathlib.Path(ROOT, "tests/fixtures/subagents/copilot-subagent.jsonl").read_text().splitlines()
+        got = [(e["_phase"], ev.phase, ev.session_id[:8]) for e in map(json.loads, lines) if e["_phase"] in phases
+               for ev in [adapters.parse("copilot", phases[e["_phase"]], e)] if e["sessionId"].startswith("7d9d1ad0")]
+        self.assertEqual(got, [("userPromptSubmitted", "ignore", "b19d77ec")] + [("postToolUse", "touch", "b19d77ec")] * 3
+                         + [("agentStop", "ignore", "b19d77ec")])
+
     def test_agy(self):
         ev = adapters.parse("agy", "turn-start", fx("agy-prompt"))
         self.assertEqual(ev.phase, "turn-start")
@@ -430,6 +438,25 @@ class EndToEnd(HookRig, unittest.TestCase):
         pathlib.Path(self.repo, "c.py").write_text("z = 1\n" * 20)
         with mock.patch.object(runner, "run_all", self.fake_run_all({})):
             self.assertEqual(self.run_hook("copilot", "turn-end", {"sessionId": "c2", "cwd": self.repo}), {})
+
+    def test_copilot_subagent_is_reviewed_once_by_its_root(self):
+        root = {"sessionId": "root1", "cwd": self.repo}
+        sub = {"sessionId": "sub1", "agentId": "sub1", "parentAgentId": "root1", "cwd": self.repo}
+        outside = os.path.join(tempfile.mkdtemp(), "notes.md")
+        self.run_hook("copilot", "turn-start", {**root, "prompt": "write code"})
+        self.run_hook("copilot", "turn-start", {**sub, "prompt": "create s.py"})
+        pathlib.Path(self.repo, "s.py").write_text("s = 1\n" * 20)
+        pathlib.Path(outside).write_text("n\n" * 20)
+        self.run_hook("copilot", "touch", {**sub, "toolName": "create", "toolArgs": {"path": outside}})
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            self.assertEqual(self.run_hook("copilot", "turn-end", sub), {})
+            self.assertEqual(self.calls, [])
+            self.run_hook("copilot", "turn-end", root)
+        self.assertEqual(len(self.calls), 1)
+        prompt = next(iter(self.calls[0].values()))
+        self.assertIn("s.py", prompt)
+        self.assertIn("notes.md", prompt)
+        self.assertFalse(state.path("sessions", "copilot-sub1.json").exists())
 
 
 class GitActivity(unittest.TestCase):
