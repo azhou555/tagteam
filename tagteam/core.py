@@ -370,6 +370,9 @@ def _reopen(cur, s):
     if cur.get("repo") == s.get("repo") and cur.get("round") == 0 and s.get("baseline"):
         cur.update(baseline=s["baseline"], turn_baseline=s["baseline"],
                    touched=sorted(set(cur.get("touched", [])) | set(s.get("touched", []))))
+        if cur.get("pending_baseline"):              # this turn's own unfinished review would start past it again
+            cur.update(pending_baseline=s["baseline"],
+                       pending_touched=sorted(set(cur.get("pending_touched", [])) | set(s.get("touched", []))))
 
 
 def _count_stop(repo, stopped):
