@@ -366,6 +366,17 @@ class Attribution(Session, unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertIn("+y = 1", self.calls[1]["copilot"])
 
+    def test_another_sessions_write_inside_an_own_bash_call_in_a_worktree_is_contested(self):
+        wt = self.p(".claude/worktrees/x")
+        sh(self.repo, "git", "worktree", "add", "-q", wt)
+        self.prompt()
+
+        def other_writes():
+            self.write(os.path.join(wt, "theirs.py"), FEATURE, sid="other", call="toolu_other", cwd=wt)
+        self.tool("Bash", {"command": "sleep 1"}, other_writes, call="bash1", cwd=wt, agent_id="a1")
+        self.assertEqual(self.stop_with({"copilot": BLOCKER(".claude/worktrees/x/theirs.py")}),
+                         {"systemMessage": core.BACKGROUND})
+
 
 class Journal(unittest.TestCase):
     def test_an_append_racing_a_prune_is_never_lost(self):

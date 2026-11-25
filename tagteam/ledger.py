@@ -185,6 +185,16 @@ def _chain(spans, base, now):
         b[0] == a[1] for a, b in zip(spans, spans[1:]))
 
 
+def _others(ev, repo, since):
+    """Paths another session's calls changed in `repo` since `since`."""
+    return {p for r in state.read_jsonl(_journal(repo), since) if r["session"] != ev.session_id for p in r["paths"]}
+
+
+def _label(calls, path, base, now, others):
+    """own, foreign (another session's call changed it too, even inside one of ours) or unattributed."""
+    return "foreign" if path in others else "own" if _chain(_spans(calls, path), base, now) else "unattributed"
+
+
 def _window(ev, since):
     d = state.read_json(_file(ev)) or {}
     return d, [c for c in d.get("calls", []) if c["t1"] >= since]
@@ -205,19 +215,14 @@ def owners(ev, cfg, s, base, since, head, artifacts):
     d, calls = _window(ev, since)
     in_repo = [a for a in artifacts if not os.path.isabs(a["path"])]
     blobs = changes.tree_deltas(repo, base, head) if repo and base and head and in_repo else {}
-    others = set()
-    if repo:
-        for r in state.read_jsonl(_journal(repo), since):
-            if r["session"] != ev.session_id:
-                others.update(r["paths"])
+    others = _others(ev, repo, since) if repo else set()
     labels, mine = {}, set()
     for c in calls:
         mine.update(c["deltas"])
     for a in in_repo:
         path = _norm(os.path.join(repo, a["path"]))
         b, now = blobs.get(a["path"], [None, None])
-        labels[a["path"]] = ("foreign" if path in others else     # contested: another session's call wrote it too
-                             "own" if _chain(_spans(calls, path), b, now) else "unattributed")
+        labels[a["path"]] = _label(calls, path, b, now, others)
     skipped = sum(c["kind"] == "skipped" for c in calls)
     trusted = repo and not skipped and d.get("unbracketed", 0) < since    # a call with no Pre wrote unseen
     by = lambda label: sorted(_norm(os.path.join(repo, p)) for p, v in labels.items() if v == label)
@@ -245,6 +250,7 @@ def worktree_artifacts(ev, s, since, ignore):
     arts, labels = [], {}
     paths = sorted({p for c in calls for p in c["deltas"]})
     now = changes.blob_ids(repo, paths) if paths else {}
+    others = set().union(*(_others(ev, wt, since) for wt in {c["repo"] for c in calls}))
     for path in paths:
         spans = _spans(calls, path)
         rel = os.path.relpath(path, repo)
@@ -255,5 +261,5 @@ def worktree_artifacts(ev, s, since, ignore):
             continue
         arts.append({"path": rel, "status": "added" if spans[0][0] is None else "deleted" if now[path] is None
                      else "modified", "lines_changed": lines, "diff": diff})
-        labels[rel] = "own" if _chain(spans, spans[0][0], now[path]) else "unattributed"
+        labels[rel] = _label(calls, path, spans[0][0], now[path], others)
     return arts, labels
