@@ -188,7 +188,7 @@ A Bash call can start a process that writes after the call returns. No hook fire
 | F3 worktree | Deltas are keyed by `repo_root(tool cwd)`. A worktree subagent's payload `cwd` is the worktree, and its Write `file_path` is absolute inside it (captured). | fixed |
 | F6 split subagent sessions | A session whose first event names a parent (Copilot `parentAgentId`) is not a session of its own: its calls go to the root's ledger and its Stop reviews nothing. agy sends no parent field. Its parent's transcript (`transcriptPath`) records `Created the following subagent: {"conversationId": …}`, so at the child's Stop tagteam looks for its ID in the transcripts of the workspace's other live agy sessions. Only a found ID suppresses the child's review. When none is found, or more than one matches, the child is reviewed as today: a double review, never a miss. | fixed for Copilot; agy depends on its transcript format, falls back to today |
 | F2b late background result | Results are keyed by the deltas they reviewed, not the turn. A result that lands after a new turn started still closes those deltas. | fixed |
-| F4 disable | A reviewer is blamed only for writes in its own sandbox. Other real-tree changes produce a warning. | fixed |
+| F4 disable | A reviewer is blamed only for writes in its own sandbox. A shared git config or hook change stops the run with no verdict and no disable, and the change is reviewed again next turn. Other real-tree changes produce a warning. | fixed (shipped before the ledger) |
 | Residual | A foreign write inside this session's Bash window is still claimed unless the writer named the path explicitly. | narrowed to one tool call |
 
 ## Scaling

@@ -142,6 +142,9 @@ STATE_ERROR = limits.STATE_ERROR
 SLOW_SETUP = "repo too slow to sandbox, see tagteam.log"
 NO_SANDBOX = "no sandbox for a background review, see tagteam.log"
 STILL_RUNNING = "earlier review still running"
+# Nothing proves who changed shared git state or an unsandboxed tree: the run stops, nobody is disabled.
+STOPPED = "git config or hooks changed during review, see tagteam.log"
+STOPPED_IN_PLACE = "the repo changed during an unsandboxed review, see tagteam.log"
 
 
 def _git_activity(s):
@@ -286,10 +289,8 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         guilty = {r: f"wrote in its sandbox: {', '.join(w[:5])}" for r, w in wrote.items() if w}
     seen = watch.after()
     in_place = any(works[r] == (repo or ev.cwd) for r in plan)
-    if seen["git"]:                                  # a security signal; users rarely edit these mid-review
-        guilty = {r: f"git config/hooks changed: {', '.join(seen['git'][:5])}" for r in plan}
-    elif in_place and (seen["repo"]["tree"] or seen["outside"]):   # no sandbox to prove who wrote: postcondition decides
-        guilty = {r: "real tree or touched files changed with no sandbox" for r in plan}
+    stopped = STOPPED if seen["git"] else (
+        STOPPED_IN_PLACE if in_place and (seen["repo"]["tree"] or seen["outside"]) else None)
     changed = [] if pinned else seen["repo"]["tree"] + seen["repo"]["refs"] + seen["repo"]["config"] + seen["outside"]
     if guilty:
         state.log("REVIEWER WROTE OUTSIDE READ-ONLY; disabled", run_id=run_id, reviewers=list(guilty),
@@ -302,6 +303,16 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         state.log("repo changed during review", run_id=run_id, blamed=list(guilty), tree=seen["repo"]["tree"][:50],
                   refs=seen["repo"]["refs"], config=seen["repo"]["config"], outside=seen["outside"])
         run["real_repo_changed"] = changed
+    if stopped:
+        state.log("review stopped: change nobody can attribute", run_id=run_id, git=seen["git"],
+                  tree=seen["repo"]["tree"][:50], outside=seen["outside"])
+        run.update(reason=stopped, duration=round(time.time() - now, 1))
+        live.record_run(run)
+        if not pinned:                               # the change stays unreviewed: the next Stop covers it
+            _write_back(_session_file(ev), s.get("turn_id"),
+                        lambda cur: cur.update(pending_baseline=cur.get("baseline"), pending_touched=cur.get("touched", [])))
+        warn = f" · ⚠ disabled {', '.join(guilty)}: wrote outside read-only (tagteam doctor --clear)" if guilty else ""
+        return "allow", completion(run, lines_changed) + warn, None, None
     warn = ""
     if guilty:
         warn += f" · ⚠ disabled {', '.join(guilty)}: wrote outside read-only (tagteam doctor --clear)"

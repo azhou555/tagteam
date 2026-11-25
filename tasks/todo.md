@@ -4,7 +4,7 @@
 Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable.
 
 ### Phase A — independent fixes (no dependency on the redesign)
-- [ ] F4: blame a reviewer only for writes inside its own sandbox; other real-tree or git-config changes warn, never disable
+- [x] F4: blame a reviewer only for writes inside its own sandbox. A git config or hook change, or a change to an unsandboxed tree, stops the run: results discarded, nobody disabled, the change left for the next turn (`core.STOPPED`)
 - [x] Confirm round: carry its major/blocker findings forward as suggestions instead of dropping them (verdict.demote; 322 tests OK)
 - [x] F6 (Copilot): a session whose payload has `parentAgentId` is a subagent. Its `userPromptSubmitted` takes no baseline and its `agentStop` reviews nothing, so the root's Stop reviews its work once. Its `postToolUse` touches are added to the root session's `touched`, so out-of-repo files it writes still reach the root's review. Today the work is reviewed twice, and a blocking finding would start a fix loop inside the subagent (live capture: `sub2.py`, two runs). No dependency on the ledger
 - [ ] ~~F5: agy reads every `workspacePaths` root~~ — moved to Phase E (agy is a non-Claude harness; needs one session spanning several repos, which the ledger's per-repo-root keys provide)

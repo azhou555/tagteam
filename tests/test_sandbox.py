@@ -278,27 +278,38 @@ class EndToEnd(HookRig, unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertIn("no listed reviewer is available", state.read_jsonl(state.path("runs.jsonl"))[-1]["reason"])
 
-    def stop_two(self, bad_script):
-        """copilot runs bad_script, codex is clean; both reviewers are in the round."""
+    def stop_two(self, bad_script, result=APPROVE):
+        """copilot runs bad_script, codex is clean; both reviewers are in the round and return `result`."""
         write_user_config(use_toml(["copilot", "codex"]) + "[review.per_change]\nsmall = 2\n")
         real = harnesses.get
-        revs = {"copilot": fake_harness(bad_script)("copilot").reviewer, "codex": fake_harness("true")("copilot").reviewer}
+        revs = {"copilot": fake_harness(bad_script, result)("copilot").reviewer,
+                "codex": fake_harness("true", result)("copilot").reviewer}
         get = lambda n: dataclasses.replace(real(n), reviewer=revs.get(n, real(n).reviewer))
         pathlib.Path(self.repo, "feature.py").write_text("a = 1\n" * 20)
         with mock.patch.object(harnesses, "get", get):
             return self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
 
-    def test_git_config_change_disables_every_reviewer(self):
-        self.stop_two("git config core.hooksPath /evil")
-        self.assertEqual(sorted(limits.disabled()), ["codex", "copilot"])
+    def test_git_config_change_stops_the_review_and_disables_nobody(self):
+        out = self.stop_two("git config core.hooksPath /evil", BLOCK)
+        self.assertEqual(limits.disabled(), {})
+        self.assertNotIn("decision", out)                                 # the stopped run's verdict is discarded
+        self.assertIn("⚠ Not reviewed: git config or hooks changed during review, see tagteam.log", out["systemMessage"])
+        run = state.read_jsonl(state.path("runs.jsonl"))[-1]
+        self.assertEqual((run["reason"], run.get("disabled")), (core.STOPPED, None))
         self.assertEqual(subprocess.run(["git", "-C", self.repo, "config", "core.hooksPath"], capture_output=True,
                                         text=True).stdout.strip(), "/evil")
 
+    def test_stopped_review_leaves_the_change_for_the_next_turn(self):
+        self.stop_two("git config core.hooksPath /evil", BLOCK)
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="next"))
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        self.assertIn("feature.py", next(iter(self.calls[-1].values())))
+
     def test_git_config_change_is_logged_by_key(self):
         self.stop_two("git config core.hooksPath /evil")
-        entry = [e for e in state.read_jsonl(state.path("tagteam.log")) if e["msg"].startswith("REVIEWER WROTE")][-1]
+        entry = [e for e in state.read_jsonl(state.path("tagteam.log")) if e["msg"].startswith("review stopped")][-1]
         self.assertIn("+core.hookspath=/evil", entry["git"])
-        self.assertIn("core.hookspath", limits.disabled()["copilot"]["reason"])
 
     def test_branch_tracking_config_change_disables_nobody_but_warns(self):
         out = self.stop("git config branch.main.vscode-merge-base origin/main; "
@@ -312,9 +323,10 @@ class EndToEnd(HookRig, unittest.TestCase):
         self.stop("echo x > pwned.txt")
         self.assertIn("pwned.txt", limits.disabled()["copilot"]["reason"])
 
-    def test_hook_install_in_shared_git_dir_disables_every_reviewer(self):
-        self.stop_two("echo x > $(git rev-parse --git-common-dir)/hooks/pre-commit")
-        self.assertEqual(sorted(limits.disabled()), ["codex", "copilot"])
+    def test_hook_install_in_shared_git_dir_stops_the_review(self):
+        out = self.stop_two("echo x > $(git rev-parse --git-common-dir)/hooks/pre-commit")
+        self.assertEqual(limits.disabled(), {})
+        self.assertIn("⚠ Not reviewed: git config or hooks changed during review", out["systemMessage"])
 
     def test_guilty_reviewer_and_repo_change_show_both_notices(self):
         out = self.stop(f"echo x > pwned.txt; echo y > {self.repo}/user.txt")
@@ -449,7 +461,7 @@ class OutsideEdit(unittest.TestCase):
 
 
 class NonGit(unittest.TestCase):
-    def test_non_git_dir_falls_back_to_flags_and_postcondition(self):
+    def test_non_git_dir_stops_the_review_when_the_files_change(self):
         d = os.path.realpath(tempfile.mkdtemp())
         notes = os.path.join(d, "notes.py")
         pathlib.Path(notes).write_text("x = 1\n")
@@ -461,8 +473,9 @@ class NonGit(unittest.TestCase):
                 mock.patch.object(core, "headroom_map", return_value={}), \
                 mock.patch.object(harnesses, "get", fake_harness(f"echo y >> {notes}")):
             ev.cwd = d
-            core.review(ev, config.load(), s, [artifact], 1, "turn", limits.HELD)
-        self.assertIn("copilot", limits.disabled())
+            action, msg, run_dir, open_issues = core.review(ev, config.load(), s, [artifact], 1, "turn", limits.HELD)
+        self.assertEqual((action, run_dir, open_issues, limits.disabled()), ("allow", None, None, {}))
+        self.assertIn(core.STOPPED_IN_PLACE, msg)
         write_user_config("")
 
 

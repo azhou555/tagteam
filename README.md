@@ -147,9 +147,12 @@ user settings, and the checkout carries a `.github/copilot/settings.local.json` 
 and the servers named in the repo's `.mcp.json` and `.github/mcp.json` (Copilot otherwise runs a trusted
 repo's `.claude/settings.json`, `.github/hooks` and `.github/copilot/settings.json` hooks and starts its MCP
 servers, even in a checkout of it). A repo whose `.github` is a symlink out of the checkout keeps both on.
-If a reviewer writes anywhere it shouldn't, the turn's notice says so, for example
-`⚠ disabled codex: wrote outside read-only (tagteam doctor --clear)` or
-`⚠ your repo changed during review (see tagteam.log)`.
+If a reviewer writes in its own checkout, it is disabled and the turn's notice says so:
+`⚠ disabled codex: wrote outside read-only (tagteam doctor --clear)`. When the shared git config or hooks
+change during a review, nothing shows who changed them (another session or you could have). The run stops,
+its results are discarded, no reviewer is disabled, and the next turn reviews the change again:
+`⚠ Not reviewed: git config or hooks changed during review, see tagteam.log`. Your own edits during a
+review only warn: `⚠ your repo changed during review (see tagteam.log)`.
 
 Each review ends in one of these results. The same text and colors appear in the Claude status line, in
 the notice at the end of the turn, in `tagteam watch` and `tagteam status`, and in the macOS menu bar.
