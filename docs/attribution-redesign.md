@@ -16,8 +16,9 @@ Status: Phase D (Claude cutover) implemented 2026-11-25. Phase E (other harnesse
 - **Fallback to "all own"** when the ledger can't vouch: a skipped Bash snapshot in the window, a PostToolUse
   with no PreToolUse (hooks older than the package), any ledger error, `[ledger] attribute = false`, or a
   non-Claude author.
-- **Contested overlaps across sessions** are not resolved: the other session's write breaks the chain, so
-  the path is a suggestion for this session.
+- **Contested overlaps across sessions** are not resolved: any call by another session that changed the path
+  in the window makes it foreign, even when that write landed inside one of this session's Bash calls. The
+  "Edit beats a snapshot" rule is not built, so a path both sessions claim is a suggestion for both.
 - **F3** worktree deltas are diffed from the first call's `pre` blob (written with `hash-object -w`) to the
   current file, and labelled with the same chain rule.
 - Own calls pruned after 24 h leave their change unattributed.
