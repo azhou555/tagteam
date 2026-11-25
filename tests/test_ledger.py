@@ -2,6 +2,7 @@ import json
 import os
 import pathlib
 import re
+import tempfile
 import threading
 import time
 import unittest
@@ -376,6 +377,56 @@ class Attribution(Session, unittest.TestCase):
         self.tool("Bash", {"command": "sleep 1"}, other_writes, call="bash1", cwd=wt, agent_id="a1")
         self.assertEqual(self.stop_with({"copilot": BLOCKER(".claude/worktrees/x/theirs.py")}),
                          {"systemMessage": core.BACKGROUND})
+
+    def test_a_fix_round_with_only_another_writers_change_keeps_the_open_blocker(self):
+        self.prompt()
+        self.write(self.p("mine.py"), FEATURE)
+        self.assertEqual(self.stop_with({"copilot": BLOCKER("mine.py")})["decision"], "block")
+        pathlib.Path(self.p("notes.py")).write_text(FEATURE)       # an autosave, no fix
+        self.assertEqual(self.stop_with({"copilot": BLOCKER("mine.py")})["decision"], "block")
+
+    def test_a_finding_quoting_the_absolute_path_of_an_own_file_blocks(self):
+        self.prompt()
+        self.write(self.p("mine.py"), FEATURE)
+        pathlib.Path(self.p("editor.py")).write_text(FEATURE)
+        self.assertEqual(self.stop_with({"copilot": BLOCKER(self.p("mine.py"))})["decision"], "block")
+
+    def test_an_outside_file_edited_while_a_background_review_runs_is_reviewed_next(self):
+        self.unrig()
+        self.rig(use_toml(["copilot"]), small_blocks=False, attribute=True)
+        self.run_detached = False
+        tool = os.path.join(tempfile.mkdtemp(), "tool.py")
+        self.prompt()
+        self.write(self.p("bg.py"), FEATURE)
+        self.write(tool, FEATURE, call="t2")
+        self.stop_with({})
+        self.prompt()
+        self.write(tool, FEATURE + "def g(y):\n    return y\n", call="t3")
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            core.background(self.detached[0])
+        self.stop_with({})
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            core.background(self.detached[1])
+        self.assertIn("def g", self.calls[-1]["copilot"])
+
+    def test_a_crlf_refusal_by_git_falls_back_instead_of_downgrading_own_work(self):
+        sh(self.repo, "git", "config", "core.autocrlf", "input")
+        sh(self.repo, "git", "config", "core.safecrlf", "true")
+        self.prompt()
+        self.write(self.p("mine.py"), FEATURE.replace("\n", "\r\n"))
+        self.assertEqual(self.stop_with({"copilot": BLOCKER("mine.py")})["decision"], "block")
+
+    def test_a_call_closing_after_the_stop_snapshot_does_not_break_the_next_claim(self):
+        self.prompt()
+        payload = self.claude("PreToolUse", tool_name="Write", tool_use_id="late",
+                              tool_input={"file_path": self.p("f.py"), "content": ""})
+        self.run_hook("claude", "x", payload)
+        pathlib.Path(self.p("f.py")).write_text(FEATURE)
+        self.stop_with({})
+        self.run_hook("claude", "x", {**payload, "hook_event_name": "PostToolUse", "tool_response": {}})
+        self.prompt()
+        self.write(self.p("f.py"), FEATURE + FEATURE, call="next")
+        self.assertEqual(self.stop_with({"copilot": BLOCKER("f.py")})["decision"], "block")
 
 
 class Journal(unittest.TestCase):

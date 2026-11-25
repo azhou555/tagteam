@@ -5,7 +5,7 @@ core calls every entry point through a guard: a failure is logged and the review
 the session's own. See docs/attribution-redesign.md.
 
 Session ledger  ledger/claude-<sid>.json  {"pending": {call: pending}, "calls": [closed], "tracked": {repo: n},
-                                          "slow": {repo: true}, "unbracketed": time of the last Post with no Pre}
+                                          "slow": {repo: true}, "untrusted": time of the last call that went unrecorded}
   pending  {call, agent_id, tool, t0, repo, kind: files|tree|skipped, pre: {abs path: blob|None} | tree id, snapshot_ms?}
   closed   {call, agent_id, tool, kind, t0, t1, repo, deltas: {abs path: [pre blob, post blob]}, snapshot_ms?}
 Repo journal    journal/<sha1(repo)[:16]>.jsonl, one line per closed call that changed something:
@@ -123,11 +123,16 @@ def pre(ev, cfg):
     _update(ev, add)
 
 
+def distrust(ev):
+    """A call went unrecorded (no Pre hook, or a ledger error): ownership since then can't be vouched for."""
+    _update(ev, lambda d: d.update(untrusted=time.time()))
+
+
 def post(ev, cfg):
     call_id = ev.call["id"]
     p = ((state.read_json(_file(ev)) or {}).get("pending") or {}).get(call_id)
     if not p:                                        # no Pre hook ran: installed mid-call, or hooks older than the package
-        _update(ev, lambda d: d.update(unbracketed=time.time()))
+        distrust(ev)
         return
     repo, deltas, ms, slow = p["repo"], {}, p.get("snapshot_ms"), False
     if p["kind"] == "files":
@@ -180,7 +185,10 @@ def _spans(calls, path):
 
 
 def _chain(spans, base, now):
-    """True when the session's spans lead unbroken from `base` to `now`: nobody else wrote in between."""
+    """True when the session's spans lead unbroken from `base` to `now`: nobody else wrote in between. A call that
+    finished after the last review's snapshot but whose write that snapshot already holds is skipped."""
+    while len(spans) > 1 and spans[0][0] != base and spans[0][1] == base:
+        spans = spans[1:]
     return bool(spans) and spans[0][0] == base and spans[-1][1] == now and all(
         b[0] == a[1] for a, b in zip(spans, spans[1:]))
 
@@ -224,7 +232,7 @@ def owners(ev, cfg, s, base, since, head, artifacts):
         b, now = blobs.get(a["path"], [None, None])
         labels[a["path"]] = _label(calls, path, b, now, others)
     skipped = sum(c["kind"] == "skipped" for c in calls)
-    trusted = repo and not skipped and d.get("unbracketed", 0) < since    # a call with no Pre wrote unseen
+    trusted = repo and not skipped and d.get("untrusted", 0) < since
     by = lambda label: sorted(_norm(os.path.join(repo, p)) for p, v in labels.items() if v == label)
     today = sorted(_norm(os.path.join(repo or "", a["path"])) for a in in_repo)
     _sweep_dead_ledgers()

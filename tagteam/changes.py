@@ -56,7 +56,8 @@ def blob_ids(repo, paths):
     later diff can show what a file held before a tool call."""
     links = {p: _link_blob(p) for p in paths if os.path.islink(p)}
     present = [p for p in paths if p not in links and os.path.isfile(p)]
-    ids = git(repo or "/", "hash-object", *(["-w"] if repo else []), "--", *present).split() if present else []
+    ids = git(repo or "/", "-c", "core.safecrlf=false", "hash-object", *(["-w"] if repo else []),   # -w applies safecrlf
+              "--", *present).split() if present else []
     return {**dict.fromkeys(paths), **dict(zip(present, ids)), **links}
 
 

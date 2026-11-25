@@ -53,13 +53,14 @@ def turn_start(ev, cfg):
         prior = prev.get("prior") or []              # open until a verdict closes them
         notice = prev.get("notice")                  # a background result not shown yet; the new session drops it
         since = prev.get("baseline_ts", prev.get("started", now))
-        keep = prev.get("repo") == repo and prev.get("baseline") and (prev.get("hold") or _ledger(
+        hold = prev.get("hold") or "pending_baseline" in prev          # pending_baseline: state from before hold
+        keep = prev.get("repo") == repo and prev.get("baseline") and (hold or _ledger(
             ev, cfg, lambda: ledger.unreviewed(ev, repo, since), False))     # unreviewed work: the next review covers it
         base, ts, touched = (prev["baseline"], since, prev.get("touched", [])) if keep else (snap, now, [])
         state.write_json(_session_file(ev), {
             "turn_id": ev.turn_id or uuid.uuid4().hex[:12], "started": now, "cwd": ev.cwd, "repo": repo,
             "baseline": base, "baseline_ts": ts, "turn_baseline": base, "turn_baseline_ts": ts,   # baseline advances each round
-            "refs": changes.refs(repo) if repo else {}, "hold": bool(keep and prev.get("hold")),
+            "refs": changes.refs(repo) if repo else {}, "hold": bool(keep and hold),
             "prompt": intent(ev.prompt, prev.get("prompt", "")), "round": 0, "touched": touched, "reviewed_digests": {}, "prior": prior,
             "carried": bool(prior), "owed": prev.get("owed"), "plan_rounds": 0, "plan_prior": [],
             "outside_touched": [p for p in touched if not changes.in_repo(p, repo)], "reverted_prior": [],
@@ -80,6 +81,11 @@ def _ledger(ev, cfg, fn, fallback=None):
             return fn()
     except Exception as e:
         state.log("ledger error", phase=ev.phase, error=repr(e), tb=traceback.format_exc()[-2000:])
+        if ev.phase in ("pre", "touch"):             # a call went unrecorded: this window can't vouch for ownership
+            try:
+                ledger.distrust(ev)
+            except Exception:
+                pass
     return fallback
 
 
@@ -468,7 +474,7 @@ def _turn_end(ev, cfg, lock, fd):
                 ev, s, s.get("turn_baseline_ts", s["started"]), ignore), ([], {}))
             whole = changes.diff_trees(repo, s["turn_baseline"], head, ignore) + outside + worktrees
             if not whole and not s.get("carried") and not changes.ref_activity(repo, s.get("refs", {}), changes.refs(repo)):
-                return _reverted(ev, cfg, s, sf, round_no, head)   # carried issues: undoing this turn fixes nothing
+                return _reverted(ev, cfg, s, sf, round_no, head, head_ts)   # carried issues: undoing this turn fixes nothing
         elif outside:
             whole = outside
     rebuttal = changed == 0 and bool(prior)
@@ -487,8 +493,7 @@ def _turn_end(ev, cfg, lock, fd):
             or not wanted(ev, cfg, artifacts):       # skipped by choice: the next review starts after this change
         _write_back(sf, s.get("turn_id"), lambda cur: _advance(cur, head, head_ts, artifacts))
         return None
-    owned = None if labels is None or all(v == "own" for v in labels.values()) else {   # None: all own, so a finding
-        p for p, v in labels.items() if v == "own"}                                      # naming no file can block
+    owned = None if labels is None or all(v == "own" for v in labels.values()) else _owned(s, labels, prior)
     mode = _mode(cfg, artifacts, prior, owned)
     # A confirm can't block either, so the author doesn't wait for it; it still spends its round.
     if ((mode == "advise" or confirm) and s.get("repo") and head and lock == limits.HELD and cfg["reviewers"].get("use")
@@ -521,13 +526,27 @@ def _owners(ev, cfg, s, base, since, head, artifacts):
     return _ledger(ev, cfg, lambda: ledger.owners(ev, cfg, s, base, since, head, artifacts))
 
 
-def _advance(cur, head, head_ts, artifacts):
-    """The review point moves past what a Stop saw: reviewed, or skipped by choice."""
+def _owned(s, labels, prior):
+    """Paths whose findings may block: own files, files still carrying an open blocker (a fix round that left them
+    alone must not release it), each also as an absolute path for a reviewer that quotes one. None (a finding naming
+    no file can block too) is the caller's case when every file is own."""
+    rel = {p for p, v in labels.items() if v == "own"} | {
+        os.path.normpath(f["file"]) for f in verdict.gated(prior) if f.get("file")}
+    repo = s.get("repo")
+    roots = {repo, os.path.realpath(repo)} if repo else set()
+    return rel | {os.path.join(r, p) for r in roots for p in rel if not os.path.isabs(p)}
+
+
+def _digests(artifacts):
+    return {a["path"]: changes.file_digest(a["path"]) for a in artifacts if os.path.isabs(a["path"])}
+
+
+def _advance(cur, head, head_ts, artifacts, digests=None):
+    """The review point moves past what a Stop saw: reviewed, or skipped by choice. `digests` are the outside
+    files' digests as that Stop saw them (default: now)."""
     if head:
         cur.update(baseline=head, baseline_ts=head_ts)
-    for a in artifacts:
-        if os.path.isabs(a["path"]):
-            cur["reviewed_digests"][a["path"]] = changes.file_digest(a["path"])
+    cur["reviewed_digests"].update(_digests(artifacts) if digests is None else digests)
     cur["touched"] = []
     cur.pop("hold", None)
 
@@ -557,6 +576,7 @@ def _start_background(ev, cfg, s, artifacts, head, head_ts, rebuttal, fd, confir
     try:
         state.write_json(job, {"ev": dataclasses.asdict(ev), "cfg": cfg, "session": s, "artifacts": artifacts,
                                "pinned": [head, _git_activity(s)], "head_ts": head_ts, "rebuttal": rebuttal,
+                               "digests": _digests(artifacts),
                                "confirm_round": confirm_round, "mode": mode,
                                "owned": None if owned is None else sorted(owned)})
         _detach([sys.executable, "-m", "tagteam", "background", str(job)], fd)
@@ -593,9 +613,13 @@ def background(path, alarm=False):
 
     def settle(cur):
         if covered and cur.get("baseline") == s.get("baseline"):   # even in a later turn that kept this review point
-            touched = [p for p in cur.get("touched", []) if not changes.in_repo(p, s.get("repo"))]
-            _advance(cur, job["pinned"][0], job.get("head_ts", s["started"]), job["artifacts"])
-            cur["touched"] = [p for p in touched if p not in {a["path"] for a in job["artifacts"]}]
+            seen, hold = job.get("digests") or {}, cur.get("hold")   # hold: a later turn's wait timed out
+            touched = [p for p in cur.get("touched", []) if not changes.in_repo(p, s.get("repo"))
+                       and changes.file_digest(p) != seen.get(p, "unseen")]   # changed again since that Stop
+            _advance(cur, job["pinned"][0], job.get("head_ts", s["started"]), job["artifacts"], seen)
+            cur["touched"] = touched
+            if hold:
+                cur["hold"] = True
             if cur.get("round") == 0:
                 cur.update(turn_baseline=cur["baseline"], turn_baseline_ts=cur["baseline_ts"])
         if verdict_in:
@@ -617,12 +641,12 @@ def _owed(ev, cfg, s, sf):
     return {"action": "block", "message": s["owed"]}
 
 
-def _reverted(ev, cfg, s, sf, round_no, head):
+def _reverted(ev, cfg, s, sf, round_no, head, head_ts):
     """The author undid everything it changed this turn: the open issues are gone and no review is spent."""
     run = _run_record(ev, cfg, s, "turn", round_no, False, reason="reverted")
     live.record_run(run)
     _write_back(sf, s.get("turn_id"), lambda cur: (cur.update(      # not a round: a redo hits the blocked digest, which counts
-        prior=[], reverted_prior=cur.get("prior") or cur.get("reverted_prior") or []), _advance(cur, head, time.time(), [])))
+        prior=[], reverted_prior=cur.get("prior") or cur.get("reverted_prior") or []), _advance(cur, head, head_ts, [])))
     state.log("changes reverted; open issues resolved without a review", author=ev.agent, round=round_no)
     return {"action": "allow", "message": completion(run, 0)}
 
