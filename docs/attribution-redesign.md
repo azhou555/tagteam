@@ -19,6 +19,14 @@ Status: Phase D (Claude cutover) implemented 2026-11-25. Phase E (other harnesse
 - **Contested overlaps across sessions** are not resolved: any call by another session that changed the path
   in the window makes it foreign, even when that write landed inside one of this session's Bash calls. The
   "Edit beats a snapshot" rule is not built, so a path both sessions claim is a suggestion for both.
+  This fires more often than a real contest. Another session's long Bash call (a test run, a build)
+  snapshots the tree, so every file this session writes while it runs lands in that session's journal and is
+  a suggestion here. The `foreign` count in `shadow.jsonl` shows how often.
+- **A file with an open blocker stays blocking** in the fix rounds that follow, even when that round's diff
+  doesn't touch it, so another writer's change in the round can't release it.
+- **A call with no PostToolUse** (interrupt, denied permission) stays pending for 24 h and keeps the
+  baseline from advancing at turn start, so changes between those turns join the next review as
+  suggestions. This costs reviews but loses no coverage. Phase E's abandoned-call recovery closes these.
 - **F3** worktree deltas are diffed from the first call's `pre` blob (written with `hash-object -w`) to the
   current file, and labelled with the same chain rule.
 - Own calls pruned after 24 h leave their change unattributed.
