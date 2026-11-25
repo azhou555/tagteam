@@ -76,6 +76,7 @@ FULL = {"claude": 0.9, "codex": 0.9, "copilot": 0.9, "agy": 0.9}
 ALL_AGENTS = ["claude", "codex", "copilot", "agy"]
 USER_CONFIG = state.HOME / "config.toml"
 PIN_TEXT = "review.blocking.small = true\n"    # HookRig tests drive the blocking cycle unless they opt out
+LEDGER_OFF = "ledger.attribute = false\n"   # files these tests write without a tool call count as the session's own
 PIN = [""]
 
 
@@ -94,9 +95,9 @@ def use_toml(use):
 class HookRig:
     """Mixin: real hook flow through cli.hook with every agent detected and reviewer CLIs stubbed."""
 
-    def rig(self, user_config=None, small_blocks=True):
+    def rig(self, user_config=None, small_blocks=True, attribute=False):
         from tagteam import core, harnesses
-        PIN[0] = PIN_TEXT if small_blocks else ""
+        PIN[0] = (PIN_TEXT if small_blocks else "") + ("" if attribute else LEDGER_OFF)
         self.repo = make_repo()
         self.calls = []
         self.seen_active = []
@@ -113,8 +114,8 @@ class HookRig:
         for x in self.rigs:
             x.start()
         clear_user_config()
-        if user_config is not None:
-            write_user_config(user_config)
+        if user_config is not None or not attribute:
+            write_user_config(user_config or "")
 
     def unrig(self):
         for x in self.rigs:

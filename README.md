@@ -125,7 +125,19 @@ session that started it. Headless `opencode run` exits as soon as the session is
 nothing there; `opencode run --attach` to a running `opencode serve` is reviewed like the TUI. As a reviewer,
 OpenCode runs with the repo's own `opencode.json` ignored and edit, shell, subagent and web tools denied.
 
-Three rules decide each issue's kind, in this order: a `blocker` always blocks, in any tier (a background
+**Whose change it is (Claude Code).** tagteam records which files each of the session's own tool calls
+changed (Write, Edit, Bash and the rest, subagents included). Every change in the repo is still reviewed, but
+a finding can block only when its file was changed by this session's own calls and by nothing else since the
+last review. A file that another session, your editor, or a process outside any tool call changed is reviewed
+as a suggestion, marked `[not blocking: this file changed outside your own tool calls]`. A finding that names
+no file blocks only when every changed file is the session's own. A run with no own file is non-blocking.
+The session's own work that lands after a Stop, such as a background subagent's, is reviewed at the next
+Stop, and writes by an `isolation: worktree` subagent are reviewed too. When tagteam can't vouch for the
+record (a Bash call in a repo too large to snapshot, or hooks older than the installed package: run
+`tagteam install`), every change counts as the session's own, as in other harnesses. `[ledger] attribute =
+false` in `~/.tagteam/config.toml` turns this off.
+
+Three rules decide the kind of every other issue, in this order: a `blocker` always blocks, in any tier (a background
 review's blocker blocks the next Stop as round 1, even if that turn changed nothing); an issue that was
 already a suggestion stays one when it is re-checked; anything else takes the kind of the review that found
 it. Once a blocking cycle is open, the reviews that re-check its fixes are blocking too, however small the

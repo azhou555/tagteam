@@ -1,6 +1,35 @@
 # Attribution redesign: own changes per tool call
 
-Status: proposal (2026-11-19). Not implemented.
+Status: Phase D (Claude cutover) implemented 2026-11-25. Phase E (other harnesses, recovery, reuse) not started.
+
+### As built, and where it differs from this proposal
+
+- **Per file, not per hunk.** A file is own when this session's spans chain unbroken from the review
+  baseline's blob to the reviewed blob. Any break makes the whole file a suggestion; own hunks inside a
+  mixed file don't block. Revisit when `shadow.jsonl` shows mixed files are common.
+- **Started early.** The cutover shipped after one day of shadow data (3 Stops, 0 foreign, 0 overlaps)
+  instead of a week, at the user's request. `shadow.jsonl` keeps logging every Stop, with a `fallback` flag.
+- **The baseline is kept only for own work.** `turn_start` keeps the old baseline when the session's ledger
+  holds calls since it, or after a stopped or timed-out review (`hold`). An editor edit between turns with
+  no own work is not reviewed, as before; a git pull between idle turns would otherwise become a large
+  unattributed review. A Stop that skips by choice (trivial change, untriggered kind) advances it.
+- **Fallback to "all own"** when the ledger can't vouch: a skipped Bash snapshot in the window, a PostToolUse
+  with no PreToolUse (hooks older than the package), any ledger error, `[ledger] attribute = false`, or a
+  non-Claude author.
+- **Contested overlaps across sessions** are not resolved: any call by another session that changed the path
+  in the window makes it foreign, even when that write landed inside one of this session's Bash calls. The
+  "Edit beats a snapshot" rule is not built, so a path both sessions claim is a suggestion for both.
+  This fires more often than a real contest. Another session's long Bash call (a test run, a build)
+  snapshots the tree, so every file this session writes while it runs lands in that session's journal and is
+  a suggestion here. The `foreign` count in `shadow.jsonl` shows how often.
+- **A file with an open blocker stays blocking** in the fix rounds that follow, even when that round's diff
+  doesn't touch it, so another writer's change in the round can't release it.
+- **A call with no PostToolUse** (interrupt, denied permission) stays pending for 24 h and keeps the
+  baseline from advancing at turn start, so changes between those turns join the next review as
+  suggestions. This costs reviews but loses no coverage. Phase E's abandoned-call recovery closes these.
+- **F3** worktree deltas are diffed from the first call's `pre` blob (written with `hash-object -w`) to the
+  current file, and labelled with the same chain rule.
+- Own calls pruned after 24 h leave their change unattributed.
 
 ## Problem
 

@@ -26,10 +26,20 @@ Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable
 - [ ] Run for a week (from 2026-11-25), then read `shadow.jsonl`: how often today's diff disagrees with the ledger, and the Bash snapshot cost
 
 ### Phase D — Claude cutover (the safety net ships with it)
-- [ ] Whole-tree diff stays; unclaimed hunks reviewed as unattributed suggestions (spec: "Safety net")
-- [ ] turn_start keeps the oldest unreviewed baseline (F2); worktree deltas as their own group (F3); background results close the deltas they reviewed even after a new turn started (F2b)
-- [ ] Own hunks block; foreign, ambiguous, unattributed advise
-- [ ] Tests: every attribution test case in the spec, incl. missing PostToolUse → change still reviewed (unattributed until recovery ships)
+Started 2026-11-25 at the user's request, before the week of shadow data (3 Stops logged). Per-file, not per-hunk:
+a file with a broken chain is advise as a whole. Revisit when shadow.jsonl shows mixed files are common.
+- [x] `ledger.owners`: per changed file, own (unbroken chain of this session's spans from the baseline blob to the
+      reviewed blob) / foreign (another session's journal) / unattributed. Overlapping calls merge into spans.
+      Falls back to "all own" when the ledger can't vouch: not Claude, `[ledger] attribute = false`, a skipped
+      Bash call, or touched files with no bracketed calls (hooks older than the package)
+- [x] Window starts at the baseline's own timestamp (`baseline_ts`), not the prompt
+- [x] Own findings keep today's gates; others are suggestions, blockers included, and say why. A run with no own
+      file is advise mode (background)
+- [x] F2: a Claude turn keeps the old baseline while its ledger holds calls since it; stop/busy set `hold`
+      (replaces pending_baseline/pending_touched); a skipped-by-choice Stop (trivial, not wanted) advances it
+- [x] F2b: a background result advances the baseline it reviewed, even after a new turn started
+- [x] F3: worktree-subagent deltas reviewed as their own artifacts (pre blobs written with `hash-object -w`)
+- [x] Tests for each; README + redesign doc updated
 
 ### Phase E — better labels (coverage already guaranteed by D's net)
 - [ ] Abandoned-call recovery (uncertain instead of unattributed), open background jobs, orphans
