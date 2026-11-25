@@ -4,18 +4,20 @@
 Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable.
 
 ### Phase A — independent fixes (no dependency on the redesign)
-- [ ] F4: blame a reviewer only for writes inside its own sandbox; other real-tree or git-config changes warn, never disable
+- [x] F4: blame a reviewer only for writes inside its own sandbox. A git config or hook change, or a change to an unsandboxed tree, stops the run: results discarded, nobody disabled, the change left for the next turn (`core.STOPPED`)
 - [x] Confirm round: carry its major/blocker findings forward as suggestions instead of dropping them (verdict.demote; 322 tests OK)
+- [x] F6 (Copilot): a session whose payload has `parentAgentId` is a subagent. Its `userPromptSubmitted` takes no baseline and its `agentStop` reviews nothing, so the root's Stop reviews its work once. Its `postToolUse` touches are added to the root session's `touched`, so out-of-repo files it writes still reach the root's review. Today the work is reviewed twice, and a blocking finding would start a fix loop inside the subagent (live capture: `sub2.py`, two runs). No dependency on the ledger
 - [ ] ~~F5: agy reads every `workspacePaths` root~~ — moved to Phase E (agy is a non-Claude harness; needs one session spanning several repos, which the ledger's per-repo-root keys provide)
 
 ### Installer bugs (found 2026-11-22, reinstalling from main)
-- [ ] `tagteam install` rewrites `~/.claude/settings.json` with every non-ASCII character escaped (`—` → `—`) while the plan line says "already up to date". `base.save` uses `json.dumps` without `ensure_ascii=False`. The content is equal JSON, but the file churns on every install. Keep non-ASCII as-is, and write nothing when the parsed content is unchanged.
+- [ ] `tagteam install` rewrites `~/.claude/settings.json` with every non-ASCII character escaped (`—` → `\u2014`) while the plan line says "already up to date". `base.save` uses `json.dumps` without `ensure_ascii=False`. The content is equal JSON, but the file churns on every install. Keep non-ASCII as-is, and write nothing when the parsed content is unchanged.
 - [ ] The menu bar step isn't idempotent. `install.py` `_menubar`'s plan always says "write ~/SwiftBar/tagteam.1s.sh; add ~/Applications/tagteam.app", even right after an install. Compare the plugin and launcher bytes and report "already up to date" when they match.
 
 ### Phase B — verify the assumptions (gates C–E)
-- [ ] Claude: fixtures for foreground, parallel, background and worktree subagents (session_id shared? agent_id? cwd? tool_use_id on Pre and Post?)
-- [~] Codex, Copilot, agy: does a PreToolUse-equivalent exist? Event names present in all (codex 0.166 PreToolUse+SubagentStart/Stop, copilot 1.0.114 preToolUse+subagentStop, agy 1.5.13 PreToolUse; agy subagents default to `workspace: "inherit"` = the parent's tree, only `"branch"` makes an isolated git worktree, `"share"` unverified). Payload shape still uncaptured
-- [ ] Measure the hook overhead of a snapshot on every Bash call on a real large repo
+- [x] Claude: live capture of foreground, parallel, worktree and background subagents (2026-11-24). Subagents share the root `session_id`, and every subagent event carries `agent_id`. `tool_use_id` matches on Pre and Post. A worktree subagent's `cwd` is the worktree. The Agent Post's `tool_response.agentId` links the launching call to its subagent. The root's Stop lists running subagents in `background_tasks`. F2 and F3 reproduced live, and F2b (a late background result discarded) found. Spec: "Hook payloads"
+- [x] Copilot, agy: live capture via repo-local hooks (`.github/hooks/`, `.agents/hooks.json`) in a throwaway trusted repo. Both have a PreToolUse with a call ID that matches on Post. Both run a subagent as its own session, which gives F6. Copilot links it with `parentAgentId`. agy has no parent field. `invoke_subagent` returns before the child starts, so timing can't link them. The parent's transcript names the child's `conversationId`. agy's PreToolUse denies the tool unless the hook replies `{"decision": "allow"}`
+- [x] Codex 0.172: live capture via a project `.codex/hooks.json` you approved. Same shape as Claude: one `session_id` with `agent_id` on subagent events, and `tool_use_id` matches on Pre and Post. `spawn_agent` is asynchronous. No F6
+- [x] Hook overhead on a real large repo (Linux, 97k files): 0.56–0.75 s per snapshot, so 1.1–1.5 s per Bash call. Breakdown and cheap wins are in the spec under "Scaling"
 
 ### Phase C — shadow ledger, Claude only (no behavior change)
 - [ ] Pre/Post brackets → pending + owned ledger + repo journal
@@ -24,13 +26,14 @@ Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable
 
 ### Phase D — Claude cutover (the safety net ships with it)
 - [ ] Whole-tree diff stays; unclaimed hunks reviewed as unattributed suggestions (spec: "Safety net")
-- [ ] turn_start keeps the oldest unreviewed baseline (F2); worktree deltas as their own group (F3)
+- [ ] turn_start keeps the oldest unreviewed baseline (F2); worktree deltas as their own group (F3); background results close the deltas they reviewed even after a new turn started (F2b)
 - [ ] Own hunks block; foreign, ambiguous, unattributed advise
 - [ ] Tests: every attribution test case in the spec, incl. missing PostToolUse → change still reviewed (unattributed until recovery ships)
 
 ### Phase E — better labels (coverage already guaranteed by D's net)
 - [ ] Abandoned-call recovery (uncertain instead of unattributed), open background jobs, orphans
 - [ ] Other harnesses (chained Post→Pre fallback where no Pre hook, labelled approximate)
+- [ ] F6 (agy): at a conversation's Stop, look for its `conversationId` in the transcripts (`transcriptPath`) of the workspace's other live agy sessions ("Created the following subagent"). Only exactly one match suppresses its review. No match or several means review as today. Depends on agy's transcript format: test that format against the fixture
 - [ ] F5: agy sessions cover every `workspacePaths` root (one repo-root group per root); resolve touch paths against the root that contains them, not `[0]`
 - [ ] Reviewed-ledger reuse with re-gating
 

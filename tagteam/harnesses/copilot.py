@@ -11,6 +11,11 @@ PATH = pathlib.Path.home() / ".copilot" / "hooks" / "tagteam.json"
 
 def parse(phase, p):
     sid, cwd = p.get("sessionId", ""), p.get("cwd") or os.getcwd()
+    parent = p.get("parentAgentId")
+    if parent:                      # a subagent runs as its own session; its root reviews its work at the root's Stop
+        sid = parent
+        if phase != "touch":
+            phase = "ignore"
     ev = HookEvent("copilot", phase, sid, cwd)
     if phase == "turn-start":
         ev.prompt = p.get("prompt", "")

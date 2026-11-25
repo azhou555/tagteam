@@ -28,8 +28,10 @@ Silent losses rank above noisy errors: a missed review is worse than a loud fals
 
 | # | Failure | Repro | Kind |
 |---|---|---|---|
-| F2 | Writes between Stop and the next prompt are never reviewed. That covers background subagents, background Bash, interrupts (Esc fires no Stop), crashes, and hook timeouts. `turn_start` re-baselines and clears `touched` (`core.py:53`). | `bg.py` touched, then next prompt → touched `[]`, diff `[]` | silent loss |
-| F3 | Writes by an `isolation: worktree` subagent are dropped, because its in-repo worktree is excluded as a nested repo (`changes.py:47`). | `sub.py` in `.claude/worktrees/sub` → diff `[]` | silent loss |
+| F2 | Writes between Stop and the next prompt are never reviewed. That covers background subagents, background Bash, interrupts (Esc fires no Stop), crashes, and hook timeouts. `turn_start` re-baselines and clears `touched` (`core.py:53`). The `<task-notification>` turn that reports a finished background subagent runs `turn_start` like any prompt, so the subagent's writes are already in its baseline. | Live Claude capture: the root stops with the subagent still running, the subagent writes `bg.txt` 20 s later, and the notification turn's baseline already contains `bg.txt` | silent loss |
+| F2b | A background review that finishes after the next turn has started is discarded ("new turn started during review; session state not updated"). A `<task-notification>` turn arriving moments after Stop is enough to trigger it. | Live Claude capture, first run | lost result |
+| F3 | Writes by an `isolation: worktree` subagent are dropped, because its in-repo worktree is excluded as a nested repo (`changes.py:47`). | Live Claude capture: reviewed `bg fg p1 p2 root`, not `wt.txt` | silent loss |
+| F6 | Copilot and agy run each subagent as its own session (its own `sessionId` / `conversationId`, its own turn start and Stop). tagteam reviews the subagent at its own Stop and the root reviews the same change again. A blocking finding would start a fix loop inside the subagent. | Live Copilot capture: `sub2.py` reviewed by two runs, one per session. agy: two session files for one prompt | double review |
 | F5 | agy reads only `workspacePaths[0]` (`agy.py:17`). | code read | silent loss |
 | F1a | Two sessions in one tree each review both sessions' work. B can be blocked on A's in-flight code. Digest memory is per session, so the same lines are paid for twice. | A and B both see `a.py, b.py` | misattribution |
 | F1b | A merge, pull, or checkout during a turn is reviewed as code the session wrote. | merge only → diff `up.py` | misattribution |
@@ -183,8 +185,10 @@ A Bash call can start a process that writes after the call returns. No hook fire
 | F2 missed Stop, background subagent | Calls that completed stay in the ledger until a verdict covers them. A background subagent's writes come from its own tool calls. | fixed |
 | F2 interrupt, crash, hook timeout | A call without PostToolUse is recovered from its pending entry once it's abandoned. See "Calls that never finish". | partial: suggestions only |
 | F2 background Bash | See "Background shell jobs". | partial: suggestions only |
-| F3 worktree | Deltas are keyed by `repo_root(tool cwd)`. Relies on the hook payload's `cwd` being the worktree (unverified). | likely |
-| F4 disable | A reviewer is blamed only for writes in its own sandbox. Other real-tree changes produce a warning. | fixed |
+| F3 worktree | Deltas are keyed by `repo_root(tool cwd)`. A worktree subagent's payload `cwd` is the worktree, and its Write `file_path` is absolute inside it (captured). | fixed |
+| F6 split subagent sessions | A session whose first event names a parent (Copilot `parentAgentId`) is not a session of its own: its calls go to the root's ledger and its Stop reviews nothing. agy sends no parent field. Its parent's transcript (`transcriptPath`) records `Created the following subagent: {"conversationId": …}`, so at the child's Stop tagteam looks for its ID in the transcripts of the workspace's other live agy sessions. Only a found ID suppresses the child's review. When none is found, or more than one matches, the child is reviewed as today: a double review, never a miss. | fixed for Copilot; agy depends on its transcript format, falls back to today |
+| F2b late background result | Results are keyed by the deltas they reviewed, not the turn. A result that lands after a new turn started still closes those deltas. | fixed |
+| F4 disable | A reviewer is blamed only for writes in its own sandbox. A shared git config or hook change stops the run with no verdict and no disable, and the change is reviewed again next turn. Other real-tree changes produce a warning. | fixed (shipped before the ledger) |
 | Residual | A foreign write inside this session's Bash window is still claimed unless the writer named the path explicitly. | narrowed to one tool call |
 
 ## Scaling
@@ -198,18 +202,34 @@ A Bash call can start a process that writes after the call returns. No hook fire
 | synthetic | 100,000 | 294 ms | 324 ms |
 | synthetic + fsmonitor, untrackedCache | 100,000 | 368 ms | 488 ms |
 
-fsmonitor doesn't help, because each snapshot uses a copied temp index. Each hook also pays about 50 ms
-of Python startup.
+Real large repo (2026-11-24): a shallow clone of the Linux kernel, 97,373 tracked files. Each figure is
+one whole hook process (Python start, import, `snapshot`), median of 7 runs:
+
+| Tree state | Median | Max |
+|---|---|---|
+| clean | 559–735 ms | 739 ms |
+| 50 modified + 200 untracked files | 582–764 ms | 828 ms |
+| same + one 50 MB untracked file (not ignored) | 746 ms | 1,514 ms |
+
+The range covers two runs, the slower one taken while another agent was running. Per snapshot:
+`add -A` ≈ 300 ms, `ls-files -o` (the nested-repo scan) ≈ 145 ms, `write-tree` ≈ 25 ms. The rest
+is the process itself and copying the 10 MB index. Plain `git status` takes 270 ms. Bare Python
+startup is 16 ms. fsmonitor doesn't help, because each snapshot uses a copied temp index. An
+untracked file is never in the real index, so every snapshot hashes it again.
 
 - **Per call:** Edit, Write, and apply_patch hash only the files they name (about 1 ms). Only Bash and
-  shell calls take two tree snapshots: about 0.2 s at 10k files and 0.7 s at 100k files. Read-only
-  tools aren't hooked.
+  shell calls take two tree snapshots: about 0.1 s at 10k files and **1.1–1.5 s at 100k files**.
+  Read-only tools aren't hooked.
+- **Cheap wins before a watcher:** fold the nested-repo scan into the `add -A` pass (≈ 145 ms per
+  snapshot at 100k), and reuse a Bash call's Post snapshot as the next Bash call's Pre when
+  no other writer touched the tree in between (the next call's Pre would otherwise re-scan the same tree).
 - **N sessions:** cost is linear, and nothing is serialized across the machine. Each session writes its
   own ledger file. Journal appends take a short per-repo lock. Git's object store handles concurrent
   writers.
-- **Pairing calls:** Claude has `tool_use_id`, agy has `stepIdx`, and OpenCode has `callID`. Copilot
-  has none, so its calls are paired in order. A harness without PreToolUse falls back to using the
-  previous Post as the next Pre, and is labelled approximate.
+- **Pairing calls:** every captured harness sends the same call ID on Pre and Post. Claude sends
+  `tool_use_id`, Copilot `toolCallId`, agy `toolCall.id` (plus `stepIdx`), and OpenCode `callID`.
+  Codex also sends `tool_use_id`. A harness without PreToolUse falls back to using the previous Post as the
+  next Pre, and is labelled approximate.
 - **Costs to watch:** snapshots store blobs for dirty files. Large untracked files that get rewritten
   over and over make `.git/objects` grow until gc prunes them.
 - **Above about 50k files:** add a per-repo watcher (FSEvents or inotify) that feeds dirty paths. Don't
@@ -228,12 +248,31 @@ is the one talking to the user. Reviewing each subagent at SubagentStop goes wro
 
 | Case | Rule | Today |
 |---|---|---|
-| Foreground subagent | Calls carry the root `session_id` plus `agent_id`. Deltas go to the root ledger, tagged by agent. Findings name the subagent that wrote the code. | works by accident |
-| Parallel subagents | Same owner, so their windows merge into spans (see reconciliation step 1). | works by accident |
-| Running at the root's Stop | Review only closed calls. Open windows roll over to the `<task-notification>` turn's Stop. | lost (F2) |
-| Worktree subagent | Deltas are keyed by the worktree root and reviewed as their own group from a sandbox of the worktree's snapshot. A later merge reuses the findings when the before and after content match. | lost (F3) |
+| Foreground subagent | Calls carry the root `session_id` plus `agent_id`. Deltas go to the root ledger, tagged by agent. Findings name the subagent that wrote the code. | Claude: works by accident |
+| Parallel subagents | Same owner, so their windows merge into spans (see reconciliation step 1). | Claude: works by accident |
+| Running at the root's Stop | Review only closed calls. Open windows roll over to the `<task-notification>` turn's Stop. The root's Stop payload lists running subagents in `background_tasks`, which marks the open window. | lost (F2, captured) |
+| Worktree subagent | Deltas are keyed by the worktree root and reviewed as their own group from a sandbox of the worktree's snapshot. A later merge reuses the findings when the before and after content match. | lost (F3, captured) |
 | Nested subagents | Walk up to the root. OpenCode already does this (`opencode-plugin.js:50`). | OpenCode only |
-| Subagent session with no parent link | Its ledger never sees a user turn. Surface its deltas at the next Stop of any session in the repo as unattributed suggestions. | unverified for Codex, Copilot, agy |
+| Subagent as its own session (Copilot, agy) | Fold it into the root: its calls go to the root ledger, its turn start takes no baseline, and its Stop reviews nothing. Copilot names the parent (`parentAgentId`). agy doesn't, so link through the parent's transcript, with today's review as the fallback (see F6). | reviewed twice (F6, captured) |
+| Subagent session with no parent link | Its ledger never sees a user turn. Surface its deltas at the next Stop of any session in the repo as unattributed suggestions. | none seen: Codex, like Claude, keeps subagents in the root session |
+
+### Hook payloads (captured 2026-11-24)
+
+Live headless runs with logging hooks next to tagteam's own. The sanitized captures are in
+`tests/fixtures/subagents/`.
+
+| | Claude 2.x | Copilot 1.0.114 | agy 1.5.16 | Codex 0.172 |
+|---|---|---|---|---|
+| Subagent identity | same `session_id` as the root; `agent_id` + `agent_type` on every subagent event | own `sessionId` = `agentId`; `parentAgentId` = root `sessionId` | own `conversationId`; no parent field anywhere in the payload | same `session_id` and `turn_id` as the root; `agent_id` + `agent_type` on subagent events |
+| Subagent lifecycle events | `SubagentStart`/`SubagentStop` (root `session_id`, `agent_id`) | `subagentStart`/`subagentStop` on the root, plus the subagent's own `userPromptSubmitted` and `agentStop` | the subagent's own `PreInvocation` (invocationNum 0) and `Stop` | `SubagentStart`/`SubagentStop` with `agent_id` |
+| Call ID on Pre and Post | `tool_use_id` | `toolCallId` | `toolCall.id`, `stepIdx` | `tool_use_id` |
+| Launching call → subagent | Agent Post `tool_response.agentId` (foreground and background) | Pre/Post of the `task` tool bracket the subagent | none in the payload. `invoke_subagent` is asynchronous: its Post (`t=…860.405`) comes *before* the subagent's first `PreInvocation` (`…860.419`). The link is in the parent's transcript: `Created the following subagent: {"conversationId": …}` | `collaboration.spawn_agent` Post returns before `SubagentStart` (asynchronous); `wait_agent` joins it |
+| Worktree subagent `cwd` | the worktree path | — | default `workspace: "inherit"` = parent's tree | not captured |
+| Background | Agent Post returns at once (`isAsync`); root Stop lists `background_tasks`; a `<task-notification>` prompt + Stop follow | not captured | every agy subagent is asynchronous (see above); a long-running one was not captured | every spawn is asynchronous; the root's `wait_agent` held it inside the turn |
+| PreToolUse reply | `{}` allows | `{}` allows | `{}` **denies**; must reply `{"decision": "allow"}` | `{}` allows |
+
+Claude also produced a same-session overlap worth keeping as a fixture: the root's `until [ -f bg.txt ]`
+Bash ran inside the background subagent's Bash window.
 
 ## Workarounds and heuristics in the code today
 
@@ -246,14 +285,13 @@ is the one talking to the user. Reviewing each subagent at SubagentStop goes wro
 - Digest memory, the hourly reservation, and the two-failures breaker guard against loops and runaway
   cost.
 - Quota is read from a status-line tee, Codex rollout files, and stderr regexes.
-- A confirm round keeps only suggestion-level issues open, so a major finding from the last review is
-  shown once and then dropped. Consider carrying it forward as a suggestion.
+- ~~A confirm round keeps only suggestion-level issues open.~~ Fixed in #7: `verdict.demote` carries
+  its findings forward as suggestions.
 
 ## Before building
 
-1. Capture subagent hook payloads for each harness. Check whether a subagent shares the parent's
-   `session_id`, which field links it to its parent, what `cwd` a worktree subagent reports, and
-   whether PreToolUse exists. No current Claude fixture has an `agent_id`.
+1. ~~Capture subagent hook payloads for each harness.~~ Done for Claude, Copilot, agy, and Codex. See "Hook
+   payloads".
 2. Prototype the ledger behind a flag next to today's diff, and log where the two disagree on real
    work for a week.
 3. Add a `tagteam doctor` warning when two live sessions share one working tree. The clean fix is a
