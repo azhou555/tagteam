@@ -1,6 +1,26 @@
 # Attribution redesign: own changes per tool call
 
-Status: proposal (2026-11-19). Not implemented.
+Status: Phase D (Claude cutover) implemented 2026-11-25. Phase E (other harnesses, recovery, reuse) not started.
+
+### As built, and where it differs from this proposal
+
+- **Per file, not per hunk.** A file is own when this session's spans chain unbroken from the review
+  baseline's blob to the reviewed blob. Any break makes the whole file a suggestion; own hunks inside a
+  mixed file don't block. Revisit when `shadow.jsonl` shows mixed files are common.
+- **Started early.** The cutover shipped after one day of shadow data (3 Stops, 0 foreign, 0 overlaps)
+  instead of a week, at the user's request. `shadow.jsonl` keeps logging every Stop, with a `fallback` flag.
+- **The baseline is kept only for own work.** `turn_start` keeps the old baseline when the session's ledger
+  holds calls since it, or after a stopped or timed-out review (`hold`). An editor edit between turns with
+  no own work is not reviewed, as before; a git pull between idle turns would otherwise become a large
+  unattributed review. A Stop that skips by choice (trivial change, untriggered kind) advances it.
+- **Fallback to "all own"** when the ledger can't vouch: a skipped Bash snapshot in the window, a PostToolUse
+  with no PreToolUse (hooks older than the package), any ledger error, `[ledger] attribute = false`, or a
+  non-Claude author.
+- **Contested overlaps across sessions** are not resolved: the other session's write breaks the chain, so
+  the path is a suggestion for this session.
+- **F3** worktree deltas are diffed from the first call's `pre` blob (written with `hash-object -w`) to the
+  current file, and labelled with the same chain rule.
+- Own calls pruned after 24 h leave their change unattributed.
 
 ## Problem
 

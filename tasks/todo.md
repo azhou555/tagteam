@@ -28,18 +28,18 @@ Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable
 ### Phase D — Claude cutover (the safety net ships with it)
 Started 2026-11-25 at the user's request, before the week of shadow data (3 Stops logged). Per-file, not per-hunk:
 a file with a broken chain is advise as a whole. Revisit when shadow.jsonl shows mixed files are common.
-- [ ] `ledger.owners`: per changed file, own (unbroken chain of this session's spans from the baseline blob to the
+- [x] `ledger.owners`: per changed file, own (unbroken chain of this session's spans from the baseline blob to the
       reviewed blob) / foreign (another session's journal) / unattributed. Overlapping calls merge into spans.
       Falls back to "all own" when the ledger can't vouch: not Claude, `[ledger] attribute = false`, a skipped
       Bash call, or touched files with no bracketed calls (hooks older than the package)
-- [ ] Window starts at the baseline's own timestamp (`baseline_ts`), not the prompt
-- [ ] Own findings keep today's gates; others are suggestions, blockers included, and say why. A run with no own
+- [x] Window starts at the baseline's own timestamp (`baseline_ts`), not the prompt
+- [x] Own findings keep today's gates; others are suggestions, blockers included, and say why. A run with no own
       file is advise mode (background)
-- [ ] F2: a Claude turn keeps the old baseline while its ledger holds calls since it; stop/busy set `hold`
+- [x] F2: a Claude turn keeps the old baseline while its ledger holds calls since it; stop/busy set `hold`
       (replaces pending_baseline/pending_touched); a skipped-by-choice Stop (trivial, not wanted) advances it
-- [ ] F2b: a background result advances the baseline it reviewed, even after a new turn started
-- [ ] F3: worktree-subagent deltas reviewed as their own artifacts (pre blobs written with `hash-object -w`)
-- [ ] Tests for each; README + redesign doc updated
+- [x] F2b: a background result advances the baseline it reviewed, even after a new turn started
+- [x] F3: worktree-subagent deltas reviewed as their own artifacts (pre blobs written with `hash-object -w`)
+- [x] Tests for each; README + redesign doc updated
 
 ### Phase E — better labels (coverage already guaranteed by D's net)
 - [ ] Abandoned-call recovery (uncertain instead of unattributed), open background jobs, orphans
