@@ -7,9 +7,10 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 
-from . import changes, classify, limits, live, quota, router, runner, sandbox, state, verdict
+from . import changes, classify, ledger, limits, live, quota, router, runner, sandbox, state, verdict
 from .adapters import MARKER, HookEvent
 
 BACKGROUND = f"{MARKER} ⟳ Reviewing in the background; results appear in the status line"
@@ -68,18 +69,32 @@ def turn_start(ev, cfg):
     return {"action": "allow", "message": notice} if notice else None
 
 
+def _shadow(fn, ev, cfg, *args):
+    """The ledger only observes: its failure must never change what a hook returns."""
+    try:
+        if cfg["ledger"]["shadow"]:
+            fn(ev, cfg, *args)
+    except Exception as e:
+        state.log("ledger error", phase=ev.phase, error=repr(e), tb=traceback.format_exc()[-2000:])
+
+
+def pre(ev, cfg):
+    _shadow(ledger.pre, ev, cfg)
+    return None
+
+
 def touch(ev, cfg):
-    if not ev.paths:
-        return None
-    with state.locked(_session_file(ev).stem):
-        s = state.read_json(_session_file(ev))
-        if not s:
-            return None
-        s["touched"] = sorted(set(s["touched"]) | set(ev.paths))
-        repo = s.get("repo")        # never reset: PostToolUse can't see the pre-edit state, so these can't prove a revert
-        s["outside_touched"] = sorted(set(s.get("outside_touched", [])) | {
-            p for p in ev.paths if not changes.in_repo(p, repo)})
-        state.write_json(_session_file(ev), s)
+    if ev.paths:
+        with state.locked(_session_file(ev).stem):
+            s = state.read_json(_session_file(ev))
+            if s:
+                s["touched"] = sorted(set(s["touched"]) | set(ev.paths))
+                repo = s.get("repo")    # never reset: PostToolUse can't see the pre-edit state, so these can't prove a revert
+                s["outside_touched"] = sorted(set(s.get("outside_touched", [])) | {
+                    p for p in ev.paths if not changes.in_repo(p, repo)})
+                state.write_json(_session_file(ev), s)
+    if ev.call:                     # after the real work: a slow snapshot must not cost it the hook's timeout
+        _shadow(ledger.post, ev, cfg)
     return None
 
 
@@ -324,7 +339,8 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         live.record_run(run)
         if run_tag == "turn":                        # the change stays unreviewed: the next turn covers it
             _write_back(_session_file(ev), s.get("turn_id"),
-                        lambda cur: cur.update(pending_baseline=cur.get("baseline"), pending_touched=cur.get("touched", [])))
+                        lambda cur: cur.update(pending_baseline=cur.get("baseline"), pending_touched=cur.get("touched", [])),
+                        lambda cur: _reopen(cur, s))
         if in_a_row >= STOPS_TO_ESCALATE:
             warn += (f" · ⚠ {in_a_row} reviews in a row stopped in this repo by git config or hook changes:"
                      " check `git config --list --show-origin` and .git/hooks")
@@ -346,6 +362,14 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
     live.record_run(run)
     open_issues = issues if len(failed) < len(results) else None
     return action, (msg if action == "block" else completion(run, lines_changed)) + warn, run_dir, open_issues
+
+
+def _reopen(cur, s):
+    """A background review stopped after the next turn began: that turn's baseline already holds the stopped
+    change, so move it back to the stopped turn's baseline while it has not reviewed anything yet."""
+    if cur.get("repo") == s.get("repo") and cur.get("round") == 0 and s.get("baseline"):
+        cur.update(baseline=s["baseline"], turn_baseline=s["baseline"],
+                   touched=sorted(set(cur.get("touched", [])) | set(s.get("touched", []))))
 
 
 def _count_stop(repo, stopped):
@@ -413,6 +437,10 @@ def _turn_end(ev, cfg, lock, fd):
         return _owed(ev, cfg, s, sf)
     m = cfg["limits"]["max_rounds_per_turn"]
     artifacts, head = collect(s, cfg)
+    if ev.agent == "claude":
+        t = _clock()
+        _shadow(ledger.shadow, ev, cfg, s, artifacts)
+        started += _clock() - t                      # the ledger's time never comes out of the reviewers' setup budget
     changed = sum(a["lines_changed"] for a in artifacts)
     prior = s.get("prior") or []
     if not prior and changed and s.get("reverted_prior"):
@@ -590,4 +618,4 @@ def _plan_gate(ev, cfg, lock, fd):
     return {"action": action, "message": msg}
 
 
-HANDLERS = {"turn-start": turn_start, "touch": touch, "turn-end": turn_end, "plan-gate": plan_gate}
+HANDLERS = {"turn-start": turn_start, "pre": pre, "touch": touch, "turn-end": turn_end, "plan-gate": plan_gate}

@@ -12,6 +12,7 @@ STATUSLINE_ORIG = state.HOME / "statusline.orig"
 STATUSLINE_ORIG_REFRESH = state.HOME / "statusline.orig-refresh"   # user's refreshInterval before ours, or empty
 REFRESH_S = 2                                                       # ticks the status line during a blocking review
 TOUCH_MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash"
+TOUCH_TOOLS = set(TOUCH_MATCHER.split("|"))
 
 
 def claude_shaped_owner(p):
@@ -30,10 +31,15 @@ def parse_claude_shaped(agent, p):
     sid, cwd = p.get("session_id", ""), p.get("cwd") or os.getcwd()
     ev = HookEvent(agent, "ignore", sid, cwd, turn_id=p.get("turn_id", ""))
     name = p.get("hook_event_name")
+    if name in ("PreToolUse", "PostToolUse", "PostToolUseFailure") and agent == "claude" and p.get("tool_use_id"):
+        ev.call = {"id": p["tool_use_id"], "agent_id": p.get("agent_id"), "tool": p.get("tool_name"),
+                   "input": p.get("tool_input")}
     if name == "UserPromptSubmit":
         ev.phase, ev.prompt = "turn-start", p.get("prompt", "")
-    elif name == "PostToolUse":
+    elif name in ("PostToolUse", "PostToolUseFailure"):     # a Bash that exits non-zero gets the Failure event
         ev.phase, ev.paths = "touch", extract_paths(p.get("tool_input"), cwd)
+    elif name == "PreToolUse" and ev.call and p.get("tool_name") in TOUCH_TOOLS:
+        ev.phase = "pre"
     elif name == "Stop":
         ev.phase = "turn-end"
         ev.last_message = p.get("last_assistant_message") or ""
@@ -48,12 +54,13 @@ def claude_shaped_events(agent, entry_cmd, stop_timeout):
         g = {"hooks": [{"type": "command", "command": base.hook_cmd(entry_cmd, agent, phase), "timeout": timeout}]}
         return {"matcher": matcher, **g} if matcher else g
     events = {
-        "UserPromptSubmit": group("turn-start", 30),
-        "PostToolUse": group("touch", 30, TOUCH_MATCHER if agent == "claude" else None),
-        "Stop": group("turn-end", stop_timeout),
+        "UserPromptSubmit": [group("turn-start", 30)],
+        "PostToolUse": [group("touch", 30, TOUCH_MATCHER if agent == "claude" else None)],
+        "Stop": [group("turn-end", stop_timeout)],
     }
-    if agent == "claude":
-        events["PreToolUse"] = group("plan-gate", stop_timeout, "ExitPlanMode")
+    if agent == "claude":       # not Codex: a new Codex hook needs the user's approval again
+        events["PreToolUse"] = [group("plan-gate", stop_timeout, "ExitPlanMode"), group("pre", 30, TOUCH_MATCHER)]
+        events["PostToolUseFailure"] = [group("touch", 30, TOUCH_MATCHER)]
     return events
 
 
@@ -61,8 +68,8 @@ def install_claude_shaped(agent, path, entry_cmd, stop_timeout, dry_run, before_
     data = base.load(path)
     hooks = data.setdefault("hooks", {})
     base.strip(hooks)
-    for event, entry in claude_shaped_events(agent, entry_cmd, stop_timeout).items():
-        hooks.setdefault(event, []).append(entry)
+    for event, entries in claude_shaped_events(agent, entry_cmd, stop_timeout).items():
+        hooks.setdefault(event, []).extend(entries)
     if before_save:
         before_save(data)
     return base.save(path, data, dry_run)

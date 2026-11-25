@@ -287,9 +287,20 @@ class Install(unittest.TestCase):
             install.install(["claude"])
         cmds = [h["command"] for g in json.loads(self.settings.read_text())["hooks"].values() for e in g
                 for h in e["hooks"]]
-        self.assertEqual(len(cmds), 4)
+        self.assertEqual(len(cmds), 6)
         for c in cmds:
             self.assertRegex(c, r"^: tagteam-hook-form=1; /opt/bin/tagteam hook claude [a-z-]+$")
+
+    def test_claude_gains_the_ledger_pre_hook_and_codex_does_not(self):
+        with mock.patch("builtins.print"):
+            install.install(["claude", "codex"])
+            first = self.settings.read_text(), codex_h.PATH.read_text()
+            install.install(["claude", "codex"])
+        self.assertEqual((self.settings.read_text(), codex_h.PATH.read_text()), first)
+        pre = [(e["matcher"], e["hooks"][0]["command"].rsplit(" ", 1)[1], e["hooks"][0]["timeout"])
+               for e in json.loads(first[0])["hooks"]["PreToolUse"]]
+        self.assertEqual(pre, [("ExitPlanMode", "plan-gate", 540), ("Write|Edit|MultiEdit|NotebookEdit|Bash", "pre", 30)])
+        self.assertNotIn("PreToolUse", json.loads(first[1])["hooks"])
 
     def test_install_rewrites_old_checkout_hooks_by_tag(self):
         old = ": tagteam-hook-form=1; '/usr/bin/python3' '/old/repo/bin/tagteam' hook claude turn-end"
@@ -301,7 +312,7 @@ class Install(unittest.TestCase):
         hooks = json.loads(self.settings.read_text())["hooks"]
         self.assertEqual(hooks["Stop"][0], theirs)
         ours = [e for g in hooks.values() for e in g if claude_h.base.ours(e)]
-        self.assertEqual(len(ours), 4)
+        self.assertEqual(len(ours), 6)
         self.assertEqual(len([e for e in hooks["Stop"] if claude_h.base.ours(e)]), 1)
         self.assertNotIn("/old/repo", json.dumps(ours))
         self.assertIn("/opt/bin/tagteam hook claude turn-end", json.dumps(hooks["Stop"][1]))

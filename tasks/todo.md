@@ -20,9 +20,10 @@ Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable
 - [x] Hook overhead on a real large repo (Linux, 97k files): 0.56–0.75 s per snapshot, so 1.1–1.5 s per Bash call. Breakdown and cheap wins are in the spec under "Scaling"
 
 ### Phase C — shadow ledger, Claude only (no behavior change)
-- [ ] Pre/Post brackets → pending + owned ledger + repo journal
-- [ ] Span merging + chain reconciliation, computed but not acted on
-- [ ] Log per Stop: own / foreign / ambiguous / unattributed hunks vs today's diff; run for a week
+- [x] Pre/Post brackets → pending + owned ledger + repo journal (`tagteam/ledger.py`; PostToolUseFailure closes a call too)
+- [ ] Span merging + chain reconciliation: not built yet. The log records raw classes and an `overlaps` count, so the week of data says whether span merging is needed
+- [x] Log per Stop to `state/shadow.jsonl`: own / foreign / unattributed / ledger_only per path vs today's diff, with Bash snapshot times. Verified on a real Claude session: subagent and root writes `own`, the worktree subagent's file in `ledger_only` (F3)
+- [ ] Run for a week (from 2026-11-25), then read `shadow.jsonl`: how often today's diff disagrees with the ledger, and the Bash snapshot cost
 
 ### Phase D — Claude cutover (the safety net ships with it)
 - [ ] Whole-tree diff stays; unclaimed hunks reviewed as unattributed suggestions (spec: "Safety net")

@@ -50,6 +50,27 @@ def snapshot(repo):
         return git(repo, "write-tree", env=env).strip()
 
 
+def blob_ids(repo, paths):
+    """{path: blob id, or None if missing}, as `git hash-object` gives it: the repo's filters apply. A symlink is
+    hashed as git stores it, its target string, not the file it points to."""
+    links = {p: _link_blob(p) for p in paths if os.path.islink(p)}
+    present = [p for p in paths if p not in links and os.path.isfile(p)]
+    ids = git(repo or "/", "hash-object", "--", *present).split() if present else []
+    return {**dict.fromkeys(paths), **dict(zip(present, ids)), **links}
+
+
+def _link_blob(path):
+    target = os.fsencode(os.readlink(path))
+    return hashlib.sha1(b"blob %d\0" % len(target) + target).hexdigest()
+
+
+def tree_deltas(repo, base, head):
+    """{repo-relative path: [base blob, head blob]} for paths that differ; None = absent on that side."""
+    fields = git(repo, "diff-tree", "-r", "-z", "--no-renames", base, head).split("\0")
+    none = lambda sha: None if set(sha) == {"0"} else sha
+    return {rel: [none(meta.split()[2]), none(meta.split()[3])] for meta, rel in zip(fields[::2], fields[1::2]) if rel}
+
+
 def ignored(rel, patterns):
     return any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(os.path.basename(rel), p) for p in patterns)
 
