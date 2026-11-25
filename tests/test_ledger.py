@@ -430,6 +430,13 @@ class Attribution(Session, unittest.TestCase):
         self.write(self.p("f.py"), FEATURE + FEATURE, call="next")
         self.assertEqual(self.stop_with({"copilot": BLOCKER("f.py")})["decision"], "block")
 
+    def test_a_ledger_error_recording_a_call_reviews_everything_as_own(self):
+        self.prompt()
+        with mock.patch.object(ledger, "post", side_effect=RuntimeError("boom")):
+            self.write(self.p("mine.py"), FEATURE)
+        self.assertEqual(self.stop_with({"copilot": BLOCKER("mine.py")})["decision"], "block")
+        self.assertTrue(self.shadow()["fallback"])
+
 
 class Journal(unittest.TestCase):
     def test_an_append_racing_a_prune_is_never_lost(self):
