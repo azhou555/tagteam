@@ -71,10 +71,9 @@ def turn_start(ev, cfg):
 
 def _shadow(fn, ev, cfg, *args):
     """The ledger only observes: its failure must never change what a hook returns."""
-    if not cfg["ledger"]["shadow"]:
-        return
     try:
-        fn(ev, cfg, *args)
+        if cfg["ledger"]["shadow"]:
+            fn(ev, cfg, *args)
     except Exception as e:
         state.log("ledger error", phase=ev.phase, error=repr(e), tb=traceback.format_exc()[-2000:])
 
@@ -85,19 +84,17 @@ def pre(ev, cfg):
 
 
 def touch(ev, cfg):
-    if ev.call:
+    if ev.paths:
+        with state.locked(_session_file(ev).stem):
+            s = state.read_json(_session_file(ev))
+            if s:
+                s["touched"] = sorted(set(s["touched"]) | set(ev.paths))
+                repo = s.get("repo")    # never reset: PostToolUse can't see the pre-edit state, so these can't prove a revert
+                s["outside_touched"] = sorted(set(s.get("outside_touched", [])) | {
+                    p for p in ev.paths if not changes.in_repo(p, repo)})
+                state.write_json(_session_file(ev), s)
+    if ev.call:                     # after the real work: a slow snapshot must not cost it the hook's timeout
         _shadow(ledger.post, ev, cfg)
-    if not ev.paths:
-        return None
-    with state.locked(_session_file(ev).stem):
-        s = state.read_json(_session_file(ev))
-        if not s:
-            return None
-        s["touched"] = sorted(set(s["touched"]) | set(ev.paths))
-        repo = s.get("repo")        # never reset: PostToolUse can't see the pre-edit state, so these can't prove a revert
-        s["outside_touched"] = sorted(set(s.get("outside_touched", [])) | {
-            p for p in ev.paths if not changes.in_repo(p, repo)})
-        state.write_json(_session_file(ev), s)
     return None
 
 
@@ -432,7 +429,7 @@ def _turn_end(ev, cfg, lock, fd):
     m = cfg["limits"]["max_rounds_per_turn"]
     artifacts, head = collect(s, cfg)
     if ev.agent == "claude":
-        _shadow(ledger.shadow, ev, cfg, s, artifacts, head)
+        _shadow(ledger.shadow, ev, cfg, s, artifacts)
     changed = sum(a["lines_changed"] for a in artifacts)
     prior = s.get("prior") or []
     if not prior and changed and s.get("reverted_prior"):

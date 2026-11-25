@@ -57,16 +57,6 @@ def blob_ids(repo, paths):
     return {**dict.fromkeys(paths), **dict(zip(present, ids))}
 
 
-def tree_blobs(repo, tree):
-    """{repo-relative path: blob id} for every file in a tree id."""
-    out = {}
-    for rec in git(repo, "ls-tree", "-r", "-z", tree).split("\0"):
-        if rec:
-            meta, rel = rec.split("\t", 1)
-            out[rel] = meta.split()[2]
-    return out
-
-
 def tree_deltas(repo, base, head):
     """{repo-relative path: [base blob, head blob]} for paths that differ; None = absent on that side."""
     fields = git(repo, "diff-tree", "-r", "-z", "--no-renames", base, head).split("\0")

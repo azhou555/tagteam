@@ -137,17 +137,13 @@ def _overlaps(calls):
     return n
 
 
-def shadow(ev, cfg, s, artifacts, head):
+def shadow(ev, cfg, s, artifacts):
     """One shadow.jsonl line comparing this session's ledger with today's whole-tree diff at Stop."""
     repo, started = s.get("repo"), s["started"]
     d = state.read_json(_file(ev)) or {}
     calls = [c for c in d.get("calls", []) if c["t1"] >= started]
     today = sorted({os.path.realpath(os.path.join(repo or "", a["path"])) for a in artifacts})
-    current = {}
-    if repo and head:
-        current = {os.path.join(repo, rel): b for rel, b in changes.tree_blobs(repo, head).items()}
-    outside = [p for p in today if not changes.in_repo(p, repo)]
-    current.update(changes.blob_ids(None, outside))
+    current = changes.blob_ids(repo, today)
     mine = {}
     for c in calls:
         for path, (_, post_blob) in c["deltas"].items():
