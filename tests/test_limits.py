@@ -393,7 +393,8 @@ with mock.patch.object(harnesses, "detected", return_value=["claude", "copilot"]
 
     def test_concurrent_trigger_same_session_waits_then_finds_nothing_new(self):
         home = tempfile.mkdtemp()
-        pathlib.Path(home, "config.toml").write_text(use_toml(["copilot"]) + "[review]\nblocking = { small = true }\n")
+        pathlib.Path(home, "config.toml").write_text(use_toml(["copilot"]) + "[review]\nblocking = { small = true }\n"
+                                                     "[ledger]\nattribute = false\n")
         repo = make_repo()
         work = pathlib.Path(tempfile.mkdtemp())
         script = work / "s.py"

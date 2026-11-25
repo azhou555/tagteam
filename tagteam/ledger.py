@@ -1,9 +1,11 @@
-"""Shadow ownership ledger (Claude): which tool call changed which file, logged against today's whole-tree diff.
+"""Ownership ledger (Claude): which tool call changed which file. At Stop it labels each changed file own, foreign or
+unattributed, and only own files can block. The whole-tree diff still decides what is reviewed.
 
-Nothing here may change what a hook returns; core calls every entry point through a guard that logs and
-swallows. See docs/attribution-redesign.md.
+core calls every entry point through a guard: a failure is logged and the review goes on as if every change were
+the session's own. See docs/attribution-redesign.md.
 
-Session ledger  ledger/claude-<sid>.json  {"pending": {call: pending}, "calls": [closed], "tracked": {repo: n}}
+Session ledger  ledger/claude-<sid>.json  {"pending": {call: pending}, "calls": [closed], "tracked": {repo: n},
+                                          "slow": {repo: true}, "unbracketed": time of the last Post with no Pre}
   pending  {call, agent_id, tool, t0, repo, kind: files|tree|skipped, pre: {abs path: blob|None} | tree id, snapshot_ms?}
   closed   {call, agent_id, tool, kind, t0, t1, repo, deltas: {abs path: [pre blob, post blob]}, snapshot_ms?}
 Repo journal    journal/<sha1(repo)[:16]>.jsonl, one line per closed call that changed something:
@@ -124,7 +126,8 @@ def pre(ev, cfg):
 def post(ev, cfg):
     call_id = ev.call["id"]
     p = ((state.read_json(_file(ev)) or {}).get("pending") or {}).get(call_id)
-    if not p:                                        # no Pre seen (installed mid-call, or pruned)
+    if not p:                                        # no Pre hook ran: installed mid-call, or hooks older than the package
+        _update(ev, lambda d: d.update(unbracketed=time.time()))
         return
     repo, deltas, ms, slow = p["repo"], {}, p.get("snapshot_ms"), False
     if p["kind"] == "files":
@@ -162,28 +165,95 @@ def _overlaps(calls):
     return n
 
 
-def shadow(ev, cfg, s, artifacts):
-    """One shadow.jsonl line comparing this session's ledger with today's whole-tree diff at Stop."""
-    repo, started = s.get("repo"), s["started"]
+def _spans(calls, path):
+    """[[pre, post]] of this session's calls on `path`, calls overlapping in time merged into one span: parallel
+    subagents' before and after readings interleave, so only the span's ends are comparable."""
+    spans = []
+    for c in sorted((c for c in calls if path in c["deltas"]), key=lambda c: c["t0"]):
+        pre, post = c["deltas"][path]
+        if spans and c["t0"] < spans[-1][2]:
+            if c["t1"] >= spans[-1][2]:
+                spans[-1][1:] = [post, c["t1"]]
+        else:
+            spans.append([pre, post, c["t1"]])
+    return [s[:2] for s in spans]
+
+
+def _chain(spans, base, now):
+    """True when the session's spans lead unbroken from `base` to `now`: nobody else wrote in between."""
+    return bool(spans) and spans[0][0] == base and spans[-1][1] == now and all(
+        b[0] == a[1] for a, b in zip(spans, spans[1:]))
+
+
+def _window(ev, since):
     d = state.read_json(_file(ev)) or {}
-    calls = [c for c in d.get("calls", []) if c["t1"] >= started]
-    today = sorted({_norm(os.path.join(repo or "", a["path"])) for a in artifacts})
-    current = changes.blob_ids(repo, today)
-    mine = {}
-    for c in calls:
-        for path, (_, post_blob) in c["deltas"].items():
-            mine.setdefault(path, set()).add(post_blob)
+    return d, [c for c in d.get("calls", []) if c["t1"] >= since]
+
+
+def unreviewed(ev, repo, since):
+    """True when this session has tool calls since `since` that wrote under `repo` or may still be writing."""
+    d, calls = _window(ev, since)
+    return any(changes.in_repo(p, repo) for c in calls for p in c["deltas"]) or any(
+        p["t0"] >= since and p.get("repo") and changes.in_repo(p["repo"], repo) for p in d.get("pending", {}).values())
+
+
+def owners(ev, cfg, s, base, since, head, artifacts):
+    """{artifact path: own | foreign | unattributed} for the repo diff `base` -> `head`, or None when the ledger can't
+    vouch for this window and every change counts as the session's own, as before the ledger. Logs one shadow.jsonl
+    line either way."""
+    repo = s.get("repo")
+    d, calls = _window(ev, since)
+    in_repo = [a for a in artifacts if not os.path.isabs(a["path"])]
+    blobs = changes.tree_deltas(repo, base, head) if repo and base and head and in_repo else {}
     others = set()
     if repo:
-        for r in state.read_jsonl(_journal(repo), started):
+        for r in state.read_jsonl(_journal(repo), since):
             if r["session"] != ev.session_id:
                 others.update(r["paths"])
-    own = [p for p in today if current.get(p) in mine.get(p, ())]
-    foreign = [p for p in today if p not in own and p in others]
+    labels, mine = {}, set()
+    for c in calls:
+        mine.update(c["deltas"])
+    for a in in_repo:
+        path = _norm(os.path.join(repo, a["path"]))
+        b, now = blobs.get(a["path"], [None, None])
+        labels[a["path"]] = ("own" if _chain(_spans(calls, path), b, now) else
+                             "foreign" if path in others else "unattributed")
+    skipped = sum(c["kind"] == "skipped" for c in calls)
+    trusted = repo and not skipped and d.get("unbracketed", 0) < since    # a call with no Pre wrote unseen
+    by = lambda label: sorted(_norm(os.path.join(repo, p)) for p, v in labels.items() if v == label)
+    today = sorted(_norm(os.path.join(repo or "", a["path"])) for a in in_repo)
     _sweep_dead_ledgers()
     _append_pruned(state.path("shadow.jsonl"), "shadow", {
         "ts": time.time(), "session": ev.session_id, "turn_id": s.get("turn_id"), "repo": repo, "today": today,
-        "own": own, "foreign": foreign, "unattributed": [p for p in today if p not in own and p not in foreign],
-        "ledger_only": sorted(set(mine) - set(today)), "pending_open": sum(v["t0"] >= started for v in d.get("pending", {}).values()),
-        "calls": len(calls), "skipped": sum(c["kind"] == "skipped" for c in calls), "overlaps": _overlaps(calls),
+        "own": by("own"), "foreign": by("foreign"), "unattributed": by("unattributed"),
+        "ledger_only": sorted(mine - set(today)),
+        "fallback": not trusted,
+        "pending_open": sum(v["t0"] >= since for v in d.get("pending", {}).values()),
+        "calls": len(calls), "skipped": skipped, "overlaps": _overlaps(calls),
         "bash_snapshot_ms": [c["snapshot_ms"] for c in calls if "snapshot_ms" in c]}, SHADOW_MAX, SHADOW_TTL)
+    if not trusted:
+        return None
+    return {**labels, **{a["path"]: "own" for a in artifacts if os.path.isabs(a["path"])}}
+
+
+def worktree_artifacts(ev, s, since, ignore):
+    """(artifacts, labels) for what this session's calls changed in git worktrees inside its repo, such as an
+    `isolation: worktree` subagent's. The repo's own diff skips them as nested repos (F3)."""
+    repo = s.get("repo")
+    _, calls = _window(ev, since)
+    calls = [c for c in calls if c["repo"] and c["repo"] != repo and changes.in_repo(c["repo"], repo)]
+    arts, labels = [], {}
+    paths = sorted({p for c in calls for p in c["deltas"]})
+    now = changes.blob_ids(repo, paths) if paths else {}
+    for path in paths:
+        spans = _spans(calls, path)
+        rel = os.path.relpath(path, repo)
+        if spans[0][0] == now[path] or changes.ignored(rel, ignore):
+            continue
+        lines, diff = changes.blob_diff(repo, rel, spans[0][0], now[path])
+        if lines is None:
+            continue
+        arts.append({"path": rel, "status": "added" if spans[0][0] is None else "deleted" if now[path] is None
+                     else "modified", "lines_changed": lines, "diff": diff})
+        labels[rel] = "own" if _chain(spans, spans[0][0], now[path]) else "unattributed"
+    return arts, labels

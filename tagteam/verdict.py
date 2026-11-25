@@ -1,5 +1,6 @@
 """Merge reviewer findings into one allow/block decision and the message the author sees."""
 import difflib
+import os
 
 from .adapters import MARKER
 
@@ -36,16 +37,19 @@ def demote(issues):
     return [{**f, "gate": "advise"} for f in issues]
 
 
-def decide(results, cfg, round_no, mode="block", carried=()):
+def decide(results, cfg, round_no, mode="block", carried=(), owned=None):
     """results: {reviewer: result-or-None}. Returns (action, issues, advisory): issues are the findings at or
-    above `block_at`, each with a `gate`, and only `block`-gated ones block. A blocker always blocks, a
-    re-checked suggestion stays one, and anything else takes the review's `mode`."""
+    above `block_at`, each with a `gate`, and only `block`-gated ones block. A finding outside `owned` (the files the
+    session's own tool calls changed; None = all) is a suggestion, marked `not_own`. Otherwise a blocker always
+    blocks, a re-checked suggestion stays one, and anything else takes the review's `mode`."""
     rv = cfg["review"]
     findings = [{**f, "reviewer": r} for r, res in results.items() if res for f in res["findings"]]
     merged = dedupe(findings)
     advise = gated(carried, "advise")
     for f in merged:
-        f["gate"] = "block" if f["severity"] == "blocker" else "advise" if any(same(f, c) for c in advise) else mode
+        f["not_own"] = owned is not None and os.path.normpath(f["file"] or ".") not in owned
+        f["gate"] = ("advise" if f["not_own"] else "block" if f["severity"] == "blocker" else
+                     "advise" if any(same(f, c) for c in advise) else mode)
     threshold = RANK[rv["block_at"]]
     issues = [f for f in merged if RANK[f["severity"]] <= threshold and f["confidence"] >= rv["min_confidence"]]
     advisory = [f for f in merged if f not in issues]
@@ -60,7 +64,8 @@ def _loc(f):
 def items(issues):
     lines = []
     for i, f in enumerate(issues, 1):
-        lines.append(f"{i}. [{f['severity']}] {_loc(f)}: {f['claim']}  ({', '.join(f['reviewers'])})")
+        lines.append(f"{i}. [{f['severity']}] {_loc(f)}: {f['claim']}  ({', '.join(f['reviewers'])})"
+                     + ("  [not blocking: this file changed outside your own tool calls]" if f.get("not_own") else ""))
         if f["evidence"]:
             lines.append(f"   Evidence: {f['evidence']}")
         if f["suggested_fix"]:

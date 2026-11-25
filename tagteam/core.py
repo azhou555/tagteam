@@ -46,17 +46,20 @@ def turn_start(ev, cfg):
     if ev.prompt.lstrip().startswith(MARKER):      # Copilot re-submits our block message as a prompt
         return None
     repo = changes.repo_root(ev.cwd)
+    now = time.time()
     snap = changes.snapshot(repo) if repo else None
     with state.locked(_session_file(ev).stem):
         prev = state.read_json(_session_file(ev)) or {}
         prior = prev.get("prior") or []              # open until a verdict closes them
         notice = prev.get("notice")                  # a background result not shown yet; the new session drops it
-        unreviewed = prev.get("repo") == repo and prev.get("pending_baseline")   # a turn not reviewed: cover it too
-        base, touched = (prev["pending_baseline"], prev.get("pending_touched", [])) if unreviewed else (snap, [])
+        since = prev.get("baseline_ts", prev.get("started", now))
+        keep = prev.get("repo") == repo and prev.get("baseline") and (prev.get("hold") or _ledger(
+            ev, cfg, lambda: ledger.unreviewed(ev, repo, since), False))     # unreviewed work: the next review covers it
+        base, ts, touched = (prev["baseline"], since, prev.get("touched", [])) if keep else (snap, now, [])
         state.write_json(_session_file(ev), {
-            "turn_id": ev.turn_id or uuid.uuid4().hex[:12], "started": time.time(), "cwd": ev.cwd,
-            "repo": repo, "baseline": base, "turn_baseline": base,    # baseline advances each round; turn_baseline never
-            "refs": changes.refs(repo) if repo else {},
+            "turn_id": ev.turn_id or uuid.uuid4().hex[:12], "started": now, "cwd": ev.cwd, "repo": repo,
+            "baseline": base, "baseline_ts": ts, "turn_baseline": base, "turn_baseline_ts": ts,   # baseline advances each round
+            "refs": changes.refs(repo) if repo else {}, "hold": bool(keep and prev.get("hold")),
             "prompt": intent(ev.prompt, prev.get("prompt", "")), "round": 0, "touched": touched, "reviewed_digests": {}, "prior": prior,
             "carried": bool(prior), "owed": prev.get("owed"), "plan_rounds": 0, "plan_prior": [],
             "outside_touched": [p for p in touched if not changes.in_repo(p, repo)], "reverted_prior": [],
@@ -69,17 +72,19 @@ def turn_start(ev, cfg):
     return {"action": "allow", "message": notice} if notice else None
 
 
-def _shadow(fn, ev, cfg, *args):
-    """The ledger only observes: its failure must never change what a hook returns."""
+def _ledger(ev, cfg, fn, fallback=None):
+    """fn() when the ledger is on for this author. A ledger failure never fails a hook: it is logged and the caller
+    gets `fallback`, which means acting as if there were no ledger."""
     try:
-        if cfg["ledger"]["shadow"]:
-            fn(ev, cfg, *args)
+        if cfg["ledger"]["attribute"] and ev.agent == "claude":
+            return fn()
     except Exception as e:
         state.log("ledger error", phase=ev.phase, error=repr(e), tb=traceback.format_exc()[-2000:])
+    return fallback
 
 
 def pre(ev, cfg):
-    _shadow(ledger.pre, ev, cfg)
+    _ledger(ev, cfg, lambda: ledger.pre(ev, cfg))
     return None
 
 
@@ -94,7 +99,7 @@ def touch(ev, cfg):
                     p for p in ev.paths if not changes.in_repo(p, repo)})
                 state.write_json(_session_file(ev), s)
     if ev.call:                     # after the real work: a slow snapshot must not cost it the hook's timeout
-        _shadow(ledger.post, ev, cfg)
+        _ledger(ev, cfg, lambda: ledger.post(ev, cfg))
     return None
 
 
@@ -182,7 +187,7 @@ def _run_record(ev, cfg, s, run_tag, round_no, confirm, **kw):
 
 
 def review(ev, cfg, s, artifacts, round_no, run_tag, lock, confirm=False, rebuttal=False, started=None, mode="block",
-           pinned=None):
+           pinned=None, owned=None):
     """Guard, route, run, decide. The caller holds the session lock (`lock` says how that went). Returns
     (action, message, run_dir, open_issues); message is the block reason or, on allow, a one-line completion
     notice. open_issues are the findings still open afterwards (each with its gate), or None when no reviewer
@@ -191,7 +196,9 @@ def review(ev, cfg, s, artifacts, round_no, run_tag, lock, confirm=False, rebutt
     run_dir None means no run was spawned: a block is a re-issued one, an allow with open issues is a re-issued
     block on the confirm round, an allow with a message and none is a state-error notice, and an allow without a message is a silent skip. `confirm` marks the review after the last fix
     round, which can never block. `rebuttal` marks a re-review of an unchanged diff against the author's reply.
-    `started` is the `_clock()` reading when the hook began work; setup since then comes out of the deadline."""
+    `started` is the `_clock()` reading when the hook began work; setup since then comes out of the deadline.
+    `owned` is the set of artifact paths the session's own tool calls changed (None: all of them); findings
+    elsewhere are suggestions."""
     if lock != limits.HELD:
         state.log("session lock failed, not reviewing", author=ev.agent, session=ev.session_id)
         run = _run_record(ev, cfg, s, run_tag, round_no, confirm, reason=STATE_ERROR, mode=mode)
@@ -201,7 +208,7 @@ def review(ev, cfg, s, artifacts, round_no, run_tag, lock, confirm=False, rebutt
     kept = [f for f in verdict.gated(s.get("prior") or [], "advise") if f["file"] not in paths]
     action, msg, run_dir, open_issues = _review(ev, cfg, {**s, "prior": [f for f in s.get("prior") or [] if f not in kept]},
                                                 artifacts, round_no, run_tag, confirm, rebuttal,
-                                                _clock() if started is None else started, mode, pinned)
+                                                _clock() if started is None else started, mode, pinned, owned)
     return action, msg, run_dir, None if open_issues is None else open_issues + kept
 
 
@@ -216,7 +223,7 @@ def _session_guard(ev, wait, handler, *args, busy=None, lane=""):
         return handler(*args, lock, fd)
 
 
-def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started, mode, pinned):
+def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started, mode, pinned, owned):
     now = time.time()
     rv = cfg["review"]
     groups = {}
@@ -338,9 +345,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
                    duration=round(time.time() - now, 1))
         live.record_run(run)
         if run_tag == "turn":                        # the change stays unreviewed: the next turn covers it
-            _write_back(_session_file(ev), s.get("turn_id"),
-                        lambda cur: cur.update(pending_baseline=cur.get("baseline"), pending_touched=cur.get("touched", [])),
-                        lambda cur: _reopen(cur, s))
+            _write_back(_session_file(ev), s.get("turn_id"), lambda cur: cur.update(hold=True), lambda cur: _reopen(cur, s))
         if in_a_row >= STOPS_TO_ESCALATE:
             warn += (f" · ⚠ {in_a_row} reviews in a row stopped in this repo by git config or hook changes:"
                      " check `git config --list --show-origin` and .git/hooks")
@@ -350,7 +355,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         if res and works[r] != (repo or ev.cwd):
             _unsandbox(res, works[r])
     failed = [r for r, res in results.items() if res is None]
-    action, issues, advisory = verdict.decide(results, cfg, round_no, mode, s.get("prior") or [])
+    action, issues, advisory = verdict.decide(results, cfg, round_no, mode, s.get("prior") or [], owned)
     msg = verdict.message(plan, issues, advisory, round_no, cfg["limits"]["max_rounds_per_turn"], failed)
     if len(failed) < len(results):                   # a run with no verdict must not suppress a retry
         limits.remember(key, dig, action, issues, msg, s.get("turn_id"))
@@ -368,11 +373,9 @@ def _reopen(cur, s):
     """A background review stopped after the next turn began: that turn's baseline already holds the stopped
     change, so move it back to the stopped turn's baseline while it has not reviewed anything yet."""
     if cur.get("repo") == s.get("repo") and cur.get("round") == 0 and s.get("baseline"):
-        cur.update(baseline=s["baseline"], turn_baseline=s["baseline"],
+        ts = s.get("baseline_ts", s.get("started"))
+        cur.update(baseline=s["baseline"], turn_baseline=s["baseline"], baseline_ts=ts, turn_baseline_ts=ts, hold=True,
                    touched=sorted(set(cur.get("touched", [])) | set(s.get("touched", []))))
-        if cur.get("pending_baseline"):              # this turn's own unfinished review would start past it again
-            cur.update(pending_baseline=s["baseline"],
-                       pending_touched=sorted(set(cur.get("pending_touched", [])) | set(s.get("touched", []))))
 
 
 def _count_stop(repo, stopped):
@@ -425,8 +428,7 @@ def _still_running(ev, cfg):
         return None
     run = _run_record(ev, cfg, s, "turn", s["round"] + 1, False, reason=STILL_RUNNING)
     live.record_run(run)
-    _write_back(sf, s.get("turn_id"), lambda cur: cur.update(pending_baseline=cur.get("baseline"),
-                                                             pending_touched=cur.get("touched", [])))
+    _write_back(sf, s.get("turn_id"), lambda cur: cur.update(hold=True))
     return {"action": "allow", "message": completion(run, 0)}
 
 
@@ -439,11 +441,16 @@ def _turn_end(ev, cfg, lock, fd):
     if s.get("owed") and s["round"] == 0:
         return _owed(ev, cfg, s, sf)
     m = cfg["limits"]["max_rounds_per_turn"]
+    head_ts = time.time()
     artifacts, head = collect(s, cfg)
-    if ev.agent == "claude":
-        t = _clock()
-        _shadow(ledger.shadow, ev, cfg, s, artifacts)
-        started += _clock() - t                      # the ledger's time never comes out of the reviewers' setup budget
+    t = _clock()
+    labels = _owners(ev, cfg, s, s.get("baseline"), s.get("baseline_ts", s["started"]), head, artifacts)
+    extra, extra_labels = _ledger(ev, cfg, lambda: ledger.worktree_artifacts(
+        ev, s, s.get("baseline_ts", s["started"]), cfg["review"]["ignore"]), ([], {}))
+    artifacts += extra
+    if labels is not None:
+        labels.update(extra_labels)
+    started += _clock() - t                          # the ledger's time never comes out of the reviewers' setup budget
     changed = sum(a["lines_changed"] for a in artifacts)
     prior = s.get("prior") or []
     if not prior and changed and s.get("reverted_prior"):
@@ -468,20 +475,25 @@ def _turn_end(ev, cfg, lock, fd):
             state.log("rebuttal not re-checked (nothing to diff)", author=ev.agent, session=ev.session_id)
             return None
         artifacts, changed = whole, sum(a["lines_changed"] for a in whole)
+        labels = _owners(ev, cfg, s, s.get("turn_baseline"), s.get("turn_baseline_ts", s["started"]), head, whole)
+    elif changed == 0:
+        return None
     # Round 1 skips trivial edits; later rounds and carried issues re-check any fix, however small.
-    elif changed == 0 or (s["round"] == 0 and not prior and changed < cfg["triggers"]["min_changed_lines"]):
+    if (not rebuttal and s["round"] == 0 and not prior and changed < cfg["triggers"]["min_changed_lines"]) \
+            or not wanted(ev, cfg, artifacts):       # skipped by choice: the next review starts after this change
+        _write_back(sf, s.get("turn_id"), lambda cur: _advance(cur, head, head_ts, artifacts))
         return None
-    if not wanted(ev, cfg, artifacts):
-        return None
-    mode = _mode(cfg, artifacts, prior)
+    owned = None if labels is None else {p for p, v in labels.items() if v == "own"}
+    mode = _mode(cfg, artifacts, prior, owned)
     # A confirm can't block either, so the author doesn't wait for it; it still spends its round.
     if ((mode == "advise" or confirm) and s.get("repo") and head and lock == limits.HELD and cfg["reviewers"].get("use")
-            and _start_background(ev, cfg, s, artifacts, head, rebuttal, fd, round_no if confirm else None, mode)):
+            and _start_background(ev, cfg, s, artifacts, head, head_ts, rebuttal, fd, round_no if confirm else None, mode,
+                                  owned)):
         if confirm:
             _write_back(sf, s.get("turn_id"), lambda cur: cur.update(round=round_no))
         return {"action": "allow", "message": BACKGROUND if _has_status_line(ev.agent) else BACKGROUND_NEXT}
     action, msg, run_dir, open_issues = review(ev, cfg, s, artifacts, round_no, "turn", lock, confirm, rebuttal, started,
-                                               mode)
+                                               mode, owned=owned)
     if run_dir is None and action == "allow" and not open_issues:   # no round spent: diff already passed, or a state-error notice
         return {"action": action, "message": msg} if msg else None
 
@@ -493,23 +505,33 @@ def _turn_end(ev, cfg, lock, fd):
     def advance(cur):
         cur["round"] = round_no
         cur["prior"], cur["reverted_prior"] = open_issues, []
-        if head:
-            cur["baseline"] = head                   # next round reviews only the fix delta
-        for a in artifacts:
-            if os.path.isabs(a["path"]):
-                cur["reviewed_digests"][a["path"]] = changes.file_digest(a["path"])
-        cur["touched"] = []
-        cur.pop("pending_baseline", None)            # this review covered what a stopped one left behind
-        cur.pop("pending_touched", None)
+        _advance(cur, head, head_ts, artifacts)      # next round reviews only the fix delta
     _write_back(sf, s.get("turn_id"), advance, _carry(open_issues, s.get("owed")))
     state.log("review", run=str(run_dir), action=action, author=ev.agent, round=round_no)
     return {"action": action, "message": msg}
 
 
-def _mode(cfg, artifacts, prior):
-    """block: the author waits for the verdict. A blocking cycle stays blocking until a verdict closes it."""
+def _owners(ev, cfg, s, base, since, head, artifacts):
+    """{artifact path: own | foreign | unattributed}, or None: every change counts as the session's own."""
+    return _ledger(ev, cfg, lambda: ledger.owners(ev, cfg, s, base, since, head, artifacts))
+
+
+def _advance(cur, head, head_ts, artifacts):
+    """The review point moves past what a Stop saw: reviewed, or skipped by choice."""
+    if head:
+        cur.update(baseline=head, baseline_ts=head_ts)
+    for a in artifacts:
+        if os.path.isabs(a["path"]):
+            cur["reviewed_digests"][a["path"]] = changes.file_digest(a["path"])
+    cur["touched"] = []
+    cur.pop("hold", None)
+
+
+def _mode(cfg, artifacts, prior, owned=None):
+    """block: the author waits for the verdict. A blocking cycle stays blocking until a verdict closes it. Only the
+    session's own changes can make a run blocking: another writer's never keeps it waiting."""
     rv, groups = cfg["review"], {}
-    for a in classify.annotate(artifacts, cfg):
+    for a in classify.annotate([a for a in artifacts if owned is None or a["path"] in owned], cfg):
         groups.setdefault(a["kind"], []).append(a)
     blocks = verdict.gated(prior) or any(rv["blocking"][router.tier(k, arts, rv)] for k, arts in groups.items())
     return "block" if blocks else "advise"
@@ -523,14 +545,15 @@ def _detach(argv, fd):
                      start_new_session=True, pass_fds=(fd,))
 
 
-def _start_background(ev, cfg, s, artifacts, head, rebuttal, fd, confirm_round=None, mode="advise"):
+def _start_background(ev, cfg, s, artifacts, head, head_ts, rebuttal, fd, confirm_round=None, mode="advise", owned=None):
     """Hand the review to a detached `tagteam background`. False if it couldn't start: review in the foreground.
     `confirm_round` makes it the turn's confirm round (the last word on a blocking cycle, which can't block)."""
     job = state.path("jobs", f"{_session_file(ev).stem}-{uuid.uuid4().hex[:8]}.json")
     try:
         state.write_json(job, {"ev": dataclasses.asdict(ev), "cfg": cfg, "session": s, "artifacts": artifacts,
-                               "pinned": [head, _git_activity(s)], "rebuttal": rebuttal,
-                               "confirm_round": confirm_round, "mode": mode})
+                               "pinned": [head, _git_activity(s)], "head_ts": head_ts, "rebuttal": rebuttal,
+                               "confirm_round": confirm_round, "mode": mode,
+                               "owned": None if owned is None else sorted(owned)})
         _detach([sys.executable, "-m", "tagteam", "background", str(job)], fd)
     except OSError as e:
         state.log("background review not started; reviewing now", error=repr(e))
@@ -553,15 +576,23 @@ def background(path, alarm=False):
     confirm_round = job.get("confirm_round")
     action, msg, run_dir, open_issues = review(ev, cfg, s, job["artifacts"], confirm_round or 1, "turn", limits.HELD,
                                                bool(confirm_round), job["rebuttal"], mode=job.get("mode", "advise"),
-                                               pinned=tuple(job["pinned"]))
+                                               pinned=tuple(job["pinned"]),
+                                               owned=None if job.get("owned") is None else set(job["owned"]))
     if confirm_round and open_issues is not None:  # the last word on the blocking cycle: what's left stays a suggestion
         open_issues = verdict.demote(open_issues)
     verdict_in = open_issues is not None and (run_dir is not None or msg)   # not: no verdict, or already reviewed
     notice = msg if msg and action != "block" and not _has_status_line(ev.agent) else None   # a blocker blocks instead
-    if not (verdict_in or notice):
+    covered = run_dir is not None or open_issues is not None   # not a stopped run: that one is left for the next turn
+    if not (verdict_in or notice or covered):
         return
 
     def settle(cur):
+        if covered and cur.get("baseline") == s.get("baseline"):   # even in a later turn that kept this review point
+            touched = [p for p in cur.get("touched", []) if not changes.in_repo(p, s.get("repo"))]
+            _advance(cur, job["pinned"][0], job.get("head_ts", s["started"]), job["artifacts"])
+            cur["touched"] = [p for p in touched if p not in {a["path"] for a in job["artifacts"]}]
+            if cur.get("round") == 0:
+                cur.update(turn_baseline=cur["baseline"], turn_baseline_ts=cur["baseline_ts"])
         if verdict_in:
             _carry(open_issues, msg if action == "block" else None)(cur)   # a blocker blocks the next Stop
         if notice:
@@ -585,8 +616,8 @@ def _reverted(ev, cfg, s, sf, round_no, head):
     """The author undid everything it changed this turn: the open issues are gone and no review is spent."""
     run = _run_record(ev, cfg, s, "turn", round_no, False, reason="reverted")
     live.record_run(run)
-    _write_back(sf, s.get("turn_id"), lambda cur: cur.update(      # not a round: a redo hits the blocked digest, which counts
-        prior=[], reverted_prior=cur.get("prior") or cur.get("reverted_prior") or [], baseline=head, touched=[]))
+    _write_back(sf, s.get("turn_id"), lambda cur: (cur.update(      # not a round: a redo hits the blocked digest, which counts
+        prior=[], reverted_prior=cur.get("prior") or cur.get("reverted_prior") or []), _advance(cur, head, time.time(), [])))
     state.log("changes reverted; open issues resolved without a review", author=ev.agent, round=round_no)
     return {"action": "allow", "message": completion(run, 0)}
 

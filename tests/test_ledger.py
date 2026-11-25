@@ -8,15 +8,15 @@ import unittest
 from unittest import mock
 
 from tests.helpers import FIX, HookRig, finding, sh, use_toml  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
-from tagteam import adapters, ledger, live, runner, state  # noqa: E402
+from tagteam import adapters, core, ledger, live, runner, state  # noqa: E402
 
 HELLO = "ce013625030ba8dba906f756967f9e9ca394464a"          # git hash-object of "hello\n"
 FEATURE = "def f(x):\n    return x[0]\n" * 4
 
 
-class Shadow(HookRig, unittest.TestCase):
+class Session(HookRig):
     def setUp(self):
-        self.rig(use_toml(["copilot", "agy"]))
+        self.rig(use_toml(["copilot", "agy"]), attribute=True)
 
     def tearDown(self):
         self.unrig()
@@ -54,6 +54,9 @@ class Shadow(HookRig, unittest.TestCase):
         with mock.patch.object(runner, "run_all", self.fake_run_all({})):
             outs = [self.prompt(sid), *self.write(self.p("feature.py"), FEATURE, sid=sid), self.stop(sid)]
         return [re.sub(r"\d+s\b", "Ns", json.dumps(o)) for o in outs]
+
+
+class Shadow(Session, unittest.TestCase):
 
     def test_failed_bash_still_closes_its_call(self):
         self.prompt()
@@ -106,7 +109,7 @@ class Shadow(HookRig, unittest.TestCase):
                          ([self.p("feature.py")], [self.p("feature.py")], [], [], []))
         self.assertEqual((line["calls"], line["pending_open"], line["overlaps"]), (1, 0, 0))
         self.unrig()
-        self.rig(use_toml(["copilot", "agy"]) + "[ledger]\nshadow = false\n")
+        self.rig(use_toml(["copilot", "agy"]) + "[ledger]\nattribute = false\n", attribute=True)
         off = self.turn_outputs("s-off")
         self.assertEqual(on, off)
         self.assertIn('"systemMessage"', on[-1])                     # a review ran and reported
@@ -142,21 +145,27 @@ class Shadow(HookRig, unittest.TestCase):
                          ("tree", {self.p("one.txt"): [None, HELLO], self.p("two.txt"): [None, HELLO]}))
         self.assertEqual(len(line["bash_snapshot_ms"]), 1)
 
-    def test_a_worktree_subagents_write_is_ledger_only_keyed_by_the_worktree(self):
+    def test_a_worktree_subagents_write_is_keyed_by_the_worktree_and_reviewed(self):
         wt = self.p(".claude/worktrees/x")
         sh(self.repo, "git", "worktree", "add", "-q", wt)
         self.prompt()
-        self.write(os.path.join(wt, "wt.txt"), "hello\n", cwd=wt, agent_id="a1")
-        self.stop()
+        self.write(os.path.join(wt, "wt.txt"), "hello\n" * 10, cwd=wt, agent_id="a1")
+        bad = {"verdict": "changes_requested", "summary": "",
+               "findings": [finding(sev="blocker", file=".claude/worktrees/x/wt.txt", line=2)]}
+        with mock.patch.object(runner, "run_all", self.fake_run_all({"copilot": bad})):
+            out = self.stop()
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("+hello", self.calls[0]["copilot"])
         line = self.shadow()
         self.assertEqual((line["today"], line["ledger_only"]), ([], [os.path.join(wt, "wt.txt")]))
         [call] = self.ledger_calls()
         self.assertEqual((call["repo"], call["agent_id"], call["deltas"]),
-                         (wt, "a1", {os.path.join(wt, "wt.txt"): [None, HELLO]}))
+                         (wt, "a1", {os.path.join(wt, "wt.txt"): [None, ledger.changes.blob_ids(
+                             wt, [os.path.join(wt, "wt.txt")])[os.path.join(wt, "wt.txt")]]}))
 
     def test_bash_in_a_repo_over_the_size_limit_is_skipped_and_counted(self):
         self.unrig()
-        self.rig(use_toml(["copilot", "agy"]) + "[ledger]\nmax_tree_files = 0\n")
+        self.rig(use_toml(["copilot", "agy"]) + "[ledger]\nmax_tree_files = 0\n", attribute=True)
         self.prompt()
         self.tool("Bash", {"command": "true"}, lambda: None)
         self.stop()
@@ -168,7 +177,7 @@ class Shadow(HookRig, unittest.TestCase):
         with mock.patch.object(ledger, "pre", side_effect=RuntimeError("boom")):
             outs = self.write(self.p("feature.py"), FEATURE)
         bad = {"verdict": "changes_requested", "summary": "", "findings": [finding(file="feature.py", line=2)]}
-        with mock.patch.object(ledger, "shadow", side_effect=RuntimeError("boom")), \
+        with mock.patch.object(ledger, "owners", side_effect=RuntimeError("boom")), \
                 mock.patch.object(runner, "run_all", self.fake_run_all({"copilot": bad, "agy": bad})):
             out = self.stop()
         self.assertEqual(outs, [{}, {}])
@@ -185,6 +194,133 @@ class Shadow(HookRig, unittest.TestCase):
         self.write(self.p("b.py"), "hello\n")
         d = state.read_json(f)
         self.assertEqual((d["pending"], [c["call"] for c in d["calls"]]), ({}, ["toolu_1"]))
+
+
+BLOCKER = lambda file: {"verdict": "changes_requested", "summary": "",          # noqa: E731
+                        "findings": [finding(sev="blocker", file=file, line=2, claim=f"bug in {file}")]}
+
+
+class Attribution(Session, unittest.TestCase):
+    """Only files this session's own tool calls changed can block; every other change is still reviewed."""
+
+    def stop_with(self, results, sid="sess1"):
+        with mock.patch.object(runner, "run_all", self.fake_run_all(results)):
+            return self.stop(sid)
+
+    def last_run(self):
+        return state.read_jsonl(state.path("runs.jsonl"))[-1]
+
+    def test_a_blocker_in_an_own_file_blocks(self):
+        self.prompt()
+        self.write(self.p("mine.py"), FEATURE)
+        out = self.stop_with({"copilot": BLOCKER("mine.py")})
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("1. [blocker] mine.py:2: bug in mine.py  (copilot)\n", out["reason"])
+
+    def test_another_sessions_change_is_reviewed_in_the_background_and_never_blocks(self):
+        self.prompt()
+        self.write(self.p("theirs.py"), FEATURE, sid="other", call="toolu_other")
+        out = self.stop_with({"copilot": BLOCKER("theirs.py")})
+        self.assertEqual(out, {"systemMessage": core.BACKGROUND})
+        run = self.last_run()
+        self.assertEqual((run["mode"], run["action"], run["blocking"], run["suggestions"]), ("advise", "allow", 0, 1))
+        verdict = state.read_json(state.path("runs", run["run_id"], "verdict.json"))
+        self.assertIn("[not blocking: this file changed outside your own tool calls]", verdict["message"])
+
+    def test_in_a_mixed_run_only_the_own_files_finding_blocks(self):
+        self.prompt()
+        self.write(self.p("mine.py"), FEATURE)
+        pathlib.Path(self.p("editor.py")).write_text(FEATURE)
+        both = {"verdict": "changes_requested", "summary": "", "findings": [
+            finding(sev="blocker", file="mine.py", line=2, claim="mine is broken"),
+            finding(sev="blocker", file="editor.py", line=2, claim="editor is broken"),
+            finding(sev="blocker", file="", line=None, claim="general concern")]}
+        out = self.stop_with({"copilot": both})
+        self.assertEqual(out["decision"], "block")
+        blocking, suggestions = out["reason"].split("Suggestions (not blocking")
+        self.assertIn("mine is broken", blocking)
+        self.assertNotIn("editor is broken", blocking)
+        self.assertIn("editor.py:2: editor is broken", suggestions)
+        self.assertIn("general concern", suggestions)
+
+    def test_an_edit_by_someone_else_after_the_sessions_own_breaks_its_claim(self):
+        self.prompt()
+        self.write(self.p("f.py"), FEATURE)
+        pathlib.Path(self.p("f.py")).write_text(FEATURE + "x = 1\n")
+        self.assertEqual(self.stop_with({"copilot": BLOCKER("f.py")}), {"systemMessage": core.BACKGROUND})
+        self.assertEqual(self.shadow()["unattributed"], [self.p("f.py")])
+
+    def test_parallel_subagents_writing_one_file_still_own_it(self):
+        self.prompt()
+        path = self.p("shared.py")
+        pre = lambda call, agent: self.claude("PreToolUse", tool_name="Write", tool_use_id=call, agent_id=agent,  # noqa: E731
+                                              tool_input={"file_path": path, "content": ""})
+        post = lambda payload: {**payload, "hook_event_name": "PostToolUse", "tool_response": {}}  # noqa: E731
+        a, b = pre("ta", "a1"), pre("tb", "a2")
+        self.run_hook("claude", "x", a)
+        self.run_hook("claude", "x", b)
+        pathlib.Path(path).write_text(FEATURE)
+        pathlib.Path(path).write_text(FEATURE + FEATURE)
+        self.run_hook("claude", "x", post(a))
+        self.run_hook("claude", "x", post(b))
+        out = self.stop_with({"copilot": BLOCKER("shared.py")})
+        self.assertEqual(out["decision"], "block")
+        self.assertEqual(self.shadow()["overlaps"], 1)
+
+    def test_a_subagent_write_after_stop_is_reviewed_at_the_next_stop(self):
+        self.prompt()
+        self.write(self.p("first.py"), FEATURE)
+        self.stop_with({})
+        self.write(self.p("late.py"), FEATURE, call="toolu_late", agent_id="bg1")   # a background subagent, after Stop
+        self.prompt()                                    # the <task-notification> turn
+        out = self.stop_with({"copilot": BLOCKER("late.py")})
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("late.py", self.calls[-1]["copilot"])
+        self.assertNotIn("first.py", self.calls[-1]["copilot"])
+
+    def test_a_change_between_turns_with_no_own_work_is_not_reviewed(self):
+        self.prompt()
+        self.write(self.p("first.py"), FEATURE)
+        self.stop_with({})
+        pathlib.Path(self.p("editor.py")).write_text(FEATURE)
+        self.prompt()
+        self.assertEqual(self.stop_with({}), {})
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_background_result_after_the_next_turn_began_closes_what_it_reviewed(self):
+        self.unrig()
+        self.rig(use_toml(["copilot"]), small_blocks=False, attribute=True)
+        self.run_detached = False
+        self.prompt()
+        self.write(self.p("bg.py"), FEATURE)
+        self.assertEqual(self.stop_with({}), {"systemMessage": core.BACKGROUND})
+        self.prompt()                                    # own calls since the baseline: this turn keeps it
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            core.background(self.detached[0])
+        self.assertEqual(self.stop_with({}), {})        # nothing new since the background review's tree
+        self.assertEqual(len(self.calls), 1)
+
+    def test_hooks_older_than_the_package_review_everything_as_own(self):
+        self.prompt()
+        pathlib.Path(self.p("mine.py")).write_text(FEATURE)
+        self.run_hook("claude", "x", self.claude("PostToolUse", tool_name="Write", tool_use_id="nopre",
+                                                 tool_input={"file_path": self.p("mine.py")}, tool_response={}))
+        out = self.stop_with({"copilot": BLOCKER("mine.py")})
+        self.assertEqual(out["decision"], "block")
+        self.assertTrue(self.shadow()["fallback"])
+
+    def test_own_calls_pruned_after_a_day_leave_their_change_unattributed(self):
+        self.prompt()
+        self.write(self.p("old.py"), FEATURE)
+        old = time.time() - 2 * 86400
+        f, sf = state.path("ledger", "claude-sess1.json"), state.path("sessions", "claude-sess1.json")
+        state.write_json(f, {**state.read_json(f), "calls": [{**c, "t0": old, "t1": old} for c in self.ledger_calls()]})
+        state.write_json(sf, {**state.read_json(sf), "baseline_ts": old - 1})
+        self.write(self.p("new.py"), FEATURE, call="toolu_2")   # this write prunes the day-old call
+        self.stop_with({"copilot": BLOCKER("old.py")})
+        line = self.shadow()
+        self.assertEqual((line["own"], line["unattributed"]), ([self.p("new.py")], [self.p("old.py")]))
+        self.assertEqual(self.last_run()["blocking"], 0)
 
 
 class Journal(unittest.TestCase):

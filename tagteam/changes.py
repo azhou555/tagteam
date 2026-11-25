@@ -52,11 +52,21 @@ def snapshot(repo):
 
 def blob_ids(repo, paths):
     """{path: blob id, or None if missing}, as `git hash-object` gives it: the repo's filters apply. A symlink is
-    hashed as git stores it, its target string, not the file it points to."""
+    hashed as git stores it, its target string, not the file it points to. In a repo the blobs are written, so a
+    later diff can show what a file held before a tool call."""
     links = {p: _link_blob(p) for p in paths if os.path.islink(p)}
     present = [p for p in paths if p not in links and os.path.isfile(p)]
-    ids = git(repo or "/", "hash-object", "--", *present).split() if present else []
+    ids = git(repo or "/", "hash-object", *(["-w"] if repo else []), "--", *present).split() if present else []
     return {**dict.fromkeys(paths), **dict(zip(present, ids)), **links}
+
+
+def blob_diff(repo, rel, a, b):
+    """(lines changed, diff text) between two blob ids (None = absent), labelled as `rel`; lines None = binary."""
+    empty = git(repo, "hash-object", "-w", "/dev/null").strip()
+    a, b = a or empty, b or empty
+    added, deleted = git(repo, "diff", "--numstat", a, b).split("\t")[:2]
+    text = git(repo, "diff", a, b).replace(f"a/{a}", f"a/{rel}").replace(f"b/{b}", f"b/{rel}")
+    return (None if added == "-" else int(added) + int(deleted)), text
 
 
 def _link_blob(path):
