@@ -19,6 +19,8 @@ from .adapters import extract_paths
 
 TTL = 86400
 JOURNAL_MAX = 1 << 20
+SHADOW_MAX = 20 << 20
+SHADOW_TTL = 8 * 86400                               # Phase C reads a week of these
 FILE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 
 
@@ -40,8 +42,13 @@ def _update(ev, change):
         state.write_json(f, d)
 
 
+def _norm(path):
+    """Resolve the directories (macOS /var is /private/var), not the file itself: a symlink stays the link."""
+    return os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+
+
 def _real(paths):
-    return [os.path.realpath(p) for p in paths]
+    return [_norm(p) for p in paths]
 
 
 def _journal_key(repo):
@@ -52,16 +59,30 @@ def _journal(repo):
     return state.path("journal", _journal_key(repo) + ".jsonl")
 
 
-def journal_append(repo, rec):
-    """Every session in the repo appends here, so appends and the prune share one lock."""
-    p = _journal(repo)
-    with state.locked("journal-" + _journal_key(repo)):
+def _append_pruned(p, lock, rec, limit, ttl=TTL):
+    """Many sessions append to p, so the append and the prune share one lock."""
+    with state.locked(lock):
         state.append_jsonl(p, rec)
-        if p.stat().st_size > JOURNAL_MAX:
-            keep = state.read_jsonl(p, time.time() - TTL)
+        if p.stat().st_size > limit:
+            keep = state.read_jsonl(p, time.time() - ttl)
             tmp = p.with_suffix(f".{os.getpid()}.tmp")
             tmp.write_text("".join(json.dumps(r) + "\n" for r in keep))
             os.replace(tmp, p)
+
+
+def journal_append(repo, rec):
+    _append_pruned(_journal(repo), "journal-" + _journal_key(repo), rec, JOURNAL_MAX)
+
+
+def _sweep_dead_ledgers():
+    """A ledger prunes itself only when its session writes: drop the ones no session has touched for a day."""
+    cutoff = time.time() - TTL
+    for f in state.path("ledger", "x").parent.glob("*.json"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
 
 
 def _tracked(repo, d):
@@ -85,8 +106,9 @@ def pre(ev, cfg):
     elif not repo:
         return                                       # a Bash call outside any repo: no tree to watch
     else:
-        tracked = _tracked(repo, state.read_json(_file(ev)) or {})
-        if tracked > cfg["ledger"]["max_tree_files"]:
+        d = state.read_json(_file(ev)) or {}
+        tracked = _tracked(repo, d)
+        if tracked > cfg["ledger"]["max_tree_files"] or (d.get("slow") or {}).get(repo):
             rec.update(kind="skipped", pre=None)
         else:
             tree, ms = _timed_snapshot(repo)
@@ -104,12 +126,13 @@ def post(ev, cfg):
     p = ((state.read_json(_file(ev)) or {}).get("pending") or {}).get(call_id)
     if not p:                                        # no Pre seen (installed mid-call, or pruned)
         return
-    repo, deltas, ms = p["repo"], {}, p.get("snapshot_ms")
+    repo, deltas, ms, slow = p["repo"], {}, p.get("snapshot_ms"), False
     if p["kind"] == "files":
         now = changes.blob_ids(repo, list(p["pre"]))
         deltas = {path: [b, now[path]] for path, b in p["pre"].items() if now[path] != b}
     elif p["kind"] == "tree":
         tree, post_ms = _timed_snapshot(repo)
+        slow = max(ms, post_ms) > cfg["ledger"]["max_snapshot_ms"]   # untracked data the file count can't see
         ms += post_ms
         deltas = {os.path.join(repo, rel): d for rel, d in changes.tree_deltas(repo, p["pre"], tree).items()}
     closed = {k: v for k, v in p.items() if k not in ("pre", "snapshot_ms")}
@@ -120,6 +143,8 @@ def post(ev, cfg):
     def close(d):
         d["pending"].pop(call_id, None)
         d["calls"].append(closed)
+        if p["kind"] == "tree" and slow:
+            d.setdefault("slow", {})[repo] = True
     _update(ev, close)
     if repo and deltas:
         journal_append(repo, {"ts": closed["t1"], "session": ev.session_id, "agent_id": closed["agent_id"],
@@ -142,7 +167,7 @@ def shadow(ev, cfg, s, artifacts):
     repo, started = s.get("repo"), s["started"]
     d = state.read_json(_file(ev)) or {}
     calls = [c for c in d.get("calls", []) if c["t1"] >= started]
-    today = sorted({os.path.realpath(os.path.join(repo or "", a["path"])) for a in artifacts})
+    today = sorted({_norm(os.path.join(repo or "", a["path"])) for a in artifacts})
     current = changes.blob_ids(repo, today)
     mine = {}
     for c in calls:
@@ -155,9 +180,10 @@ def shadow(ev, cfg, s, artifacts):
                 others.update(r["paths"])
     own = [p for p in today if current.get(p) in mine.get(p, ())]
     foreign = [p for p in today if p not in own and p in others]
-    state.append_jsonl(state.path("shadow.jsonl"), {
+    _sweep_dead_ledgers()
+    _append_pruned(state.path("shadow.jsonl"), "shadow", {
         "ts": time.time(), "session": ev.session_id, "turn_id": s.get("turn_id"), "repo": repo, "today": today,
         "own": own, "foreign": foreign, "unattributed": [p for p in today if p not in own and p not in foreign],
-        "ledger_only": sorted(set(mine) - set(today)), "pending_open": len(d.get("pending", {})),
+        "ledger_only": sorted(set(mine) - set(today)), "pending_open": sum(v["t0"] >= started for v in d.get("pending", {}).values()),
         "calls": len(calls), "skipped": sum(c["kind"] == "skipped" for c in calls), "overlaps": _overlaps(calls),
-        "bash_snapshot_ms": [c["snapshot_ms"] for c in calls if "snapshot_ms" in c]})
+        "bash_snapshot_ms": [c["snapshot_ms"] for c in calls if "snapshot_ms" in c]}, SHADOW_MAX, SHADOW_TTL)

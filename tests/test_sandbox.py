@@ -530,6 +530,21 @@ class BackgroundStop(HookRig, unittest.TestCase):
         self.assertIn("bg.py", next(iter(self.calls[-1].values())))
 
 
+    def test_background_stop_reported_after_the_next_turn_began_is_still_reviewed(self):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+        pathlib.Path(self.repo, "bg.py").write_text("a = 1\n" * 20)
+        self.run_detached = False
+        self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="next"))   # before the review reports
+        with mock.patch.object(harnesses, "get", fake_harness("git config tagteam.x 1")):
+            core.background(self.detached[-1])
+        self.run_detached = True
+        pathlib.Path(self.repo, "other.py").write_text("b = 2\n" * 20)
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+            self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        self.assertIn("bg.py", next(iter(self.calls[-1].values())))
+
+
 class Router(unittest.TestCase):
     def test_candidates_skip_disabled(self):
         write_user_config(use_toml(["codex", "copilot"]))

@@ -31,12 +31,12 @@ def parse_claude_shaped(agent, p):
     sid, cwd = p.get("session_id", ""), p.get("cwd") or os.getcwd()
     ev = HookEvent(agent, "ignore", sid, cwd, turn_id=p.get("turn_id", ""))
     name = p.get("hook_event_name")
-    if name in ("PreToolUse", "PostToolUse") and agent == "claude" and p.get("tool_use_id"):
+    if name in ("PreToolUse", "PostToolUse", "PostToolUseFailure") and agent == "claude" and p.get("tool_use_id"):
         ev.call = {"id": p["tool_use_id"], "agent_id": p.get("agent_id"), "tool": p.get("tool_name"),
                    "input": p.get("tool_input")}
     if name == "UserPromptSubmit":
         ev.phase, ev.prompt = "turn-start", p.get("prompt", "")
-    elif name == "PostToolUse":
+    elif name in ("PostToolUse", "PostToolUseFailure"):     # a Bash that exits non-zero gets the Failure event
         ev.phase, ev.paths = "touch", extract_paths(p.get("tool_input"), cwd)
     elif name == "PreToolUse" and ev.call and p.get("tool_name") in TOUCH_TOOLS:
         ev.phase = "pre"
@@ -60,6 +60,7 @@ def claude_shaped_events(agent, entry_cmd, stop_timeout):
     }
     if agent == "claude":       # not Codex: a new Codex hook needs the user's approval again
         events["PreToolUse"] = [group("plan-gate", stop_timeout, "ExitPlanMode"), group("pre", 30, TOUCH_MATCHER)]
+        events["PostToolUseFailure"] = [group("touch", 30, TOUCH_MATCHER)]
     return events
 
 

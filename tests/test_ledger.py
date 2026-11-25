@@ -55,6 +55,50 @@ class Shadow(HookRig, unittest.TestCase):
             outs = [self.prompt(sid), *self.write(self.p("feature.py"), FEATURE, sid=sid), self.stop(sid)]
         return [re.sub(r"\d+s\b", "Ns", json.dumps(o)) for o in outs]
 
+    def test_failed_bash_still_closes_its_call(self):
+        self.prompt()
+        payload = self.claude("PreToolUse", tool_name="Bash", tool_input={"command": "make"}, tool_use_id="t9")
+        self.run_hook("claude", "x", payload)
+        pathlib.Path(self.p("gen.txt")).write_text("hello\n")
+        self.run_hook("claude", "x", {**payload, "hook_event_name": "PostToolUseFailure", "error": "exit 2"})
+        self.stop()
+        line = self.shadow()
+        self.assertEqual((line["own"], line["unattributed"], line["pending_open"]), ([self.p("gen.txt")], [], 0))
+
+    def test_a_symlink_is_logged_as_the_link_not_its_target(self):
+        pathlib.Path(self.p("a.txt")).write_text("a\n")
+        sh(self.repo, "git", "add", "a.txt")
+        sh(self.repo, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "a")
+        self.prompt()
+        self.tool("Bash", {"command": "ln -s a.txt link"}, lambda: os.symlink("a.txt", self.p("link")))
+        self.stop()
+        line = self.shadow()
+        self.assertEqual((line["today"], line["own"], line["ledger_only"]), ([self.p("link")], [self.p("link")], []))
+
+    def test_a_slow_snapshot_stops_bash_snapshots_in_that_repo(self):
+        self.prompt()
+        with mock.patch.object(ledger, "_timed_snapshot", side_effect=lambda repo: (ledger.changes.snapshot(repo), 900.0)):
+            self.tool("Bash", {"command": "echo 1 > one"}, lambda: pathlib.Path(self.p("one")).write_text("1\n"), call="b1")
+        self.tool("Bash", {"command": "echo 2 > two"}, lambda: pathlib.Path(self.p("two")).write_text("2\n"), call="b2")
+        self.assertEqual([c["kind"] for c in self.ledger_calls()], ["tree", "skipped"])
+
+    def test_ledger_time_at_stop_is_not_taken_from_the_review_setup_budget(self):
+        self.prompt()
+        self.write(self.p("feature.py"), FEATURE)
+        ticks = iter([0.0, 0.0, 70.0])                   # Stop starts, the ledger starts, the ledger ends 70 s later
+        deadlines = []
+
+        def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
+            deadlines.append(deadline)
+            return {r: ({"reviewer": r, "ok": True, "duration": 1}, {"verdict": "approve", "summary": "", "findings": []})
+                    for r in jobs}
+        from tagteam import config, core
+        with mock.patch.object(core, "_clock", side_effect=lambda: next(ticks, 70.0)), \
+                mock.patch.object(runner, "run_all", run_all):
+            out = self.stop()
+        self.assertEqual(deadlines, [config.load()["review"]["deadline_s"]])
+        self.assertNotIn("too slow", json.dumps(out))
+
     def test_own_write_is_logged_and_hook_outputs_match_a_run_without_the_ledger(self):
         on = self.turn_outputs("s-on")
         line = self.shadow()
