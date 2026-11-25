@@ -409,12 +409,14 @@ class Attribution(Session, unittest.TestCase):
             core.background(self.detached[1])
         self.assertIn("def g", self.calls[-1]["copilot"])
 
-    def test_a_crlf_refusal_by_git_falls_back_instead_of_downgrading_own_work(self):
+    def test_a_crlf_file_under_safecrlf_is_still_own(self):
         sh(self.repo, "git", "config", "core.autocrlf", "input")
         sh(self.repo, "git", "config", "core.safecrlf", "true")
         self.prompt()
         self.write(self.p("mine.py"), FEATURE.replace("\n", "\r\n"))
         self.assertEqual(self.stop_with({"copilot": BLOCKER("mine.py")})["decision"], "block")
+        line = self.shadow()
+        self.assertEqual((line["own"], line["fallback"]), ([self.p("mine.py")], False))
 
     def test_a_call_closing_after_the_stop_snapshot_does_not_break_the_next_claim(self):
         self.prompt()
