@@ -228,7 +228,7 @@ untracked file is never in the real index, so every snapshot hashes it again.
   writers.
 - **Pairing calls:** every captured harness sends the same call ID on Pre and Post. Claude sends
   `tool_use_id`, Copilot `toolCallId`, agy `toolCall.id` (plus `stepIdx`), and OpenCode `callID`.
-  Codex is not captured yet. A harness without PreToolUse falls back to using the previous Post as the
+  Codex also sends `tool_use_id`. A harness without PreToolUse falls back to using the previous Post as the
   next Pre, and is labelled approximate.
 - **Costs to watch:** snapshots store blobs for dirty files. Large untracked files that get rewritten
   over and over make `.git/objects` grow until gc prunes them.
@@ -254,22 +254,22 @@ is the one talking to the user. Reviewing each subagent at SubagentStop goes wro
 | Worktree subagent | Deltas are keyed by the worktree root and reviewed as their own group from a sandbox of the worktree's snapshot. A later merge reuses the findings when the before and after content match. | lost (F3, captured) |
 | Nested subagents | Walk up to the root. OpenCode already does this (`opencode-plugin.js:50`). | OpenCode only |
 | Subagent as its own session (Copilot, agy) | Fold it into the root: its calls go to the root ledger, its turn start takes no baseline, and its Stop reviews nothing. Copilot names the parent (`parentAgentId`). agy doesn't, so link through the parent's transcript, with today's review as the fallback (see F6). | reviewed twice (F6, captured) |
-| Subagent session with no parent link | Its ledger never sees a user turn. Surface its deltas at the next Stop of any session in the repo as unattributed suggestions. | Codex uncaptured |
+| Subagent session with no parent link | Its ledger never sees a user turn. Surface its deltas at the next Stop of any session in the repo as unattributed suggestions. | none seen: Codex, like Claude, keeps subagents in the root session |
 
 ### Hook payloads (captured 2026-11-24)
 
 Live headless runs with logging hooks next to tagteam's own. The sanitized captures are in
 `tests/fixtures/subagents/`.
 
-| | Claude 2.x | Copilot 1.0.114 | agy 1.5.16 |
-|---|---|---|---|
-| Subagent identity | same `session_id` as the root; `agent_id` + `agent_type` on every subagent event | own `sessionId` = `agentId`; `parentAgentId` = root `sessionId` | own `conversationId`; no parent field anywhere in the payload |
-| Subagent lifecycle events | `SubagentStart`/`SubagentStop` (root `session_id`, `agent_id`) | `subagentStart`/`subagentStop` on the root, plus the subagent's own `userPromptSubmitted` and `agentStop` | the subagent's own `PreInvocation` (invocationNum 0) and `Stop` |
-| Call ID on Pre and Post | `tool_use_id` | `toolCallId` | `toolCall.id`, `stepIdx` |
-| Launching call → subagent | Agent Post `tool_response.agentId` (foreground and background) | Pre/Post of the `task` tool bracket the subagent | none in the payload. `invoke_subagent` is asynchronous: its Post (`t=…860.405`) comes *before* the subagent's first `PreInvocation` (`…860.419`). The link is in the parent's transcript: `Created the following subagent: {"conversationId": …}` |
-| Worktree subagent `cwd` | the worktree path | — | default `workspace: "inherit"` = parent's tree |
-| Background | Agent Post returns at once (`isAsync`); root Stop lists `background_tasks`; a `<task-notification>` prompt + Stop follow | not captured | every agy subagent is asynchronous (see above); a long-running one was not captured |
-| PreToolUse reply | `{}` allows | `{}` allows | `{}` **denies**; must reply `{"decision": "allow"}` |
+| | Claude 2.x | Copilot 1.0.114 | agy 1.5.16 | Codex 0.172 |
+|---|---|---|---|---|
+| Subagent identity | same `session_id` as the root; `agent_id` + `agent_type` on every subagent event | own `sessionId` = `agentId`; `parentAgentId` = root `sessionId` | own `conversationId`; no parent field anywhere in the payload | same `session_id` and `turn_id` as the root; `agent_id` + `agent_type` on subagent events |
+| Subagent lifecycle events | `SubagentStart`/`SubagentStop` (root `session_id`, `agent_id`) | `subagentStart`/`subagentStop` on the root, plus the subagent's own `userPromptSubmitted` and `agentStop` | the subagent's own `PreInvocation` (invocationNum 0) and `Stop` | `SubagentStart`/`SubagentStop` with `agent_id` |
+| Call ID on Pre and Post | `tool_use_id` | `toolCallId` | `toolCall.id`, `stepIdx` | `tool_use_id` |
+| Launching call → subagent | Agent Post `tool_response.agentId` (foreground and background) | Pre/Post of the `task` tool bracket the subagent | none in the payload. `invoke_subagent` is asynchronous: its Post (`t=…860.405`) comes *before* the subagent's first `PreInvocation` (`…860.419`). The link is in the parent's transcript: `Created the following subagent: {"conversationId": …}` | `collaboration.spawn_agent` Post returns before `SubagentStart` (asynchronous); `wait_agent` joins it |
+| Worktree subagent `cwd` | the worktree path | — | default `workspace: "inherit"` = parent's tree | not captured |
+| Background | Agent Post returns at once (`isAsync`); root Stop lists `background_tasks`; a `<task-notification>` prompt + Stop follow | not captured | every agy subagent is asynchronous (see above); a long-running one was not captured | every spawn is asynchronous; the root's `wait_agent` held it inside the turn |
+| PreToolUse reply | `{}` allows | `{}` allows | `{}` **denies**; must reply `{"decision": "allow"}` | `{}` allows |
 
 Claude also produced a same-session overlap worth keeping as a fixture: the root's `until [ -f bg.txt ]`
 Bash ran inside the background subagent's Bash window.
@@ -290,9 +290,8 @@ Bash ran inside the background subagent's Bash window.
 
 ## Before building
 
-1. ~~Capture subagent hook payloads for each harness.~~ Done for Claude, Copilot, and agy. See "Hook
-   payloads". Codex is still open, because its hooks need an interactive approval before `codex
-   exec` runs them.
+1. ~~Capture subagent hook payloads for each harness.~~ Done for Claude, Copilot, agy, and Codex. See "Hook
+   payloads".
 2. Prototype the ledger behind a flag next to today's diff, and log where the two disagree on real
    work for a week.
 3. Add a `tagteam doctor` warning when two live sessions share one working tree. The clean fix is a

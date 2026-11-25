@@ -12,3 +12,5 @@ the event. Local paths are rewritten to `/repo` and `~`. What each one shows is 
   `parentAgentId` (F6).
 - `agy-subagent.jsonl` — agy 1.5.16: one `invoke_subagent` subagent with its own `conversationId` and no
   parent field (F6).
+- `codex-subagent.jsonl` — Codex 0.172: one `spawn_agent` subagent in the root session, plus a root
+  `apply_patch` and Bash call.
