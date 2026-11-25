@@ -530,10 +530,14 @@ def _owned(s, labels, prior):
     """Paths whose findings may block: own files, files still carrying an open blocker (a fix round that left them
     alone must not release it), each also as an absolute path for a reviewer that quotes one. None (a finding naming
     no file can block too) is the caller's case when every file is own."""
-    rel = {p for p, v in labels.items() if v == "own"} | {
-        os.path.normpath(f["file"]) for f in verdict.gated(prior) if f.get("file")}
     repo = s.get("repo")
     roots = {repo, os.path.realpath(repo)} if repo else set()
+
+    def relative(p):
+        p = os.path.normpath(p)
+        root = next((r for r in roots if changes.in_repo(p, r)), None) if os.path.isabs(p) else None
+        return os.path.relpath(os.path.realpath(p), os.path.realpath(root)) if root else p
+    rel = {p for p, v in labels.items() if v == "own"} | {relative(f["file"]) for f in verdict.gated(prior) if f.get("file")}
     return rel | {os.path.join(r, p) for r in roots for p in rel if not os.path.isabs(p)}
 
 

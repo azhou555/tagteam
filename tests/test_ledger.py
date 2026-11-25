@@ -437,6 +437,13 @@ class Attribution(Session, unittest.TestCase):
         self.assertEqual(self.stop_with({"copilot": BLOCKER("mine.py")})["decision"], "block")
         self.assertTrue(self.shadow()["fallback"])
 
+    def test_an_open_blocker_quoted_absolute_then_relative_stays_blocking(self):
+        self.prompt()
+        self.write(self.p("mine.py"), FEATURE)
+        self.assertEqual(self.stop_with({"copilot": BLOCKER(self.p("mine.py"))})["decision"], "block")
+        pathlib.Path(self.p("notes.py")).write_text(FEATURE)
+        self.assertEqual(self.stop_with({"copilot": BLOCKER("mine.py")})["decision"], "block")
+
 
 class Journal(unittest.TestCase):
     def test_an_append_racing_a_prune_is_never_lost(self):
