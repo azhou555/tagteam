@@ -7,9 +7,10 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 
-from . import changes, classify, limits, live, quota, router, runner, sandbox, state, verdict
+from . import changes, classify, ledger, limits, live, quota, router, runner, sandbox, state, verdict
 from .adapters import MARKER, HookEvent
 
 BACKGROUND = f"{MARKER} ⟳ Reviewing in the background; results appear in the status line"
@@ -68,7 +69,24 @@ def turn_start(ev, cfg):
     return {"action": "allow", "message": notice} if notice else None
 
 
+def _shadow(fn, ev, cfg, *args):
+    """The ledger only observes: its failure must never change what a hook returns."""
+    if not cfg["ledger"]["shadow"]:
+        return
+    try:
+        fn(ev, cfg, *args)
+    except Exception as e:
+        state.log("ledger error", phase=ev.phase, error=repr(e), tb=traceback.format_exc()[-2000:])
+
+
+def pre(ev, cfg):
+    _shadow(ledger.pre, ev, cfg)
+    return None
+
+
 def touch(ev, cfg):
+    if ev.call:
+        _shadow(ledger.post, ev, cfg)
     if not ev.paths:
         return None
     with state.locked(_session_file(ev).stem):
@@ -413,6 +431,8 @@ def _turn_end(ev, cfg, lock, fd):
         return _owed(ev, cfg, s, sf)
     m = cfg["limits"]["max_rounds_per_turn"]
     artifacts, head = collect(s, cfg)
+    if ev.agent == "claude":
+        _shadow(ledger.shadow, ev, cfg, s, artifacts, head)
     changed = sum(a["lines_changed"] for a in artifacts)
     prior = s.get("prior") or []
     if not prior and changed and s.get("reverted_prior"):
@@ -590,4 +610,4 @@ def _plan_gate(ev, cfg, lock, fd):
     return {"action": action, "message": msg}
 
 
-HANDLERS = {"turn-start": turn_start, "touch": touch, "turn-end": turn_end, "plan-gate": plan_gate}
+HANDLERS = {"turn-start": turn_start, "pre": pre, "touch": touch, "turn-end": turn_end, "plan-gate": plan_gate}

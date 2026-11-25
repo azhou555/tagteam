@@ -287,7 +287,7 @@ class Install(unittest.TestCase):
             install.install(["claude"])
         cmds = [h["command"] for g in json.loads(self.settings.read_text())["hooks"].values() for e in g
                 for h in e["hooks"]]
-        self.assertEqual(len(cmds), 4)
+        self.assertEqual(len(cmds), 5)
         for c in cmds:
             self.assertRegex(c, r"^: tagteam-hook-form=1; /opt/bin/tagteam hook claude [a-z-]+$")
 
@@ -301,7 +301,7 @@ class Install(unittest.TestCase):
         hooks = json.loads(self.settings.read_text())["hooks"]
         self.assertEqual(hooks["Stop"][0], theirs)
         ours = [e for g in hooks.values() for e in g if claude_h.base.ours(e)]
-        self.assertEqual(len(ours), 4)
+        self.assertEqual(len(ours), 5)
         self.assertEqual(len([e for e in hooks["Stop"] if claude_h.base.ours(e)]), 1)
         self.assertNotIn("/old/repo", json.dumps(ours))
         self.assertIn("/opt/bin/tagteam hook claude turn-end", json.dumps(hooks["Stop"][1]))

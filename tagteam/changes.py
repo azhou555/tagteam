@@ -50,6 +50,30 @@ def snapshot(repo):
         return git(repo, "write-tree", env=env).strip()
 
 
+def blob_ids(repo, paths):
+    """{path: blob id, or None if missing}, as `git hash-object` gives it: the repo's filters apply."""
+    present = [p for p in paths if os.path.isfile(p)]
+    ids = git(repo or "/", "hash-object", "--", *present).split() if present else []
+    return {**dict.fromkeys(paths), **dict(zip(present, ids))}
+
+
+def tree_blobs(repo, tree):
+    """{repo-relative path: blob id} for every file in a tree id."""
+    out = {}
+    for rec in git(repo, "ls-tree", "-r", "-z", tree).split("\0"):
+        if rec:
+            meta, rel = rec.split("\t", 1)
+            out[rel] = meta.split()[2]
+    return out
+
+
+def tree_deltas(repo, base, head):
+    """{repo-relative path: [base blob, head blob]} for paths that differ; None = absent on that side."""
+    fields = git(repo, "diff-tree", "-r", "-z", "--no-renames", base, head).split("\0")
+    none = lambda sha: None if set(sha) == {"0"} else sha
+    return {rel: [none(meta.split()[2]), none(meta.split()[3])] for meta, rel in zip(fields[::2], fields[1::2]) if rel}
+
+
 def ignored(rel, patterns):
     return any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(os.path.basename(rel), p) for p in patterns)
 

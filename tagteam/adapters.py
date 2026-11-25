@@ -16,7 +16,7 @@ PATH_KEYS = {"file_path", "filePath", "path", "Path", "TargetFile", "notebook_pa
 @dataclasses.dataclass
 class HookEvent:
     agent: str
-    phase: str                      # turn-start | touch | turn-end | plan-gate | ignore
+    phase: str                      # turn-start | pre | touch | turn-end | plan-gate | ignore
     session_id: str
     cwd: str
     prompt: str = ""
@@ -24,6 +24,7 @@ class HookEvent:
     turn_id: str = ""
     last_message: str = ""
     plan_text: str = ""
+    call: dict = None               # {id, agent_id, tool, input}: a Claude tool call, for the shadow ledger
 
 
 def extract_paths(tool_input, cwd):
