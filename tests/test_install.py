@@ -599,9 +599,25 @@ class Consent(unittest.TestCase):
 
     def test_ask_enter_is_none_and_bad_input_reprompts(self):
         self.assertEqual(self.ask("\n")[0], [])
-        self.assertEqual(self.ask("")[0], [])
+        self.assertIsNone(self.ask("")[0])                 # end of input: no one answered
+        self.assertIsNone(self.ask("9\n")[0])
         self.assertEqual(self.ask("9,x\n1\n")[0], ["codex"])
         self.assertEqual(self.ask("1,1,2\n")[0], ["codex", "copilot"])
+
+    def test_no_answer_on_stdin_keeps_the_saved_list(self):
+        write_user_config('[reviewers]\nuse = ["copilot", "codex"]   # a note\n\n[reviewers.codex]\nmodel = "m"\n')
+        before = USER_CONFIG.read_text()
+        with mock.patch("sys.stdin", io.StringIO("")):
+            shown = self.consent()
+        self.assertEqual(USER_CONFIG.read_text(), before)
+        self.assertIn("reviewers.use stays as it is", shown)
+        self.assertNotIn("saved reviewers.use", shown)
+
+    def test_save_keeps_a_trailing_comment(self):
+        write_user_config('[reviewers]\nuse = ["copilot"]   # off since May\n\n[reviewers.codex]\nmodel = "m"\n')
+        self.consent(reviewers=["codex"])
+        self.assertEqual(USER_CONFIG.read_text(),
+                         '[reviewers]\nuse = ["codex"]   # off since May\n\n[reviewers.codex]\nmodel = "m"\n')
 
     def test_preselected_marked_with_x(self):
         _, shown = self.ask("\n", preselected=["codex"])
