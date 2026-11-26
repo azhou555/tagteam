@@ -102,8 +102,12 @@ class Install(unittest.TestCase):
             (install.LAUNCHER / install.LAUNCHER_MARK).parent.mkdir(parents=True)
             (install.LAUNCHER / install.LAUNCHER_MARK).write_text(install._launcher_script())
             self.assertEqual(install.menubar_plan(), "already up to date")
-            with mock.patch.object(install.subprocess, "run", side_effect=AssertionError("ran")):
+            with mock.patch.object(install.subprocess, "run", return_value=mock.Mock(returncode=1)) as run, \
+                    mock.patch.object(install, "install_launcher", side_effect=AssertionError("rebuilt")):
                 install.install_swiftbar()
+            self.assertEqual([c.args[0] for c in run.call_args_list],
+                             [["pgrep", "-qx", "SwiftBar"], ["open", "-g", "-a", str(app)],     # quit SwiftBar is started
+                              ["open", "-g", install.SWIFTBAR_ENABLE], ["open", "-g", "swiftbar://refreshallplugins"]])
             (plugins / install.SWIFTBAR_PLUGIN).write_text("#!/bin/sh\n" + install.SWIFTBAR_MARK + "\nold\n")
             self.assertTrue(install.menubar_plan().startswith("write "))          # a changed plugin is rewritten
             install.install_swiftbar()

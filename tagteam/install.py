@@ -530,6 +530,7 @@ def install_swiftbar():
         return
     target, current = m
     if _menubar_current(target, current):
+        _start_swiftbar()                            # files match, but SwiftBar may be quit or the plugin disabled
         print("menu bar: already up to date")
         return
     legacy = current == SWIFTBAR_OLD_DIR
@@ -547,12 +548,16 @@ def install_swiftbar():
             if not _swiftbar_running():
                 break
             time.sleep(0.2)
+    _start_swiftbar()
+    print(f"menu bar: wrote {plugin}")
+    install_launcher()
+
+
+def _start_swiftbar():
     if not _swiftbar_running():                      # opening a running SwiftBar pops "SwiftBar is already running"
         subprocess.run(["open", "-g", "-a", str(SWIFTBAR_APP)], check=False)
     subprocess.run(["open", "-g", SWIFTBAR_ENABLE], check=False)
     subprocess.run(["open", "-g", "swiftbar://refreshallplugins"], check=False)
-    print(f"menu bar: wrote {plugin}")
-    install_launcher()
 
 
 def relaunch_sh():
