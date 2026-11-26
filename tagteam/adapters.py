@@ -9,7 +9,7 @@ import os
 import re
 
 MARKER = "[tagteam]"
-PATCH_FILE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.M)
+PATCH_FILE = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$", re.M)
 PATH_KEYS = {"file_path", "filePath", "path", "Path", "TargetFile", "notebook_path", "AbsolutePath"}
 
 

@@ -32,7 +32,10 @@ Status: Phase D (Claude cutover) implemented 2026-11-25. Codex joined the ledger
   current file, and labelled with the same chain rule.
 - Own calls pruned after 24 h leave their change unattributed.
 - **Codex** uses the same ledger. Its `apply_patch` calls are recorded like Write (paths from the patch
-  headers) and its Bash calls like Claude's. Its PreToolUse hook has no matcher, and the parser drops every
+  headers, `Move to:` included) and its Bash calls like Claude's. Codex 0.172 reports shell as `Bash`; the
+  other exec names (`exec_command`, `write_stdin`, `shell`) are recorded too, so a Post under one either closes
+  its call or, with no Pre, makes the window fall back. Not captured live: a long command whose Post a later
+  `write_stdin` poll delivers. Its PreToolUse hook has no matcher, and the parser drops every
   other tool. Codex skips a hook the user hasn't approved in `/hooks`, so until then each Post arrives with no
   Pre and the window falls back to "all own". A write by a tool the ledger doesn't record (an MCP tool, in
   either harness) is unattributed, so a finding in that file is a suggestion.

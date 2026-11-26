@@ -490,6 +490,30 @@ class Codex(Session, unittest.TestCase):
         [call] = state.read_json(state.path("ledger", "codex-cx1.json"))["calls"]
         self.assertEqual((call["tool"], list(call["deltas"])), ("apply_patch", [self.p("mine.py")]))
 
+    def test_a_patch_that_moves_a_file_owns_the_destination(self):
+        pathlib.Path(self.p("old.py")).write_text(FEATURE)
+        sh(self.repo, "git", "add", "-A")
+        sh(self.repo, "git", "commit", "-qm", "old")
+        self.run_hook("codex", "x", self.codex("UserPromptSubmit", prompt="go"))
+        payload = self.codex("PreToolUse", tool_name="apply_patch", tool_use_id="mv", tool_input={"command": (
+            f"*** Begin Patch\n*** Update File: {self.p('old.py')}\n*** Move to: {self.p('new.py')}\n@@\n-x\n+y\n"
+            "*** End Patch")})
+        self.run_hook("codex", "x", payload)
+        os.rename(self.p("old.py"), self.p("new.py"))
+        pathlib.Path(self.p("new.py")).write_text(FEATURE + "y = 2\n")
+        self.run_hook("codex", "x", {**payload, "hook_event_name": "PostToolUse", "tool_response": {}})
+        out = self.stop_with({"copilot": BLOCKER("new.py")})
+        self.assertEqual(out["decision"], "block")
+        self.assertEqual(sorted(self.shadow()["own"]), [self.p("new.py"), self.p("old.py")])
+
+    def test_a_post_under_another_exec_name_with_no_pre_reviews_everything_as_own(self):
+        self.run_hook("codex", "x", self.codex("UserPromptSubmit", prompt="go"))
+        pathlib.Path(self.p("mine.py")).write_text(FEATURE)
+        self.run_hook("codex", "x", self.codex("PostToolUse", tool_name="write_stdin", tool_use_id="poll",
+                                               tool_input={"chars": ""}, tool_response={}))
+        self.assertEqual(self.stop_with({"copilot": BLOCKER("mine.py")})["decision"], "block")
+        self.assertTrue(self.shadow()["fallback"])
+
     def test_an_unapproved_pre_hook_reviews_everything_as_own(self):
         self.run_hook("codex", "x", self.codex("UserPromptSubmit", prompt="go"))
         pathlib.Path(self.p("mine.py")).write_text(FEATURE)

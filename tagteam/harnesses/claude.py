@@ -13,7 +13,10 @@ STATUSLINE_ORIG_REFRESH = state.HOME / "statusline.orig-refresh"   # user's refr
 REFRESH_S = 2                                                       # ticks the status line during a blocking review
 TOUCH_MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash"
 TOUCH_TOOLS = set(TOUCH_MATCHER.split("|"))
-LEDGER_TOOLS = {"claude": TOUCH_TOOLS, "codex": {"apply_patch", "Bash"}}   # calls the ownership ledger records
+# Calls the ownership ledger records. Codex reports shell as Bash (0.172); its other exec names are listed so a
+# Post under one either closes its call or, with no Pre, makes the ledger fall back instead of missing the write.
+LEDGER_TOOLS = {"claude": TOUCH_TOOLS,
+                "codex": {"apply_patch", "Bash", "exec_command", "write_stdin", "shell", "local_shell"}}
 
 
 def claude_shaped_owner(p):
