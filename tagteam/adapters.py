@@ -24,7 +24,7 @@ class HookEvent:
     turn_id: str = ""
     last_message: str = ""
     plan_text: str = ""
-    call: dict = None               # {id, agent_id, tool, input}: a Claude tool call, for the shadow ledger
+    call: dict = None               # {id, agent_id, tool, input}: a tool call the ownership ledger records
 
 
 def extract_paths(tool_input, cwd):

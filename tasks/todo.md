@@ -46,7 +46,8 @@ a file with a broken chain is advise as a whole. Revisit when shadow.jsonl shows
 
 ### Phase E — better labels (coverage already guaranteed by D's net)
 - [ ] Abandoned-call recovery (uncertain instead of unattributed), open background jobs, orphans
-- [ ] Other harnesses (chained Post→Pre fallback where no Pre hook, labelled approximate)
+- [x] Codex (2026-11-26): same Pre/Post ledger; `apply_patch` recorded as a file tool. Needs the user to approve the new PreToolUse hook in Codex `/hooks`; until then everything is own
+- [ ] Copilot / agy (on hold per the priority line; agy would need `{"decision": "allow"}` from its Pre hook)
 - [ ] F6 (agy): at a conversation's Stop, look for its `conversationId` in the transcripts (`transcriptPath`) of the workspace's other live agy sessions ("Created the following subagent"). Only exactly one match suppresses its review. No match or several means review as today. Depends on agy's transcript format: test that format against the fixture
 - [ ] F5: agy sessions cover every `workspacePaths` root (one repo-root group per root); resolve touch paths against the root that contains them, not `[0]`
 - [ ] Reviewed-ledger reuse with re-gating

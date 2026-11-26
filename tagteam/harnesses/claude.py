@@ -13,6 +13,7 @@ STATUSLINE_ORIG_REFRESH = state.HOME / "statusline.orig-refresh"   # user's refr
 REFRESH_S = 2                                                       # ticks the status line during a blocking review
 TOUCH_MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash"
 TOUCH_TOOLS = set(TOUCH_MATCHER.split("|"))
+LEDGER_TOOLS = {"claude": TOUCH_TOOLS, "codex": {"apply_patch", "Bash"}}   # calls the ownership ledger records
 
 
 def claude_shaped_owner(p):
@@ -31,14 +32,15 @@ def parse_claude_shaped(agent, p):
     sid, cwd = p.get("session_id", ""), p.get("cwd") or os.getcwd()
     ev = HookEvent(agent, "ignore", sid, cwd, turn_id=p.get("turn_id", ""))
     name = p.get("hook_event_name")
-    if name in ("PreToolUse", "PostToolUse", "PostToolUseFailure") and agent == "claude" and p.get("tool_use_id"):
+    if name in ("PreToolUse", "PostToolUse", "PostToolUseFailure") and p.get("tool_use_id") \
+            and p.get("tool_name") in LEDGER_TOOLS.get(agent, ()):
         ev.call = {"id": p["tool_use_id"], "agent_id": p.get("agent_id"), "tool": p.get("tool_name"),
                    "input": p.get("tool_input")}
     if name == "UserPromptSubmit":
         ev.phase, ev.prompt = "turn-start", p.get("prompt", "")
     elif name in ("PostToolUse", "PostToolUseFailure"):     # a Bash that exits non-zero gets the Failure event
         ev.phase, ev.paths = "touch", extract_paths(p.get("tool_input"), cwd)
-    elif name == "PreToolUse" and ev.call and p.get("tool_name") in TOUCH_TOOLS:
+    elif name == "PreToolUse" and ev.call:
         ev.phase = "pre"
     elif name == "Stop":
         ev.phase = "turn-end"
@@ -58,9 +60,11 @@ def claude_shaped_events(agent, entry_cmd, stop_timeout):
         "PostToolUse": [group("touch", 30, TOUCH_MATCHER if agent == "claude" else None)],
         "Stop": [group("turn-end", stop_timeout)],
     }
-    if agent == "claude":       # not Codex: a new Codex hook needs the user's approval again
+    if agent == "claude":
         events["PreToolUse"] = [group("plan-gate", stop_timeout, "ExitPlanMode"), group("pre", 30, TOUCH_MATCHER)]
         events["PostToolUseFailure"] = [group("touch", 30, TOUCH_MATCHER)]
+    elif agent == "codex":      # a new hook Codex skips until the user approves it; until then the ledger falls back
+        events["PreToolUse"] = [group("pre", 30)]
     return events
 
 

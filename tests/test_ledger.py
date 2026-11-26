@@ -455,6 +455,58 @@ class Attribution(Session, unittest.TestCase):
         self.assertEqual(self.stop_with({"copilot": BLOCKER("link.py")})["decision"], "block")
 
 
+class Codex(Session, unittest.TestCase):
+    """Codex sends Claude-shaped Pre and Post payloads with `tool_use_id`; its edits come through apply_patch."""
+
+    def codex(self, event, **kw):
+        return {"hook_event_name": event, "session_id": "cx1", "turn_id": "t1", "cwd": self.repo,
+                "transcript_path": "/Users/u/.codex/sessions/x.jsonl", **kw}
+
+    def patch(self, rel, text, call="call_1", **kw):
+        path = self.p(rel)
+        payload = self.codex("PreToolUse", tool_name="apply_patch", tool_use_id=call, tool_input={
+            "command": f"*** Begin Patch\n*** Add File: {path}\n+x\n*** End Patch"}, **kw)
+        pre = self.run_hook("codex", "x", payload)
+        pathlib.Path(path).write_text(text)
+        self.run_hook("codex", "x", {**payload, "hook_event_name": "PostToolUse", "tool_response": {}})
+        return pre
+
+    def stop_with(self, results):
+        with mock.patch.object(runner, "run_all", self.fake_run_all(results)):
+            return self.run_hook("codex", "x", self.codex("Stop", last_assistant_message="done"))
+
+    def test_an_own_patch_blocks_and_another_writer_does_not(self):
+        self.run_hook("codex", "x", self.codex("UserPromptSubmit", prompt="go"))
+        self.assertEqual(self.patch("mine.py", FEATURE), {})                     # Pre allows
+        pathlib.Path(self.p("editor.py")).write_text(FEATURE)
+        both = {"verdict": "changes_requested", "summary": "", "findings": [
+            finding(sev="blocker", file="mine.py", line=2, claim="mine is broken"),
+            finding(sev="blocker", file="editor.py", line=2, claim="editor is broken")]}
+        out = self.stop_with({"copilot": both})
+        self.assertEqual(out["decision"], "block")
+        blocking, suggestions = out["reason"].split("Suggestions (not blocking")
+        self.assertIn("mine is broken", blocking)
+        self.assertIn("editor.py:2: editor is broken", suggestions)
+        [call] = state.read_json(state.path("ledger", "codex-cx1.json"))["calls"]
+        self.assertEqual((call["tool"], list(call["deltas"])), ("apply_patch", [self.p("mine.py")]))
+
+    def test_an_unapproved_pre_hook_reviews_everything_as_own(self):
+        self.run_hook("codex", "x", self.codex("UserPromptSubmit", prompt="go"))
+        pathlib.Path(self.p("mine.py")).write_text(FEATURE)
+        self.run_hook("codex", "x", self.codex("PostToolUse", tool_name="apply_patch", tool_use_id="nopre",
+                                               tool_input={"command": f"*** Add File: {self.p('mine.py')}"},
+                                               tool_response={}))
+        out = self.stop_with({"copilot": BLOCKER("editor.py")})
+        self.assertEqual(out["decision"], "block")                               # can't vouch: as before the ledger
+
+    def test_a_tool_the_ledger_does_not_record_leaves_no_trace(self):
+        self.run_hook("codex", "x", self.codex("UserPromptSubmit", prompt="go"))
+        for event in ("PreToolUse", "PostToolUse"):
+            self.run_hook("codex", "x", self.codex(event, tool_name="collaborationwait_agent", tool_use_id="w1",
+                                                   tool_input={"timeout_ms": 1}, tool_response={}))
+        self.assertIsNone(state.read_json(state.path("ledger", "codex-cx1.json")))
+
+
 class Journal(unittest.TestCase):
     def test_an_append_racing_a_prune_is_never_lost(self):
         repo, old = "/r", time.time() - 2 * 86400
