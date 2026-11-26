@@ -129,7 +129,8 @@ def _pick(detected, preselected, notes, ordered=True):
 
 
 def ask_consent(detected, preselected, notes=None):
-    """The picker on a terminal, else a numbered prompt on stdin. Returns the picked agents in order; none is []."""
+    """The picker on a terminal, else a numbered prompt on stdin. Returns the picked agents in order; none is [].
+    End of input (no one there to answer, e.g. stdin is /dev/null) is None: keep what is saved."""
     notes = notes or {}
     if sys.stdin.isatty() and sys.stdout.isatty():
         return _pick(detected, preselected, notes)
@@ -142,6 +143,9 @@ def ask_consent(detected, preselected, notes=None):
         print("  ([x] = enabled in your old config; type their numbers to keep them)")
     while True:
         line = sys.stdin.readline()
+        if not line:
+            print(c.dim("no answer (end of input): reviewers.use stays as it is"))
+            return None
         if not line.strip():
             return []
         try:

@@ -233,8 +233,8 @@ def save_user(table, key, items):
         end = re.search(r"^\[", text[head.end():], re.M)
         stop = head.end() + end.start() if end else len(text)
         body = text[head.end():stop]
-        old = re.search(rf"^{re.escape(key)}[ \t]*=[ \t]*\[.*?\][ \t]*(#.*)?$", body, re.M | re.S)
-        body = body[:old.start()] + line + body[old.end():] if old else "\n" + line + body
+        old = re.search(rf"^{re.escape(key)}[ \t]*=[ \t]*\[.*?\]([ \t]*#[^\n]*)?[ \t]*$", body, re.M | re.S)
+        body = body[:old.start()] + line + (old.group(1) or "") + body[old.end():] if old else "\n" + line + body
         new = text[:head.end()] + body + text[stop:]
     try:
         tomllib.loads(new)
