@@ -1,5 +1,7 @@
 # tagteam — implementation plan
 
+**Priority (2026-11-26):** Claude Code and Codex first, agy second. Items only for other harnesses (Copilot, OpenCode, Cursor, Kiro, Pi) are on hold unless asked for.
+
 ## Attribution redesign (2026-11-20) — awaiting go-ahead
 Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable.
 
@@ -10,8 +12,8 @@ Spec: `docs/attribution-redesign.md`. Each phase ships alone and ends verifiable
 - [ ] ~~F5: agy reads every `workspacePaths` root~~ — moved to Phase E (agy is a non-Claude harness; needs one session spanning several repos, which the ledger's per-repo-root keys provide)
 
 ### Installer bugs (found 2026-11-22, reinstalling from main)
-- [ ] `tagteam install` rewrites `~/.claude/settings.json` with every non-ASCII character escaped (`—` → `\u2014`) while the plan line says "already up to date". `base.save` uses `json.dumps` without `ensure_ascii=False`. The content is equal JSON, but the file churns on every install. Keep non-ASCII as-is, and write nothing when the parsed content is unchanged.
-- [ ] The menu bar step isn't idempotent. `install.py` `_menubar`'s plan always says "write ~/SwiftBar/tagteam.1s.sh; add ~/Applications/tagteam.app", even right after an install. Compare the plugin and launcher bytes and report "already up to date" when they match.
+- [x] `tagteam install` rewrites `~/.claude/settings.json` with every non-ASCII character escaped (`—` → `\u2014`) while the plan line says "already up to date". `base.save` uses `json.dumps` without `ensure_ascii=False`. The content is equal JSON, but the file churns on every install. Keep non-ASCII as-is, and write nothing when the parsed content is unchanged.
+- [x] The menu bar step isn't idempotent. `install.py` `_menubar`'s plan always says "write ~/SwiftBar/tagteam.1s.sh; add ~/Applications/tagteam.app", even right after an install. Compare the plugin and launcher bytes and report "already up to date" when they match.
 - [x] `tagteam install` without a terminal read end of input as "no reviewers" and tried to save `reviewers.use = []` (seen 2026-11-25). It failed only because `config.save_user`'s comment pattern ran past the line end and glued the next table onto it. Fixed: end of input keeps the saved list; the updater keeps a trailing comment.
 
 ### Phase B — verify the assumptions (gates C–E)

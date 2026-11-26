@@ -91,6 +91,36 @@ class Install(unittest.TestCase):
         with mock.patch.object(install.shutil, "which", return_value=None):
             self.assertIsNone(install._swiftbar_dir())                   # no `defaults`: SwiftBar is a no-op
 
+    def test_menubar_rerun_is_already_up_to_date_and_runs_nothing(self):
+        app, plugins = pathlib.Path(tempfile.mkdtemp()), pathlib.Path(tempfile.mkdtemp())
+        with mock.patch.object(install, "SWIFTBAR_APP", app), \
+                mock.patch.object(install, "_swiftbar_dir", return_value=plugins), mock.patch("builtins.print"), \
+                mock.patch.object(install, "install_launcher"), \
+                mock.patch.object(install.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            self.assertTrue(install.menubar_plan().startswith("write "))
+            install.install_swiftbar()
+            (install.LAUNCHER / install.LAUNCHER_MARK).parent.mkdir(parents=True)
+            (install.LAUNCHER / install.LAUNCHER_MARK).write_text(install._launcher_script())
+            self.assertEqual(install.menubar_plan(), "already up to date")
+            with mock.patch.object(install.subprocess, "run", side_effect=AssertionError("ran")):
+                install.install_swiftbar()
+            (plugins / install.SWIFTBAR_PLUGIN).write_text("#!/bin/sh\n" + install.SWIFTBAR_MARK + "\nold\n")
+            self.assertTrue(install.menubar_plan().startswith("write "))          # a changed plugin is rewritten
+            install.install_swiftbar()
+            (install.LAUNCHER / install.LAUNCHER_MARK).write_text("")             # a launcher from before the marker held its script
+            self.assertTrue(install.menubar_plan().startswith("write "))
+
+    def test_hook_file_with_equal_json_keeps_its_bytes_and_non_ascii(self):
+        self.settings.write_text('{"note": "a \u2014 b"}')
+        with mock.patch("builtins.print"):
+            claude_h.install("/opt/bin/tagteam", 540, False)
+        text = self.settings.read_text()
+        self.assertIn('"note": "a — b"', text)
+        backups = sorted(self.settings.parent.glob("settings.json.tagteam-bak-*"))
+        claude_h.install("/opt/bin/tagteam", 540, False)
+        self.assertEqual(self.settings.read_text(), text)
+        self.assertEqual(sorted(self.settings.parent.glob("settings.json.tagteam-bak-*")), backups)
+
     def test_install_replaces_its_plugin_from_an_earlier_interval(self):
         plugins = pathlib.Path(tempfile.mkdtemp())
         old, users = plugins / install.OLD_PLUGINS[0], plugins / "tagteam.5s.sh"
