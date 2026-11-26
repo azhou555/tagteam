@@ -491,11 +491,28 @@ def _menubar():
     return target, current
 
 
+def _launcher_script():
+    return (f'do shell script "{relaunch_sh()}"\n'
+            'display notification "Look for the sage two-person icon in the menu bar." with title "tagteam"')
+
+
+def _menubar_current(target, current):
+    """The plugin, SwiftBar's folder and the launcher already match what install would write."""
+    try:
+        return (target == current and (target / SWIFTBAR_PLUGIN).read_text() == swiftbar_plugin()
+                and not any(_ours_plugin(target / n) for n in OLD_PLUGINS)
+                and (LAUNCHER / LAUNCHER_MARK).read_text() == _launcher_script())
+    except OSError:
+        return False
+
+
 def menubar_plan():
     m = _menubar()
     if isinstance(m, str):
         return m
     target, current = m
+    if _menubar_current(target, current):
+        return "already up to date"
     return (f"write {_tilde(target / SWIFTBAR_PLUGIN)}"
             + (" and restart SwiftBar so it loads that folder" if target != current else "")
             + f"; add {_tilde(LAUNCHER)} so Spotlight finds tagteam")
@@ -512,6 +529,10 @@ def install_swiftbar():
         print(f"menu bar: {m}")
         return
     target, current = m
+    if _menubar_current(target, current):
+        _start_swiftbar()                            # files match, but SwiftBar may be quit or the plugin disabled
+        print("menu bar: already up to date")
+        return
     legacy = current == SWIFTBAR_OLD_DIR
     plugin = target / SWIFTBAR_PLUGIN
     target.mkdir(parents=True, exist_ok=True)
@@ -527,12 +548,16 @@ def install_swiftbar():
             if not _swiftbar_running():
                 break
             time.sleep(0.2)
+    _start_swiftbar()
+    print(f"menu bar: wrote {plugin}")
+    install_launcher()
+
+
+def _start_swiftbar():
     if not _swiftbar_running():                      # opening a running SwiftBar pops "SwiftBar is already running"
         subprocess.run(["open", "-g", "-a", str(SWIFTBAR_APP)], check=False)
     subprocess.run(["open", "-g", SWIFTBAR_ENABLE], check=False)
     subprocess.run(["open", "-g", "swiftbar://refreshallplugins"], check=False)
-    print(f"menu bar: wrote {plugin}")
-    install_launcher()
 
 
 def relaunch_sh():
@@ -553,12 +578,11 @@ def install_launcher():
     # Always a clean restart: a running SwiftBar can be stuck with no items, and `open` on a running one pops
     # "SwiftBar is already running", so wait until it has quit. Then re-enable the plugin: SwiftBar keeps a
     # disabled plugin hidden across restarts.
-    script = (f'do shell script "{relaunch_sh()}"\n'
-              'display notification "Look for the sage two-person icon in the menu bar." with title "tagteam"')
+    script = _launcher_script()
     shutil.rmtree(LAUNCHER, ignore_errors=True)
     LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["osacompile", "-o", str(LAUNCHER), "-e", script], check=True, capture_output=True)
-    (LAUNCHER / LAUNCHER_MARK).touch()
+    (LAUNCHER / LAUNCHER_MARK).write_text(script)       # what it was built from: a reinstall compares it
     subprocess.run(["mdimport", str(LAUNCHER)], check=False, capture_output=True)   # index it for Spotlight now
     print(f"launcher: wrote {LAUNCHER} (Spotlight: tagteam)")
 

@@ -99,8 +99,18 @@ def load(p):
 
 
 def save(p, data, dry_run):
-    """Write `data` as JSON (see `write`)."""
-    return write(p, json.dumps(data, indent=2) + "\n", dry_run, json.loads)
+    """Write `data` as JSON (see `write`). A file already holding equal JSON keeps its bytes and gets no backup."""
+    old = p.read_text() if p.exists() else None
+    if old is not None and _parses_to(old, data):
+        return p, old, old
+    return write(p, json.dumps(data, indent=2, ensure_ascii=False) + "\n", dry_run, json.loads)
+
+
+def _parses_to(text, data):
+    try:
+        return json.loads(text) == data
+    except ValueError:
+        return False
 
 
 def write(p, text, dry_run, check=None):
