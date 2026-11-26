@@ -74,6 +74,16 @@ def hook_trust():
     return "stale" if any(snap.get(k) == _hash(records, k) for k in keys) else "trusted"
 
 
+def waiting():
+    """How many of tagteam's hooks Codex will skip until the user approves them in /hooks, or None if unreadable."""
+    try:
+        keys, records = _our_keys(), _records()
+        snap = json.loads(snapshot_path().read_text()) if snapshot_path().exists() else {}
+    except (OSError, ValueError):
+        return None
+    return sum(_hash(records, k) is None or snap.get(k) == _hash(records, k) for k in keys)
+
+
 def _our_entries():
     """tagteam's hook groups with their positions (Codex keys approvals by position), or None if unreadable."""
     try:

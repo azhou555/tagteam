@@ -226,6 +226,16 @@ class CodexTrust(unittest.TestCase):
         self.assertEqual(set(json.loads(self.snap.read_text())), set(self.keys) & set(codex_h._our_keys()))
         self.assertEqual(codex_h.hook_trust(), "unapproved")              # the ledger's new Pre hook waits for approval
 
+    def test_waiting_counts_only_the_hooks_codex_will_skip(self):
+        self.records({k: "sha256:old" for k in self.keys})
+        with contextlib.redirect_stdout(io.StringIO()):
+            codex_h.install("/bin/tagteam", 100, dry_run=False)
+        self.assertEqual(codex_h.waiting(), 4)                              # every rewritten hook
+        self.records({k: "sha256:new" for k in codex_h._our_keys() if ":pre_tool_use:" not in k})
+        self.assertEqual(codex_h.waiting(), 1)
+        self.records({k: "sha256:new" for k in codex_h._our_keys()})
+        self.assertEqual(codex_h.waiting(), 0)
+
     def test_idempotent_reinstall_keeps_a_valid_approval(self):
         self.assertFalse(self.cfg.exists())                                          # a fresh Codex: no config yet
         with contextlib.redirect_stdout(io.StringIO()):

@@ -14,6 +14,7 @@ import time
 
 from . import config, harnesses, live, resources, state
 from .harnesses import base
+from .harnesses import codex as codex_h
 
 H = pathlib.Path.home()
 SWIFTBAR_APP = pathlib.Path("/Applications/SwiftBar.app")
@@ -386,8 +387,10 @@ def next_steps(p):
     print("\n" + c.bold("Next:"))
     trust = harnesses.get("codex").hook_trust
     if "codex" in p["files"] and trust and trust() != "trusted":   # also hooks left unapproved by an earlier install
+        n = codex_h.waiting()
+        hooks = f"{n} hook{'s' if n != 1 else ''}" if n else "hooks"
         print("  - " + c.bold(c.fg(ATTENTION, "Action needed:")) + f" open {c.agent('codex')}, run /hooks, and "
-              "approve tagteam's 3 hooks. Codex runs no new hook until you do.")
+              f"approve tagteam's {hooks}. Codex runs no new hook until you do.")
     author = next((a for a in p["files"] if a in cfg["authors"]["review"] and any(r != a for r in use)), None)
     if author:
         print(f"  - {c.bold('Try it:')} ask {c.agent(author)} for a change of {cfg['triggers']['min_changed_lines']}+ "
