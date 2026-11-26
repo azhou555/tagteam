@@ -325,7 +325,7 @@ class Install(unittest.TestCase):
         for c in cmds:
             self.assertRegex(c, r"^: tagteam-hook-form=1; /opt/bin/tagteam hook claude [a-z-]+$")
 
-    def test_claude_gains_the_ledger_pre_hook_and_codex_does_not(self):
+    def test_claude_and_codex_gain_the_ledger_pre_hook(self):
         with mock.patch("builtins.print"):
             install.install(["claude", "codex"])
             first = self.settings.read_text(), codex_h.PATH.read_text()
@@ -334,7 +334,9 @@ class Install(unittest.TestCase):
         pre = [(e["matcher"], e["hooks"][0]["command"].rsplit(" ", 1)[1], e["hooks"][0]["timeout"])
                for e in json.loads(first[0])["hooks"]["PreToolUse"]]
         self.assertEqual(pre, [("ExitPlanMode", "plan-gate", 540), ("Write|Edit|MultiEdit|NotebookEdit|Bash", "pre", 30)])
-        self.assertNotIn("PreToolUse", json.loads(first[1])["hooks"])
+        [codex_pre] = json.loads(first[1])["hooks"]["PreToolUse"]
+        self.assertEqual(("matcher" in codex_pre, codex_pre["hooks"][0]["command"].rsplit(" ", 2)[1:]),
+                         (False, ["codex", "pre"]))                     # every tool: the parser keeps apply_patch and Bash
 
     def test_install_rewrites_old_checkout_hooks_by_tag(self):
         old = ": tagteam-hook-form=1; '/usr/bin/python3' '/old/repo/bin/tagteam' hook claude turn-end"

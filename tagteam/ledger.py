@@ -1,10 +1,10 @@
-"""Ownership ledger (Claude): which tool call changed which file. At Stop it labels each changed file own, foreign or
+"""Ownership ledger (Claude, Codex): which tool call changed which file. At Stop it labels each changed file own, foreign or
 unattributed, and only own files can block. The whole-tree diff still decides what is reviewed.
 
 core calls every entry point through a guard: a failure is logged and the review goes on as if every change were
 the session's own. See docs/attribution-redesign.md.
 
-Session ledger  ledger/claude-<sid>.json  {"pending": {call: pending}, "calls": [closed], "tracked": {repo: n},
+Session ledger  ledger/<agent>-<sid>.json  {"pending": {call: pending}, "calls": [closed], "tracked": {repo: n},
                                           "slow": {repo: true}, "untrusted": time of the last call that went unrecorded}
   pending  {call, agent_id, tool, t0, repo, kind: files|tree|skipped, pre: {abs path: blob|None} | tree id, snapshot_ms?}
   closed   {call, agent_id, tool, kind, t0, t1, repo, deltas: {abs path: [pre blob, post blob]}, snapshot_ms?}
@@ -23,7 +23,8 @@ TTL = 86400
 JOURNAL_MAX = 1 << 20
 SHADOW_MAX = 20 << 20
 SHADOW_TTL = 8 * 86400                               # Phase C reads a week of these
-FILE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+FILE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"}
+AUTHORS = {"claude", "codex"}
 
 
 def _file(ev):

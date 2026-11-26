@@ -1,6 +1,7 @@
 # Attribution redesign: own changes per tool call
 
-Status: Phase D (Claude cutover) implemented 2026-11-25. Phase E (other harnesses, recovery, reuse) not started.
+Status: Phase D (Claude cutover) implemented 2026-11-25. Codex joined the ledger 2026-11-26 (Phase E). The rest of Phase E
+(recovery, reuse, Copilot and agy) is not started.
 
 ### As built, and where it differs from this proposal
 
@@ -15,7 +16,7 @@ Status: Phase D (Claude cutover) implemented 2026-11-25. Phase E (other harnesse
   unattributed review. A Stop that skips by choice (trivial change, untriggered kind) advances it.
 - **Fallback to "all own"** when the ledger can't vouch: a skipped Bash snapshot in the window, a PostToolUse
   with no PreToolUse (hooks older than the package), any ledger error, `[ledger] attribute = false`, or a
-  non-Claude author.
+  author other than Claude or Codex.
 - **Contested overlaps across sessions** are not resolved: any call by another session that changed the path
   in the window makes it foreign, even when that write landed inside one of this session's Bash calls. The
   "Edit beats a snapshot" rule is not built, so a path both sessions claim is a suggestion for both.
@@ -30,6 +31,14 @@ Status: Phase D (Claude cutover) implemented 2026-11-25. Phase E (other harnesse
 - **F3** worktree deltas are diffed from the first call's `pre` blob (written with `hash-object -w`) to the
   current file, and labelled with the same chain rule.
 - Own calls pruned after 24 h leave their change unattributed.
+- **Codex** uses the same ledger. Its `apply_patch` calls are recorded like Write (paths from the patch
+  headers, `Move to:` included) and its Bash calls like Claude's. Codex 0.172 reports shell as `Bash`; the
+  other exec names (`exec_command`, `write_stdin`, `shell`) are recorded too, so a Post under one either closes
+  its call or, with no Pre, makes the window fall back. Not captured live: a long command whose Post a later
+  `write_stdin` poll delivers. Its PreToolUse hook has no matcher, and the parser drops every
+  other tool. Codex skips a hook the user hasn't approved in `/hooks`, so until then each Post arrives with no
+  Pre and the window falls back to "all own". A write by a tool the ledger doesn't record (an MCP tool, in
+  either harness) is unattributed, so a finding in that file is a suggestion.
 
 ## Problem
 

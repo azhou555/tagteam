@@ -77,7 +77,7 @@ def _ledger(ev, cfg, fn, fallback=None):
     """fn() when the ledger is on for this author. A ledger failure never fails a hook: it is logged and the caller
     gets `fallback`, which means acting as if there were no ledger."""
     try:
-        if cfg["ledger"]["attribute"] and ev.agent == "claude":
+        if cfg["ledger"]["attribute"] and ev.agent in ledger.AUTHORS:
             return fn()
     except Exception as e:
         state.log("ledger error", phase=ev.phase, error=repr(e), tb=traceback.format_exc()[-2000:])
