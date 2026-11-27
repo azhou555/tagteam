@@ -9,12 +9,13 @@ import shutil
 import tempfile
 import time
 
-from . import changes, config, harnesses, install, limits, quota, runner, sandbox
+from . import changes, config, harnesses, health, install, limits, quota, runner, sandbox
 
 PROBE_DIFF = "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
 PROBE_PROMPT = ("Review this one-line diff. Reply with only the JSON findings object; do not run commands "
                 "or edit files.\n\n" + PROBE_DIFF)
 PROBE_TIMEOUT_S = 120
+REPO_CHANGED = "unknown (the real repo changed during the probe)"     # its error text: the changed paths, one a line
 
 
 def _commands(node):
@@ -82,37 +83,56 @@ def paused_minutes(now):
     return None if c is None else {a: math.ceil((t - now) / 60) for a, t in c.items() if t > now}
 
 
-def probe_one(name, cfg):
-    """One tiny real review in a throwaway checkout: 'ok', 'timeout', 'wrote-files' or 'failed'. No state is touched."""
-    repo = tempfile.mkdtemp(prefix="tagteam-probe-")
+def probe(name, cfg, repo=None, files=None, stale_s=7200):
+    """One tiny real review in a sandbox checkout: (status, error text). status is 'ok', 'timeout', 'wrote-files',
+    'failed' or 'unknown …'. With no `repo` it reviews a throwaway repo. With one (a real repo) it reviews a
+    worktree of its HEAD plus `files` ({path: text}), built without touching its tree, index or refs; it never runs
+    the reviewer in place there, and a change to the real repo (maybe the user's) is REPO_CHANGED, with the changed
+    paths as the error text. No state is touched."""
+    tmp = None
     try:
-        for cmd in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
-            changes.git(repo, *cmd)
-        with open(os.path.join(repo, "a.py"), "w") as f:
-            f.write("x = 1\n")
-        changes.git(repo, "add", "-A")
-        changes.git(repo, "commit", "-qm", "init")
-        tree = changes.snapshot(repo)
+        if repo is None:
+            repo = tmp = tempfile.mkdtemp(prefix="tagteam-probe-")
+            for cmd in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+                changes.git(repo, *cmd)
+            with open(os.path.join(repo, "a.py"), "w") as f:
+                f.write("x = 1\n")
+            changes.git(repo, "add", "-A")
+            changes.git(repo, "commit", "-qm", "init")
+        before = changes.snapshot(repo)
+        tree = sandbox.overlay(repo, files) if files else before
         reviewer, options = harnesses.get(name).reviewer, cfg["reviewers"].get(name, {})
-        watch = sandbox.Watch(repo, tree)
-        with sandbox.checkout(repo, tree, cwd=repo) as work, tempfile.TemporaryDirectory() as run_dir:
+        watch = sandbox.Watch(repo, before)
+        with sandbox.checkout(repo, tree, cwd=repo, stale_s=stale_s) as work, tempfile.TemporaryDirectory() as run_dir:
+            if not tmp and os.path.realpath(work) == os.path.realpath(repo):
+                return "unknown (no sandbox for the real repo; not run)", ""
             argv, stdin, out_file = reviewer.argv(PROBE_PROMPT, options, run_dir, PROBE_TIMEOUT_S, work)
-            stdout, _, _, timed_out = runner._spawn(argv, stdin, work, PROBE_TIMEOUT_S)
+            stdout, stderr, _, timed_out = runner._spawn(argv, stdin, work, PROBE_TIMEOUT_S)
+            err = runner._why(stderr, stdout)
             after = watch.after()
-            if after["git"] or after["outside"] or after["repo"]["tree"] or after["repo"]["refs"]:
-                return "wrote-files"
+            if after["git"] or after["outside"]:
+                return "wrote-files", err
+            if after["repo"]["tree"] or after["repo"]["refs"]:
+                return ("wrote-files", err) if tmp else (REPO_CHANGED, "\n".join(after["repo"]["tree"] +
+                                                                                   after["repo"]["refs"]))
             try:
                 if sandbox.written(work, tree):
-                    return "wrote-files"
+                    return "wrote-files", err
             except (RuntimeError, OSError):
-                return "unknown (could not re-check the checkout)"
+                return "unknown (could not re-check the checkout)", err
             if timed_out:
-                return "timeout"
-            return "ok" if reviewer.parse(stdout, out_file) is not None else "failed"
+                return "timeout", err
+            return ("ok", "") if reviewer.parse(stdout, out_file) is not None else ("failed", err)
     except (OSError, RuntimeError) as e:
-        return f"failed ({e})"
+        return f"failed ({e})", str(e)
     finally:
-        shutil.rmtree(repo, ignore_errors=True)
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def probe_one(name, cfg):
+    """`probe`'s status alone: 'ok', 'timeout', 'wrote-files' or 'failed'."""
+    return probe(name, cfg)[0]
 
 
 def run(probe, clear):
@@ -139,7 +159,7 @@ def run(probe, clear):
     off, paused, found = limits.disabled(), paused_minutes(time.time()), harnesses.detected()
     for name, h in harnesses.ALL.items():
         if name not in found:
-            print(f"{name:8}not installed")
+            print(f"{name:9}not installed")
             continue
         parts, entries = [], hook_entries(h.hooks_path())
         for text, healthy in (author_part(h, entries), reviewer_part(name, h, use, off, paused)):
@@ -154,7 +174,11 @@ def run(probe, clear):
         if trust != "trusted":
             parts.append({"unapproved": f"⚠ approve hooks in {name} (/hooks)",
                           "stale": f"⚠ re-approve hooks in {name} (/hooks)"}.get(trust, f"? approve hooks in {name} (/hooks)"))
-        print(f"{name:8}" + " · ".join(parts))
+        if (e := (health.load().get("reviewers") or {}).get(name)) and e.get("status", "ok") != "ok":
+            probe_at = e.get("next_probe")
+            parts.append(f"health {e['status']}" + (f" (next probe {time.strftime('%H:%M', time.localtime(probe_at))})"
+                                                     if isinstance(probe_at, (int, float)) else ""))
+        print(f"{name:9}" + " · ".join(parts))
     if probe:
         for name in use:
             if name in found and off is not None and name not in off and harnesses.get(name).reviewer:

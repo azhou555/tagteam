@@ -133,13 +133,19 @@ def run_one(agent, cfg, prompt, cwd, deadline, run_dir):
 def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
     """jobs: {reviewer: prompt}; cwd is {reviewer: path}. Runs in parallel; returns {reviewer: (meta, result)}.
 
-    on_done(reviewer, meta) is called from this thread as each reviewer finishes.
+    on_done(reviewer, meta) is called from this thread as each reviewer finishes. It may return
+    {name: (prompt, cwd, deadline)} to start more at once (a fallback: at most one per job); those land in the
+    result too, and all are joined before this returns.
     """
     out = {}
-    with cf.ThreadPoolExecutor(max_workers=max(1, len(jobs))) as ex:
-        futs = {ex.submit(run_one, a, cfg, p, cwd[a], deadline, run_dir): a for a, p in jobs.items()}
-        for f in cf.as_completed(futs):
-            out[futs[f]] = f.result()
-            if on_done:
-                on_done(futs[f], out[futs[f]][0])
+    with cf.ThreadPoolExecutor(max_workers=max(1, 2 * len(jobs))) as ex:
+        pending = {ex.submit(run_one, a, cfg, p, cwd[a], deadline, run_dir): a for a, p in jobs.items()}
+        while pending:
+            done, _ = cf.wait(pending, return_when=cf.FIRST_COMPLETED)
+            for f in done:
+                a = pending.pop(f)
+                out[a] = f.result()
+                more = on_done(a, out[a][0]) if on_done else None
+                for n, (p, c, d) in (more or {}).items():
+                    pending[ex.submit(run_one, n, cfg, p, c, d, run_dir)] = n
     return out

@@ -1,4 +1,5 @@
 """Hook phase handlers: turn-start snapshots, touch ledger, turn-end review, plan gate."""
+import contextlib
 import dataclasses
 import os
 import pathlib
@@ -293,7 +294,8 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
         outside = sorted({p for p in s.get("touched", []) if os.path.isabs(p)} | {a["path"] for a in artifacts if os.path.isabs(a["path"])})
         before = changes.snapshot(repo) if repo else None
         watch = sandbox.Watch(repo, before, [p for p in outside if not changes.in_repo(p, repo)])
-    with sandbox.checkouts(repo, before, list(plan), repo or ev.cwd, max(7200, 2 * rv["deadline_s"])) as works:   # one disposable tree each
+    stale_s = sandbox.stale_s(cfg)
+    with sandbox.checkouts(repo, before, list(plan), repo or ev.cwd, stale_s) as works, contextlib.ExitStack() as more:
         setup = _clock() - started                   # snapshots, stale sweep, worktree adds: all inside the hook timeout
         skip = (SLOW_SETUP if setup > min(60, rv["deadline_s"] / 2) else
                 NO_SANDBOX if pinned and any(works[r] == (repo or ev.cwd) for r in plan) else None)
@@ -303,17 +305,44 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
             live.record_run(run)
             return "allow", completion(run, lines_changed), run_dir, None
         deadline = rv["deadline_s"] - setup
-        jobs = {r: runner.build_prompt(r, ev.agent, works[r], s.get("prompt", ""), ts, rv["max_diff_chars"],
-                                       prior=s.get("prior") or None, author_reply=ev.last_message,
-                                       git_activity=git_activity)
-                for r, ts in plan.items()}
-        if repo:                                     # intent, replies and findings may quote the real path
-            jobs = {r: swap_root(p, repo, works[r]) for r, p in jobs.items()}
+        def ask(r):                                  # intent, replies and findings may quote the real path
+            p = runner.build_prompt(r, ev.agent, works[r], s.get("prompt", ""), plan[r], rv["max_diff_chars"],
+                                    prior=s.get("prior") or None, author_reply=ev.last_message,
+                                    git_activity=git_activity)
+            return swap_root(p, repo, works[r]) if repo else p
+        jobs = {r: ask(r) for r in plan}
         with live.tracking({"run_id": run_id, "author": ev.agent, "session_id": ev.session_id, "tag": run_tag,
                             "round": round_no, "max_rounds": cfg["limits"]["max_rounds_per_turn"], "reviewers": list(plan),
                             "prior": run["prior"], "mode": mode, "background": bool(pinned), "started": now,
                             "expires": now + deadline + 60}) as update:
-            outcomes = runner.run_all(jobs, cfg, works, run_dir, deadline, on_done=update)
+            t_run, subs = _clock(), {}
+
+            def done(bad, meta):                     # on this thread, so plan/works/run change one at a time
+                update(bad, meta)
+                if bad in subs or meta.get("ok") or meta.get("timed_out"):   # no chains; a timeout used the time
+                    return None
+                new = None
+                try:
+                    new = deadline - (_clock() - t_run) >= 90 and router.fallback(ev.agent, cfg, set(plan))
+                    if not new:
+                        return None
+                    work = more.enter_context(sandbox.checkouts(repo, before, [new], repo or ev.cwd, stale_s))[new]
+                    if pinned and work == (repo or ev.cwd):          # a background review never reads the live tree
+                        state.log("fallback skipped: no sandbox", run_id=run_id, fallback=new, failed=bad)
+                        return None
+                    works[new], plan[new] = work, plan[bad]
+                    prompt = ask(new)
+                    update(new, None)
+                except Exception as e:               # a fallback must never cost the write checks below
+                    if new:
+                        plan.pop(new, None)
+                    state.log("fallback not started", run_id=run_id, failed=bad, error=repr(e))
+                    return None
+                subs[new] = bad
+                state.log("reviewer failed fast; handing its work on", run_id=run_id, fallback_for={new: bad})
+                run.update(fallback_for=subs, reviewers=run["reviewers"] + [new])
+                return {new: (prompt, work, deadline - (_clock() - t_run))}
+            outcomes = runner.run_all(jobs, cfg, works, run_dir, deadline, on_done=done)
         wrote = {r: sandbox.dirty(works[r], before) for r in plan if works[r] != (repo or ev.cwd)}
         guilty = {r: f"wrote in its sandbox: {', '.join(w[:5])}" for r, w in wrote.items() if w}
     seen = watch.after()
@@ -326,7 +355,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
                   why=guilty, git=seen["git"], outside=seen["outside"], tree=seen["repo"]["tree"][:50],
                   refs=seen["repo"]["refs"])
         for r, why in guilty.items():
-            limits.disable(r, f"{why} (run {run_id})")
+            limits.disable(r, f"{why} (run {run_id})", run_id=run_id, repo=repo)
         run["disabled"] = list(guilty)
     if changed:
         state.log("repo changed during review", run_id=run_id, blamed=list(guilty), tree=seen["repo"]["tree"][:50],

@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import heapq
 import json
 import os
 import pathlib
@@ -12,7 +13,7 @@ import warnings
 from unittest import mock
 
 from tests.helpers import CFG, FULL, ROOT, HookRig, art, finding, fx, make_repo, sh, use_toml, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
-from tagteam import adapters, changes, classify, core, harnesses, install, live, router, runner, state, verdict  # noqa: E402
+from tagteam import adapters, changes, classify, core, harnesses, health, install, live, router, runner, sandbox, state, verdict  # noqa: E402
 from tagteam.harnesses import agy as agy_h, base as harness_base, claude as claude_h, codex as codex_h, copilot as copilot_h  # noqa: E402
 
 
@@ -432,6 +433,28 @@ class EndToEnd(HookRig, unittest.TestCase):
         self.assertIn("1 new commit(s)", prompt)
         self.assertIn("c2", prompt)
 
+    def test_turn_end_allow_carries_notice(self):
+        health.save({"reviewers": {"copilot": {"status": "needs_you", "reason": "not logged in → copilot login"}}})
+        notice = "⚠ copilot: not logged in → copilot login"
+        outs = []
+        for sid in ("a", "b"):
+            self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature", session_id=sid))
+            pathlib.Path(self.repo, f"f{sid}.py").write_text("x = 1\n" * 20)
+            with mock.patch.object(runner, "run_all", self.fake_run_all({})):
+                outs.append(self.run_hook("claude", "x", self.claude("Stop", last_assistant_message="done",
+                                                                     session_id=sid)).get("systemMessage", ""))
+        self.assertTrue(outs[0].endswith(" · " + notice), outs[0])
+        self.assertNotIn("⚠", outs[1])
+
+    def test_a_failing_notice_keeps_the_verdict_message(self):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+        pathlib.Path(self.repo, "f.py").write_text("x = 1\n" * 20)
+        with mock.patch.object(runner, "run_all", self.fake_run_all({})), \
+                mock.patch.object(health, "notice", side_effect=OSError("disk")):
+            out = self.run_hook("claude", "x", self.claude("Stop", last_assistant_message="done"))
+        self.assertIn("tagteam", out.get("systemMessage", ""))
+        self.assertNotIn("hook error", state.path("tagteam.log").read_text())
+
     def test_copilot_allow_stays_silent(self):
         p = {"sessionId": "c2", "cwd": self.repo, "prompt": "write code"}
         self.run_hook("copilot", "turn-start", p)
@@ -457,6 +480,141 @@ class EndToEnd(HookRig, unittest.TestCase):
         self.assertIn("s.py", prompt)
         self.assertIn("notes.md", prompt)
         self.assertFalse(state.path("sessions", "copilot-sub1.json").exists())
+
+
+class Fallback(HookRig, unittest.TestCase):
+    """A planned reviewer that fails fast hands its work to the next healthy listed one, in the same run."""
+
+    def setUp(self):
+        self.rig(use_toml(["agy", "copilot"]))
+        self.cwds, self.deadlines, self.clock = [], [], [1000.0]
+        p = mock.patch.object(core, "_clock", lambda: self.clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def tearDown(self):
+        self.unrig()
+
+    def fake(self, fail=(), timeout=(), write=(), took=5, results=None):
+        """runner.run_all on a simulated clock: each reviewer finishes `took` (s, or {reviewer: s}) after it starts,
+        and what on_done returns starts then. self.calls/cwds/deadlines get one entry per batch started."""
+        def run_all(jobs, cfg, cwd, run_dir, deadline, on_done=None):
+            out, queue = {}, []
+
+            def start(batch, cwds, d):
+                self.calls.append(batch)
+                self.cwds.append(cwds)
+                self.deadlines.append(d)
+                for r in batch:
+                    if r in write:
+                        pathlib.Path(cwds[r], "scribble.py").write_text("x = 2\n")
+                    t = took.get(r, 5) if isinstance(took, dict) else took
+                    heapq.heappush(queue, (self.clock[0] + t, r, t))
+            start(jobs, cwd, deadline)
+            while queue:
+                self.clock[0], r, t = heapq.heappop(queue)
+                meta = {"reviewer": r, "ok": r not in fail + timeout, "timed_out": r in timeout, "duration": t}
+                res = None if r in fail + timeout else (results or {}).get(r, {"verdict": "approve", "summary": "",
+                                                                                "findings": []})
+                out[r] = (meta, res)
+                for n, (p, c, d) in (on_done(r, meta) or {}).items():
+                    start({n: p}, {n: c}, d)
+            return out
+        return run_all
+
+    def review(self, **kw):
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+        pathlib.Path(self.repo, "f.py").write_text("a = 1\n" * 20)
+        with mock.patch.object(runner, "run_all", self.fake(**kw)):
+            out = self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        return out, state.read_jsonl(state.path("runs.jsonl"))[-1]
+
+    def test_fast_failure_gets_fallback(self):
+        bad = {"verdict": "changes_requested", "summary": "", "findings": [finding(file="f.py", line=2)]}
+        out, run = self.review(fail=("agy",), results={"copilot": bad})
+        self.assertEqual([list(c) for c in self.calls], [["agy"], ["copilot"]])
+        self.assertIn("copilot", self.calls[1]["copilot"])
+        self.assertNotIn(self.cwds[1]["copilot"], (self.repo, self.cwds[0]["agy"]))   # its own checkout
+        self.assertEqual(self.deadlines[1], self.deadlines[0] - 5)
+        self.assertEqual((run["fallback_for"], run["reviewers"], run["failed"]),
+                         ({"copilot": "agy"}, ["agy", "copilot"], ["agy"]))
+        self.assertNotEqual(live.outcome(run)[0], "failed")
+        self.assertEqual(out["decision"], "block")                          # copilot's finding reached the verdict
+        self.assertIn("off by one in loop", out["reason"])
+        for shown in (live.render_watch(), live.render_swiftbar()):
+            self.assertIn("copilot (for agy)", shown)
+
+    def test_timeout_gets_no_fallback(self):
+        _, run = self.review(timeout=("agy",))
+        self.assertEqual(len(self.calls), 1)
+        self.assertNotIn("fallback_for", run)
+
+    def test_no_fallback_under_90s_left(self):
+        self.review(fail=("agy",), took=160)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_failed_fallback_does_not_chain(self):
+        _, run = self.review(fail=("agy", "copilot"))
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(live.outcome(run)[0], "failed")
+
+    def test_fallback_that_writes_is_disabled(self):
+        from tagteam import limits
+        _, run = self.review(fail=("agy",), write=("copilot",))
+        self.assertEqual((sorted(limits.disabled()), run["disabled"]), (["copilot"], ["copilot"]))
+
+    def test_fast_failure_next_to_a_slow_reviewer_gets_its_fallback_at_once(self):
+        self.unrig()
+        self.rig(use_toml(["agy", "codex", "copilot"]))
+        self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="add feature"))
+        pathlib.Path(self.repo, "f.py").write_text("a = 1\n" * 200)          # large: two reviewers
+        with mock.patch.object(runner, "run_all", self.fake(fail=("agy",), took={"agy": 5, "codex": 200})):
+            self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        run = state.read_jsonl(state.path("runs.jsonl"))[-1]
+        self.assertEqual([sorted(c) for c in self.calls], [["agy", "codex"], ["copilot"]])
+        self.assertEqual(self.deadlines[1], self.deadlines[0] - 5)                 # measured when agy failed
+        self.assertEqual((run["fallback_for"], run["failed"]), ({"copilot": "agy"}, ["agy"]))
+
+    def test_background_review_drops_and_logs_a_fallback_with_no_sandbox(self):
+        self.unrig()
+        self.rig(use_toml(["agy", "copilot"]), small_blocks=False)
+        real = sandbox.checkouts
+
+        def no_sandbox_for_copilot(repo, tree, names, cwd=None, stale_s=7200):
+            return real(None, None, names, cwd) if names == ["copilot"] else real(repo, tree, names, cwd, stale_s)
+        with mock.patch.object(sandbox, "checkouts", no_sandbox_for_copilot):
+            _, run = self.review(fail=("agy",))
+        self.assertTrue(self.detached)
+        self.assertEqual([list(c) for c in self.calls], [["agy"]])
+        self.assertNotIn("fallback_for", run)
+        self.assertNotIn("disabled", run)
+        log = [json.loads(l) for l in state.path("tagteam.log").read_text().splitlines()]
+        self.assertIn({"fallback": "copilot", "failed": "agy"},
+                      [{k: e.get(k) for k in ("fallback", "failed")} for e in log
+                       if e["msg"] == "fallback skipped: no sandbox"])
+
+    def test_every_checkout_uses_the_shared_stale_threshold(self):
+        self.unrig()
+        self.rig("review.deadline_s = 5000\n" + use_toml(["agy", "copilot"]))
+        seen, real = [], sandbox.checkouts
+
+        def checkouts(repo, tree, names, cwd=None, stale_s=7200):
+            seen.append(stale_s)
+            return real(repo, tree, names, cwd, stale_s)
+        with mock.patch.object(sandbox, "checkouts", checkouts):
+            _, run = self.review(fail=("agy",))
+        self.assertEqual((run["fallback_for"], seen), ({"copilot": "agy"}, [10000, 10000]))
+
+    def test_a_fallback_that_cannot_start_keeps_the_write_checks(self):
+        from tagteam import limits
+        with mock.patch.object(router, "fallback", side_effect=RuntimeError("boom")):
+            _, run = self.review(fail=("agy",), write=("agy",))
+        self.assertEqual((sorted(limits.disabled()), run["disabled"]), (["agy"], ["agy"]))
+        self.assertIn("fallback not started", state.path("tagteam.log").read_text())
+
+    def test_fallback_label(self):
+        run = {"reviewers": ["agy", "copilot"], "fallback_for": {"copilot": "agy"}}
+        self.assertEqual([live.reviewer_label(run, r) for r in run["reviewers"]], ["agy", "copilot (for agy)"])
 
 
 class GitActivity(unittest.TestCase):
@@ -505,6 +663,40 @@ class Live(unittest.TestCase):
         return {"ts": time.time(), "run_id": "x", "author": "claude", "session_id": "s", "tag": "turn", "round": 1,
                 "max_rounds": 2, "reviewers": ["copilot"], "action": "allow", "blocking": 0, "advisory": 0, "failed": [],
                 "duration": 3.0, **kw}
+
+    NEED = {"reviewers": {"copilot": {"status": "needs_you", "reason": "not logged in → copilot login"},
+                          "agy": {"status": "demoted", "reason": "most recent calls failed", "next_probe": 1e9}}}
+
+    def test_statusline_shows_needs_you_and_is_silent_when_healthy(self):
+        self.assertNotIn("⚠", live.segment("claude", "s"))
+        health.save({"reviewers": {"copilot": {"status": "demoted", "reason": "x"}}})
+        self.assertNotIn("⚠", live.segment("claude", "s"))
+        health.save(self.NEED)
+        self.assertIn("⚠ copilot: not logged in → copilot login", live.segment("claude", "s"))
+        self.assertNotIn("agy:", live.segment("claude", "s"))
+
+    def test_swiftbar_title_flags_and_health_block(self):
+        self.assertNotIn("⚠", live.render_swiftbar().splitlines()[0])
+        self.assertNotIn("Health", live.render_swiftbar())
+        health.save(self.NEED)
+        for i in range(7):
+            health.event("agy", "demoted", f"why {i}")
+        out = live.render_swiftbar().splitlines()
+        self.assertIn("⚠", out[0])
+        i = next(i for i, l in enumerate(out) if l.startswith("Health"))
+        self.assertIn("copilot: needs_you", out[i + 1])
+        self.assertIn("agy: demoted", out[i + 2])
+        self.assertEqual(sum("demoted: why" in l for l in out[i:]), 5)
+        self.assertLess(i, next(i for i, l in enumerate(out) if l.startswith("Recent reviews")))
+
+    def test_watch_health_block(self):
+        self.assertNotIn("Health", live.render_watch())
+        health.save(self.NEED)
+        health.event("agy", "demoted", "most recent calls failed")
+        out = live.render_watch()
+        self.assertIn("Health:\n  copilot  needs_you: not logged in → copilot login\n  agy      demoted", out)
+        self.assertIn("agy demoted: most recent calls failed", out)
+        self.assertLess(out.index("Running"), out.index("Health"))
 
     def test_tracking_lifecycle_and_progress(self):
         with live.tracking(self.rec()) as update:
@@ -689,7 +881,7 @@ class OnReview(unittest.TestCase):
         summary = "✗ Changes requested: 1 issue to fix (round 1/2)"
         self.assertEqual(json.loads((out / "run.json").read_text()), {**self.RUN, "outcome": "blocked", "summary": summary})
         env = (out / "env").read_text().splitlines()
-        self.assertEqual([e for e in env if not e.startswith("TAGTEAM_HOME=")],
+        self.assertEqual([e for e in env if not e.startswith(("TAGTEAM_HOME=", "TAGTEAM_NO_HEAL="))],
                          ["TAGTEAM_AUTHOR=claude", "TAGTEAM_DEPTH=1", "TAGTEAM_MODE=block", "TAGTEAM_OUTCOME=blocked",
                           f"TAGTEAM_SUMMARY={summary}"])
 

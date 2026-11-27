@@ -67,7 +67,7 @@ the agent's expected stdout and exit code. All logic lives in the core.
   state/                      # runs.jsonl, per-session state, reservations, runs/<run-id>/, tagteam.log
 
 tagteam repo/                 # the installed package (`tagteam` console script, `uv tool install`)
-  tagteam/                    # cli, core, router, runner, sandbox, limits, live, doctor, install, config
+  tagteam/                    # cli, core, router, runner, sandbox, limits, health, heal, live, doctor, install, config
   tagteam/harnesses/          # one module per agent (claude codex copilot agy): hooks + headless reviewer
   tagteam/data/               # config.default.toml, rubrics.toml, findings schema, hook fixtures
 ```
@@ -222,6 +222,29 @@ self-metered estimate rather than trusting the old number.
 
 `headroom = min(1 − used_5h, 1 − used_weekly)`, combining whichever windows exist.
 
+### 4.1a Self-healing
+
+- **Demotion** (`health.py`): 3 of a reviewer's last 4 calls failed and the latest failed. Demoted reviewers
+  sort after healthy ones; any success clears it. Computed from `history.jsonl` and `probes.jsonl` over 7 days
+  (advisory); `state/health.json` only caches it for display. A probe pass keeps the probe backoff until a
+  real call succeeds.
+- **In-run fallback** (`core._review`): a reviewer that fails fast with at least 90s of deadline left is
+  replaced by the next listed reviewer (healthy first, a demoted one if none), in its own sandbox checkout.
+  It starts from `runner.run_all`'s `on_done` the moment the failure lands, beside the reviewers still running,
+  and is joined with them before the write checks. One per failed reviewer, none for a fallback. A background
+  review drops (and logs) a fallback that would run in the live tree. Runs record `codex (for agy)`.
+- **`trips.json`** (safety, read fail-closed): write-trip history per reviewer with the repo it happened in.
+  The second trip within 7 days latches, as does a write during a canary. Only `doctor --clear` unlatches;
+  `reenable` never erases the history.
+- **Heal tick** (`heal.py`): detached, started by hooks at most every 15 minutes. Probes demoted reviewers
+  (backoff 15 min to 6 h, 2 probes per tick, 4 Copilot probes a day; a probe or canary that errors still
+  counts and backs off), canary re-tests disabled ones (not while a quota cooldown runs) in a
+  sandbox worktree of the trip repo with write traps (re-enabled only after a valid review with no writes),
+  and prunes run dirs over 30 days and stale sandbox worktrees (lock files are kept). It flags `needs_you`
+  for a missing CLI, auth errors, a latched breaker, a vanished trip repo, stale hooks, or an author with no
+  reviewer. Only `needs_you` reaches the status line, menu bar and end-of-turn notice (once per 24h per
+  issue). Events go to `heal.jsonl`, probe results to `probes.jsonl`.
+
 ### 4.2 Config
 
 ```toml
@@ -307,7 +330,7 @@ async is also the automatic fallback for any agent whose Stop hook can't block.
 ## 6. Controls
 
 - `TAGTEAM=off` env var, or a `.tagteam-off` file in the repo → hooks no-op.
-- `tagteam status` shows recent runs, per-agent load, cooldowns, and spend.
+- `tagteam status` shows recent runs, per-agent load, cooldowns, and spend. `tagteam doctor --fix` runs a heal tick now.
 - `tagteam review --last` reruns the last request manually (debug).
 - Per-repo overrides: `<repo>/.tagteam.toml` merges over `~/.tagteam/config.toml`, but may only add scrutiny (README, "A repo's own file").
 

@@ -13,6 +13,7 @@ HOUR = 3600
 STATE_ERROR = "state error, see tagteam.log"
 MAX_DIGESTS = 50
 BREAKER_FAILURES = 2
+TRIP_WINDOW = 7 * 86400
 
 
 def safe_session_key(agent, session_id):
@@ -138,24 +139,116 @@ def disabled():
     return state.read_dict(state.path("disabled.json"))
 
 
-def disable(reviewer, reason):
-    """Best effort: a failed write is logged, never raised."""
+def trips():
+    """{reviewer: {trips: [{ts, run_id}], latched}}: the write-trip history `reenable` never erases.
+    None if unreadable: no one is re-enabled until `doctor --clear`."""
+    return state.read_dict(state.path("trips.json"))
+
+
+def _history(t, d, reviewer):
+    """(trip list, latched) for `reviewer`. A `disabled.json` entry newer than the last recorded trip (no record at
+    all, or a trip lost to a failed write) counts as one more trip, latched if within TRIP_WINDOW of the one before.
+    `disable` stamps both files with the same time, so a recorded trip is never counted twice. An entry's own
+    `latched` flag (a canary write) latches too, so a failed trips write can't drop it.
+    None if the record is malformed (fail closed)."""
+    h = t.get(reviewer)
+    if h is not None and (not isinstance(h, dict) or not isinstance(h.get("trips"), list)
+                          or not all(isinstance(x, dict) for x in h["trips"])):
+        return None
+    past, latched = (h["trips"], bool(h.get("latched"))) if h else ([], False)
+    e = d.get(reviewer)
+    if isinstance(e, dict):
+        latched = latched or e.get("latched") is True
+        stamps = [x.get("ts") for x in past if isinstance(x.get("ts"), (int, float))]
+        ts = e.get("ts")
+        if not past or isinstance(ts, (int, float)) and (not stamps or ts > max(stamps)):
+            near = isinstance(ts, (int, float)) and any(ts - x <= TRIP_WINDOW for x in stamps)
+            past, latched = past + [{"ts": ts, "run_id": None}], latched or near
+    return past, latched
+
+
+def disable(reviewer, reason, run_id=None, latch=False, repo=None):
+    """Also records a trip, with the repo it happened in (the canary re-tests there); latches on `latch` (a canary
+    write) or a trip within 7 days of the last.
+    Best effort: a failed write is logged, never raised. An unreadable trips file is left alone."""
     try:
         with state.locked("disabled"):
             d = disabled()
             if d is None:                            # rewriting it would re-enable everyone else
                 state.log("disabled list unreadable; left as is", reviewer=reviewer, reason=reason)
                 return
-            d[reviewer] = {"reason": reason, "ts": time.time()}
-            state.write_json(state.path("disabled.json"), d)
+            now = time.time()
+            with state.locked("trips"):
+                t = trips()
+                h = None if t is None else _history(t, d, reviewer)
+                was = d.get(reviewer)
+                keep = latch or isinstance(was, dict) and was.get("latched") is True     # survives a lost trips write
+                where = {"repo": repo} if repo else {}
+                d[reviewer] = {"reason": reason, "ts": now, **where, **({"latched": True} if keep else {})}
+                state.write_json(state.path("disabled.json"), d)
+                if h is None:
+                    state.log("trips unreadable; history left as is", reviewer=reviewer, run_id=run_id)
+                    return
+                past, latched = h
+                recent = any(isinstance(x.get("ts"), (int, float)) and now - x["ts"] <= TRIP_WINDOW for x in past)
+                t[reviewer] = {"trips": past + [{"ts": now, "run_id": run_id, **where}],
+                               "latched": latched or latch or recent}
+                state.write_json(state.path("trips.json"), t)
     except OSError as e:
         state.log("reviewer not disabled", reviewer=reviewer, error=repr(e))
 
 
-def clear_disabled():
+def set_repo(reviewer, repo):
+    """Record the repo of a disabled entry that has none (a migrated one, found through its run's request.json) before
+    that run dir is pruned. Leaves ts and latched alone; best effort."""
     try:
         with state.locked("disabled"):
+            d = disabled()
+            e = (d or {}).get(reviewer)
+            if isinstance(e, dict) and not e.get("repo"):
+                d[reviewer] = {**e, "repo": repo}
+                state.write_json(state.path("disabled.json"), d)
+    except OSError as e:
+        state.log("trip repo not recorded", reviewer=reviewer, error=repr(e))
+
+
+def canary_eligible():
+    """Disabled, unlatched reviewers, however old the trip. [] if either file is unreadable."""
+    d, t = disabled(), trips()
+    if d is None or t is None:
+        return []
+    return [r for r in d if (h := _history(t, d, r)) is not None and not h[1]]
+
+
+def trip_count(reviewer):
+    """Trips recorded for `reviewer` (1 for a migrated entry); None if either file is unreadable or malformed."""
+    d, t = disabled(), trips()
+    h = None if d is None or t is None else _history(t, d, reviewer)
+    return None if h is None else len(h[0])
+
+
+def reenable(reviewer, expect_trips):
+    """Drop `reviewer` from the disabled list if it isn't latched and no trip landed since `expect_trips`.
+    Never touches the history. False, changing nothing, otherwise."""
+    try:
+        with state.locked("disabled"), state.locked("trips"):
+            d, t = disabled(), trips()
+            h = None if d is None or t is None else _history(t, d, reviewer)
+            if h is None or reviewer not in d or h[1] or len(h[0]) != expect_trips:
+                return False
+            del d[reviewer]
+            state.write_json(state.path("disabled.json"), d)
+            return True
+    except OSError as e:
+        state.log("reviewer not re-enabled", reviewer=reviewer, error=repr(e))
+        return False
+
+
+def clear_disabled():
+    try:
+        with state.locked("disabled"), state.locked("trips"):
             state.write_json(state.path("disabled.json"), {})
+            state.write_json(state.path("trips.json"), {})
     except OSError as e:
         state.log("disabled reviewers not cleared", error=repr(e))
 

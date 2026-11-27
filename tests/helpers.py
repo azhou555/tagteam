@@ -15,7 +15,7 @@ os.environ["TAGTEAM_HOME"] = TMP_HOME
 os.environ.pop("TAGTEAM_NO_MACOS_EXTRAS", None)       # clean-install runs set it; tests that need it set it themselves
 sys.path.insert(0, str(ROOT))
 
-from tagteam import config, core, state  # noqa: E402,F401
+from tagteam import config, core, heal, state  # noqa: E402,F401
 
 REAL_DETACH = core._detach
 
@@ -25,6 +25,9 @@ def _no_detach(argv, fd):
 
 
 core._detach = _no_detach                            # a detached child has no stubs: it would run real reviewers
+HEAL_LAUNCHES = []
+heal._launch = lambda: HEAL_LAUNCHES.append(1)       # a detached heal tick would probe real reviewers
+os.environ["TAGTEAM_NO_HEAL"] = "1"                  # ...and so would one from a hook run in a subprocess
 
 _run = unittest.TestCase.run
 

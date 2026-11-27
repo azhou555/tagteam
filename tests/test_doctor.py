@@ -4,11 +4,12 @@ import io
 import json
 import pathlib
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from tests.helpers import ALL_AGENTS, clear_user_config, use_toml, write_user_config  # isort: skip (sets TAGTEAM_HOME before tagteam imports)
-from tagteam import config, doctor, harnesses, limits, quota, state  # noqa: E402
+from tagteam import cli, config, doctor, harnesses, health, heal, limits, quota, state  # noqa: E402
 from tagteam.harnesses import codex as codex_h  # noqa: E402
 from tagteam.harnesses.base import TAG  # noqa: E402
 
@@ -42,6 +43,28 @@ class Doctor(unittest.TestCase):
 
     def line(self, out, name):
         return next(l for l in out.splitlines() if l.startswith(name))
+
+    def test_doctor_columns_align(self):
+        self.detected.append("opencode")
+        self.paths["opencode"], self.logged_in["opencode"] = self.d / "opencode.json", True
+        _, out = self.run_doctor()
+        self.assertTrue(self.line(out, "opencode").startswith("opencode "))
+
+    def test_doctor_shows_health_and_fix_runs_tick(self):
+        write_user_config(use_toml(["codex"]))
+        health.save({"reviewers": {"codex": {"status": "demoted", "reason": "most recent calls failed",
+                                              "next_probe": time.mktime((2026, 1, 1, 9, 30, 0, 0, 0, -1))}}})
+        _, out = self.run_doctor()
+        self.assertIn("health demoted (next probe 09:30)", self.line(out, "codex"))
+        self.assertNotIn("health", self.line(out, "claude"))
+        out = io.StringIO()
+        for events, want in (([{"reviewer": "codex", "action": "restored", "why": "probe ok"}], "codex restored: probe ok"),
+                             ([], "nothing to fix"), (None, "a heal tick is already running")):
+            with mock.patch.object(heal, "tick", return_value=events) as tick, contextlib.redirect_stdout(out):
+                with self.assertRaises(SystemExit):
+                    cli.main(["doctor", "--fix"])
+            tick.assert_called_once()
+            self.assertIn(want, out.getvalue())
 
     def test_missing_entry_path_flagged(self):
         self.hooks("claude", entry=self.d / "gone" / "tagteam")
@@ -177,6 +200,14 @@ class Doctor(unittest.TestCase):
         for wrote, timed_out, want in ((False, False, "ok"), (True, False, "wrote-files"), (False, True, "timeout")):
             with mock.patch.object(doctor.runner, "_spawn", spawn(wrote, timed_out)):
                 self.assertEqual(doctor.probe_one("claude", config.load()), want)
+
+    def test_probe_returns_error_text(self):
+        good = json.dumps({"structured_output": {"verdict": "approve", "summary": "", "findings": []}})
+        for out, want in ((("", "Error: 401 Unauthorized\n", 1, False), ("failed", "Error: 401 Unauthorized")),
+                          (('start\n{"error": "no auth"}\ndone\n', "", 1, False), ("failed", '{"error": "no auth"}')),
+                          ((good, "", 0, False), ("ok", ""))):
+            with mock.patch.object(doctor.runner, "_spawn", return_value=out):
+                self.assertEqual(doctor.probe("claude", config.load()), want)
 
 
 class CodexTrust(unittest.TestCase):

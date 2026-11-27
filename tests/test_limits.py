@@ -132,6 +132,180 @@ class Breaker(unittest.TestCase):
         self.assertEqual((rec["ok"], result), (False, None))
 
 
+class Trips(unittest.TestCase):
+    DAY = 86400
+
+    def setUp(self):
+        for n in ("disabled.json", "trips.json"):
+            state.path(n).unlink(missing_ok=True)
+
+    def disable_at(self, t, *a, **kw):
+        with mock.patch("time.time", return_value=t):
+            limits.disable(*a, **kw)
+
+    def test_first_trip_is_canary_eligible(self):
+        limits.disable("copilot", "x", "r1")
+        self.assertEqual(limits.canary_eligible(), ["copilot"])
+        self.assertIs(limits.trips()["copilot"]["latched"], False)
+        self.assertEqual(limits.trips()["copilot"]["trips"][0]["run_id"], "r1")
+
+    def test_second_trip_within_7d_latches(self):
+        now = time.time()
+        self.disable_at(now, "copilot", "x", "r1")
+        self.disable_at(now + 3 * self.DAY, "copilot", "x", "r2")
+        self.assertIs(limits.trips()["copilot"]["latched"], True)
+        self.assertEqual(limits.canary_eligible(), [])
+
+    def test_trips_8d_apart_do_not_latch(self):
+        now = time.time()
+        self.disable_at(now, "copilot", "x", "r1")
+        self.disable_at(now + 8 * self.DAY, "copilot", "x", "r2")
+        self.assertIs(limits.trips()["copilot"]["latched"], False)
+        self.assertEqual(limits.trip_count("copilot"), 2)
+        self.assertEqual(limits.canary_eligible(), ["copilot"])
+
+    def test_old_disabled_entry_without_trips_is_eligible(self):
+        state.path("disabled.json").write_text(json.dumps({"copilot": {"reason": "x", "ts": time.time() - 15 * 86400}}))
+        self.assertEqual(limits.canary_eligible(), ["copilot"])
+        self.assertEqual(limits.trip_count("copilot"), 1)
+
+    def test_canary_write_latches_old_and_migrated(self):
+        now = time.time()
+        self.disable_at(now - 15 * self.DAY, "copilot", "x", "r1")
+        limits.disable("copilot", "canary", "c1", latch=True)
+        self.assertIs(limits.trips()["copilot"]["latched"], True)
+        self.assertEqual(limits.canary_eligible(), [])
+        state.path("disabled.json").write_text(json.dumps({"codex": {"reason": "x", "ts": now - 15 * self.DAY}}))
+        limits.disable("codex", "canary", "c2", latch=True)
+        self.assertIs(limits.trips()["codex"]["latched"], True)
+        self.assertEqual(limits.canary_eligible(), [])
+
+    def test_reenable_refuses_after_newer_trip_or_latch(self):
+        now = time.time()
+        self.disable_at(now - 20 * self.DAY, "copilot", "x", "r1")
+        n = limits.trip_count("copilot")
+        self.disable_at(now, "copilot", "x", "r2")
+        self.assertFalse(limits.reenable("copilot", n))
+        self.assertIn("copilot", limits.disabled())
+        self.assertIs(limits.trips()["copilot"]["latched"], False)
+        limits.disable("copilot", "canary", "c1", latch=True)
+        self.assertFalse(limits.reenable("copilot", limits.trip_count("copilot") - 1))
+        self.assertFalse(limits.reenable("copilot", limits.trip_count("copilot")))      # latched
+        self.assertIn("copilot", limits.disabled())
+
+    def test_reenable_keeps_history(self):
+        now = time.time()
+        self.disable_at(now, "copilot", "x", "r1")
+        self.assertTrue(limits.reenable("copilot", limits.trip_count("copilot")))
+        self.assertNotIn("copilot", limits.disabled())
+        self.assertEqual(len(limits.trips()["copilot"]["trips"]), 1)
+        self.disable_at(now + 2 * self.DAY, "copilot", "x", "r2")
+        self.assertIs(limits.trips()["copilot"]["latched"], True)
+
+    def test_unreadable_trips_blocks_canary_and_is_not_rewritten(self):
+        state.path("trips.json").write_text("{")
+        limits.disable("copilot", "x", "r1")
+        self.assertIn("copilot", limits.disabled())
+        self.assertEqual(state.path("trips.json").read_text(), "{")
+        self.assertIsNone(limits.trips())
+        self.assertEqual(limits.canary_eligible(), [])
+        self.assertIsNone(limits.trip_count("copilot"))
+        self.assertFalse(limits.reenable("copilot", 1))
+        self.assertIn("copilot", limits.disabled())
+
+    def lost_trip_then_reenable(self, age, break_trips):
+        now = time.time()
+        self.disable_at(now - age * self.DAY, "copilot", "x", "r1")
+        n = limits.trip_count("copilot")
+        with break_trips():
+            limits.disable("copilot", "x", "r2")
+        self.assertEqual(limits.trips()["copilot"]["trips"][-1]["run_id"], "r1")      # the new trip really was lost
+        self.assertFalse(limits.reenable("copilot", n))
+        self.assertIn("copilot", limits.disabled())
+
+    def trips_none_once(self):
+        real, calls = limits.trips, []
+        return mock.patch.object(limits, "trips", lambda: None if not calls.append(1) and len(calls) == 1 else real())
+
+    def trips_write_fails_once(self):
+        real = state.write_json
+
+        def write(p, data):
+            if pathlib.Path(p).name == "trips.json":
+                raise OSError("disk")
+            real(p, data)
+        return mock.patch.object(state, "write_json", write)
+
+    def test_lost_trip_read_failure_blocks_reenable(self):
+        self.lost_trip_then_reenable(10, self.trips_none_once)
+
+    def test_lost_trip_write_failure_blocks_reenable(self):
+        self.lost_trip_then_reenable(10, self.trips_write_fails_once)
+
+    def test_lost_trip_within_7d_of_previous_latches(self):
+        self.lost_trip_then_reenable(3, self.trips_write_fails_once)
+        self.assertEqual(limits.canary_eligible(), [])
+        self.assertEqual(limits.trip_count("copilot"), 2)
+
+    def test_lost_trip_8d_after_previous_stays_eligible(self):
+        self.lost_trip_then_reenable(8, self.trips_write_fails_once)
+        self.assertEqual(limits.canary_eligible(), ["copilot"])
+        self.assertEqual(limits.trip_count("copilot"), 2)
+
+    def test_disable_records_the_repo(self):
+        limits.disable("copilot", "x", "r1", repo="/r")
+        self.assertEqual(limits.disabled()["copilot"]["repo"], "/r")
+        self.assertEqual(limits.trips()["copilot"]["trips"][-1], {"ts": limits.disabled()["copilot"]["ts"],
+                                                                  "run_id": "r1", "repo": "/r"})
+
+    def test_canary_latch_survives_a_failed_trips_write(self):
+        self.disable_at(time.time() - 10 * self.DAY, "copilot", "x", "r1")
+        with self.trips_write_fails_once():
+            limits.disable("copilot", "wrote in canary", "canary", latch=True)
+        self.assertEqual(limits.trips()["copilot"]["trips"][-1]["run_id"], "r1")      # the canary trip was lost
+        self.assertEqual(limits.canary_eligible(), [])
+        self.assertIs(limits.disabled()["copilot"].get("latched"), True)
+        self.assertFalse(limits.reenable("copilot", limits.trip_count("copilot")))
+
+    def test_recorded_trip_is_not_double_counted(self):
+        limits.disable("copilot", "x", "r1")
+        self.assertEqual(limits.trip_count("copilot"), 1)
+        self.assertTrue(limits.reenable("copilot", 1))
+
+    def test_unreadable_disabled_blocks_canary(self):
+        limits.disable("copilot", "x", "r1")
+        state.path("disabled.json").write_text("{")
+        self.assertEqual(limits.canary_eligible(), [])
+
+    def test_non_dict_trip_item_fails_closed(self):
+        limits.disable("copilot", "x", "r1")
+        t = limits.trips()
+        t["copilot"]["trips"].append("garbage")
+        state.write_json(state.path("trips.json"), t)
+        self.assertEqual((limits.canary_eligible(), limits.trip_count("copilot")), ([], None))
+        self.assertFalse(limits.reenable("copilot", 2))
+        limits.disable("copilot", "again", "r2")                                    # no crash; history left as is
+        self.assertEqual(limits.disabled()["copilot"]["reason"], "again")
+        self.assertEqual(limits.trips(), t)
+
+    def test_set_repo_fills_a_missing_repo_only(self):
+        state.write_json(state.path("disabled.json"), {"copilot": {"reason": "x", "ts": 5, "latched": True},
+                                                       "codex": {"reason": "y", "ts": 6, "repo": "/old"}})
+        limits.set_repo("copilot", "/r")
+        limits.set_repo("codex", "/r")
+        limits.set_repo("agy", "/r")
+        self.assertEqual(limits.disabled(), {"copilot": {"reason": "x", "ts": 5, "latched": True, "repo": "/r"},
+                                             "codex": {"reason": "y", "ts": 6, "repo": "/old"}})
+        state.path("disabled.json").write_text("{")
+        limits.set_repo("copilot", "/r")
+        self.assertEqual(state.path("disabled.json").read_text(), "{")
+
+    def test_clear_resets_trips(self):
+        limits.disable("copilot", "x", "r1")
+        limits.clear_disabled()
+        self.assertEqual(limits.trips(), {})
+
+
 class Guards(HookRig, unittest.TestCase):
     def setUp(self):
         from tagteam import core

@@ -161,10 +161,11 @@ and the servers named in the repo's `.mcp.json` and `.github/mcp.json` (Copilot 
 repo's `.claude/settings.json`, `.github/hooks` and `.github/copilot/settings.json` hooks and starts its MCP
 servers, even in a checkout of it). A repo whose `.github` is a symlink out of the checkout keeps both on.
 If a reviewer writes in its own checkout, it is disabled and the turn's notice says so:
-`⚠ disabled codex: wrote outside read-only (tagteam doctor --clear)`. When the shared git config or hooks
-change during a review, nothing shows who changed them (another session or you could have). The run stops,
-its results are discarded, no reviewer is disabled, and the next turn's review covers the code this
-turn changed (the git config change itself is not reviewed):
+`⚠ disabled codex: wrote outside read-only` (a first write is re-tested on its own; a repeat within 7 days, or
+a write during the re-test, stays off until `tagteam doctor --clear`, see [Self-healing](#self-healing)).
+When the shared git config or hooks change during a review, nothing shows who changed them (another session
+or you could have). The run stops, its results are discarded, no reviewer is disabled, and the next turn's
+review covers the code this turn changed (the git config change itself is not reviewed):
 `⚠ Not reviewed: git config or hooks changed during review, see tagteam.log`. Your own edits during a
 review only warn: `⚠ your repo changed during review (see tagteam.log)`.
 
@@ -316,7 +317,7 @@ defaults:
 | No repeat reviews               | always                             | A diff already approved is not reviewed again; a diff already blocked gets the same block re-issued without spending a review                                                                                                                                                                                                                                                                                              |
 | One review at a time            | always                             | A second trigger in the same session waits for the running review, up to `review.deadline_s`; past that, the turn is allowed with `⚠ Not reviewed: earlier review still running` and the next review covers it                                                                                                                                                                                                             |
 | Hook time budget                | `review.deadline_s = 240`          | Reviewers get what is left of `deadline_s` after setup (snapshots, checkouts). If setup alone takes over `min(60, deadline_s / 2)` seconds, the turn is allowed with `⚠ Not reviewed: repo too slow to sandbox, see tagteam.log`. The Stop hook timeout is `2 × deadline_s + 60`: one wait, then one review. A background review that overstays `deadline_s` by two minutes is stopped and shows as `⚠ Review interrupted` |
-| Failure breaker                 | `limits.cooldown_min = 15`         | A reviewer that errors twice in a row is paused for 15 minutes; if all are paused, the turn is allowed with `⚠ Not reviewed`. `tagteam doctor` shows paused reviewers and `tagteam doctor --clear` resumes them                                                                                                                                                                                                            |
+| Failure breaker                 | `limits.cooldown_min = 15`         | A reviewer that errors twice in a row is paused for 15 minutes; if all are paused, the turn is allowed with `⚠ Not reviewed`. `tagteam doctor` shows paused reviewers and `tagteam doctor --clear` resumes them. A reviewer that keeps failing is also demoted, see [Self-healing](#self-healing)                                                                                                                                                                                                            |
 
 If tagteam's own state files can't be read or written, it skips the review and says
 `⚠ Not reviewed: state error, see tagteam.log` rather than risk going past a limit.
@@ -330,6 +331,7 @@ and the cost the agents reported (`~$1.84 reported; 3 reviews didn't report cost
 tagteam doctor             # read-only check, one line per agent
 tagteam doctor --probe     # also runs one tiny real review per listed reviewer (this uses their quota)
 tagteam doctor --clear     # re-enable reviewers disabled for writing, resume paused ones, then check
+tagteam doctor --fix       # run one self-healing pass now (may probe reviewers), then check
 ```
 
 For each agent it shows whether it is installed, whether its hooks are present and point at a tagteam
@@ -340,6 +342,36 @@ in, because tagteam can't tell offline; `--probe` runs a real review, which need
 tagteam's own list of disabled or paused reviewers can't be read, no reviewer runs until
 `tagteam doctor --clear` resets it, and doctor says so. It exits 0 when everything it checked is healthy
 and 1 otherwise, and prints the fix in plain words.
+
+## Self-healing
+
+tagteam fixes most reviewer trouble itself and only tells you about what it can't.
+
+**What it fixes on its own**
+
+- **Demotion.** A reviewer is demoted when 3 of its last 4 calls failed and the latest one failed. A demoted
+  reviewer is tried after the healthy ones. Any success clears it, but a probe pass keeps the probe backoff
+  until a real review succeeds, so a reviewer that keeps failing real work isn't probed every 15 minutes.
+- **Fallback.** If a reviewer fails fast and at least 90 seconds of the deadline remain, the next listed
+  reviewer (a healthy one first, a demoted one if none is healthy) starts at once in its own checkout, while
+  the others are still running. The run shows `codex (for agy)`.
+- **Probing.** A small background job, started by hooks at most every 15 minutes, probes demoted reviewers
+  with backoff from 15 minutes up to 6 hours: at most 2 probes per run, and at most 4 Copilot probes a day.
+- **Re-enabling after a write.** A reviewer disabled for writing (outside its checkout, or to files inside it)
+  is re-tested in a throwaway worktree of the repo where it happened, with write traps added. It comes back
+  only after a valid review with no writes. A second write within 7 days, or a write during the re-test, latches it off:
+  only `tagteam doctor --clear` re-enables it then.
+- **Cleanup.** Run folders older than 30 days and stale sandbox worktrees are removed.
+
+**What it flags for you.** Only things you have to fix: a reviewer's CLI is missing or logged out, a latched
+write breaker, a disabled reviewer whose repo no longer exists, stale hooks, or an author with no reviewer.
+These show in the Claude status line, in the menu bar title, and in the notice at the end of a turn (each
+issue at most once a day). `tagteam watch` and the menu bar dropdown also show a Health block whenever
+something isn't ok or there are recent self-healing events. Everything else is handled quietly.
+
+`tagteam doctor` shows each reviewer's health. `tagteam doctor --fix` runs one pass now instead of waiting.
+State is in `~/.tagteam/state/`: `health.json`, `heal.jsonl` and `probes.jsonl` (all advisory), and
+`trips.json` (the write history, read fail-closed).
 
 ## Upgrading
 
