@@ -242,7 +242,8 @@ def _canary_disabled(cfg, use, revs, found, now, budget, why, note):
             continue
         e.pop("gone", None)
         trips = limits.trip_count(n)
-        if trips is None or quota.cooling(n) or not _may_probe(n, e, found, now, budget):
+        if trips is None or quota.cooling(n) or harnesses.ALL[n].logged_in() is False \
+                or not _may_probe(n, e, found, now, budget):
             continue
         marker_dir = tempfile.mkdtemp(prefix=f"{TRAP}-")
         try:

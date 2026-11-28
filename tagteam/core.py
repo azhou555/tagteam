@@ -323,7 +323,7 @@ def _review(ev, cfg, s, artifacts, round_no, run_tag, confirm, rebuttal, started
                     return None
                 new = None
                 try:
-                    new = deadline - (_clock() - t_run) >= 90 and router.fallback(ev.agent, cfg, set(plan))
+                    new = deadline - (_clock() - t_run) >= 90 and router.fallback(ev.agent, cfg, set(plan), hm)
                     if not new:
                         return None
                     work = more.enter_context(sandbox.checkouts(repo, before, [new], repo or ev.cwd, stale_s))[new]

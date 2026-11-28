@@ -312,6 +312,13 @@ class Tick(Rig, unittest.TestCase):
         row = next(r for r in state.read_jsonl(state.path("probes.jsonl")) if r["reviewer"] == "copilot")
         self.assertIn("inconclusive", row["detail"])
 
+    def test_logged_out_reviewer_gets_no_canary(self):
+        limits.disable("copilot", "x", "r1", repo=self.repo)
+        self.logged["copilot"] = False
+        heal.tick(cfg())
+        self.assertEqual(self.probes, [])
+        self.assertIn("copilot", limits.disabled())
+
     def test_cooling_reviewer_gets_no_canary(self):
         limits.disable("copilot", "x", "r1", repo=self.repo)
         quota.cooldown("copilot", 60)

@@ -229,13 +229,16 @@ def trip_count(reviewer):
 
 def reenable(reviewer, expect_trips):
     """Drop `reviewer` from the disabled list if it isn't latched and no trip landed since `expect_trips`.
-    Never touches the history. False, changing nothing, otherwise."""
+    First saves the reconciled history, so a trip known only from the disabled entry (a migrated or lost one) still
+    counts toward the next latch; if that write fails it stays disabled. False, changing nothing, otherwise."""
     try:
         with state.locked("disabled"), state.locked("trips"):
             d, t = disabled(), trips()
             h = None if d is None or t is None else _history(t, d, reviewer)
             if h is None or reviewer not in d or h[1] or len(h[0]) != expect_trips:
                 return False
+            t[reviewer] = {**(t.get(reviewer) or {}), "trips": h[0], "latched": False}
+            state.write_json(state.path("trips.json"), t)
             del d[reviewer]
             state.write_json(state.path("disabled.json"), d)
             return True
