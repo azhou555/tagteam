@@ -377,6 +377,15 @@ class Guards(HookRig, unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(out["systemMessage"], "[tagteam] ⚠ Not reviewed: state error, see tagteam.log")
 
+    def test_a_hook_error_at_turn_end_says_not_reviewed(self):
+        self.start()
+        err = RuntimeError("git rev-parse --git-path index: You have not agreed to the Xcode license agreements.")
+        with mock.patch.object(self.core.changes, "snapshot", side_effect=err):
+            out = self.stop()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(out["systemMessage"], "[tagteam] ⚠ Not reviewed: hook error, see tagteam.log")
+        self.assertIn("hook error", [r["msg"] for r in state.read_jsonl(state.path("tagteam.log"), 0)])
+
     def test_unreadable_safety_list_fails_closed(self):
         for name in ("disabled.json", "cooldowns.json"):
             with self.subTest(name):

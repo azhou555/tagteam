@@ -31,8 +31,7 @@ def hook(agent, phase):
             cfg = config.load(repo)
         except config.ConfigError as e:
             state.log("config error, not reviewing", agent=agent, phase=phase, error=str(e))
-            notice = {"action": "allow", "message": f"{adapters.MARKER} ⚠ Not reviewed: config error, see tagteam.log"}
-            print(adapters.encode(agent, ev.phase, notice if ev.phase in ("turn-end", "plan-gate") else None))
+            print(_not_reviewed(agent, ev.phase, "config error"))
             return
         verdict = core.HANDLERS[ev.phase](ev, cfg)
         if ev.phase == "turn-end" and verdict and verdict.get("action") == "allow" and verdict.get("message"):
@@ -48,7 +47,19 @@ def hook(agent, phase):
             live.note_error()
         except Exception:
             pass
-        print("{}")
+        out = "{}"
+        if ev is not None:
+            try:
+                out = _not_reviewed(agent, ev.phase, "hook error")
+            except Exception:
+                pass
+        print(out)
+
+
+def _not_reviewed(agent, phase, why):
+    """The allow verdict for a turn tagteam could not review, saying so where the phase shows a message."""
+    notice = {"action": "allow", "message": f"{adapters.MARKER} ⚠ Not reviewed: {why}, see tagteam.log"}
+    return adapters.encode(agent, phase, notice if phase in ("turn-end", "plan-gate") else None)
 
 
 def _notice():

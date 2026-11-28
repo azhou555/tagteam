@@ -403,7 +403,8 @@ class EndToEnd(HookRig, unittest.TestCase):
         self.run_hook("claude", "x", self.claude("UserPromptSubmit", prompt="x"))
         pathlib.Path(self.repo, "f.py").write_text("a = 1\n" * 20)
         with mock.patch.object(runner, "run_all", side_effect=RuntimeError("boom")):
-            self.assertEqual(self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False)), {})
+            out = self.run_hook("claude", "x", self.claude("Stop", stop_hook_active=False))
+        self.assertEqual(out, {"systemMessage": "[tagteam] ⚠ Not reviewed: hook error, see tagteam.log"})
         self.assertEqual(live.active(), [])                    # crash still clears the running record
 
     def test_review_is_live_while_running_then_recorded(self):
