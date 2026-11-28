@@ -202,6 +202,30 @@ class Trips(unittest.TestCase):
         self.disable_at(now + 2 * self.DAY, "copilot", "x", "r2")
         self.assertIs(limits.trips()["copilot"]["latched"], True)
 
+    def test_reenabled_migrated_entry_still_latches_a_second_write(self):
+        now = time.time()
+        state.path("disabled.json").write_text(json.dumps({"copilot": {"reason": "x", "ts": now - self.DAY}}))
+        self.assertTrue(limits.reenable("copilot", limits.trip_count("copilot")))
+        self.assertEqual(limits.trips()["copilot"]["trips"], [{"ts": now - self.DAY, "run_id": None}])
+        limits.disable("copilot", "x", "r2")
+        self.assertIs(limits.trips()["copilot"]["latched"], True)
+        self.assertEqual(limits.canary_eligible(), [])
+
+    def test_reenable_after_a_lost_trip_keeps_it_for_the_next_latch(self):
+        self.disable_at(time.time() - 10 * self.DAY, "copilot", "x", "r1")
+        with self.trips_write_fails_once():
+            limits.disable("copilot", "x", "r2")
+        self.assertTrue(limits.reenable("copilot", limits.trip_count("copilot")))
+        self.assertEqual(len(limits.trips()["copilot"]["trips"]), 2)
+        limits.disable("copilot", "x", "r3")
+        self.assertEqual(limits.canary_eligible(), [])
+
+    def test_reenable_stays_disabled_if_history_cannot_be_saved(self):
+        state.path("disabled.json").write_text(json.dumps({"copilot": {"reason": "x", "ts": time.time()}}))
+        with self.trips_write_fails_once():
+            self.assertFalse(limits.reenable("copilot", 1))
+        self.assertIn("copilot", limits.disabled())
+
     def test_unreadable_trips_blocks_canary_and_is_not_rewritten(self):
         state.path("trips.json").write_text("{")
         limits.disable("copilot", "x", "r1")

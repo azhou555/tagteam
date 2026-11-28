@@ -106,12 +106,23 @@ class Routing(unittest.TestCase):
     def test_fallback_skips_taken_cooling_and_author(self):
         cfg = cfg_with(["claude", "codex", "agy", "copilot"])
         with mock.patch.object(quota, "cooling", side_effect=lambda a, now=None: a == "agy"):
-            self.assertEqual(router.fallback("claude", cfg, {"codex"}), "copilot")
-            self.assertIsNone(router.fallback("claude", cfg, {"codex", "copilot"}))
-        self.assertEqual(router.fallback("claude", cfg, {"codex"}), "agy")         # control: agy not cooling
+            self.assertEqual(router.fallback("claude", cfg, {"codex"}, FULL), "copilot")
+            self.assertIsNone(router.fallback("claude", cfg, {"codex", "copilot"}, FULL))
+        self.assertEqual(router.fallback("claude", cfg, {"codex"}, FULL), "agy")         # control: agy not cooling
         with mock.patch.object(health, "is_demoted", side_effect=lambda a: a == "agy"):
-            self.assertEqual(router.fallback("claude", cfg, {"codex"}), "copilot")  # ok before demoted
-            self.assertEqual(router.fallback("claude", cfg, {"codex", "copilot"}), "agy")
+            self.assertEqual(router.fallback("claude", cfg, {"codex"}, FULL), "copilot")  # ok before demoted
+            self.assertEqual(router.fallback("claude", cfg, {"codex", "copilot"}, FULL), "agy")
+
+    def test_quota_fallback_keeps_primary_use_and_reserve_floors(self):
+        cfg = cfg_with(["copilot", "codex", "agy"], "quota")
+        self.assertEqual(router.fallback("claude", cfg, {"copilot"}, FULL), "codex")    # control: primary allowed
+        cfg["routing"]["quota"]["primary_use"] = "never"
+        self.assertEqual(router.fallback("claude", cfg, {"copilot"}, FULL), "agy")
+        self.assertIsNone(router.fallback("claude", cfg, {"copilot", "agy"}, FULL))
+        cfg["routing"]["quota"]["primary_use"] = "overflow"
+        for low in ({**FULL, "codex": 0.3}, {k: v for k, v in FULL.items() if k != "codex"}):  # below floor, unknown
+            self.assertEqual(router.fallback("claude", cfg, {"copilot"}, low), "agy")
+            self.assertIsNone(router.fallback("claude", cfg, {"copilot", "agy"}, low))
 
     def test_undetected_listed_agent_is_unavailable(self):
         with mock.patch.object(harnesses, "detected", return_value=["claude"]):

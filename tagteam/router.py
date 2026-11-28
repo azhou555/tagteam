@@ -33,11 +33,12 @@ def candidates(author, cfg):
     return [a for a in dict.fromkeys(cfg["reviewers"].get("use") or []) if a != author and a in have and a not in off]
 
 
-def fallback(author, cfg, taken):
-    """The reviewer to take over a fast-failed one's work: the first listed candidate not in `taken` and not
-    cooling, healthy before demoted; None when there is none."""
-    return next(iter(sorted((a for a in candidates(author, cfg) if a not in taken and not quota.cooling(a)),
-                            key=health.is_demoted)), None)
+def fallback(author, cfg, taken, headroom):
+    """The reviewer to take over a fast-failed one's work: the first listed candidate (in quota mode, the first
+    `eligible` one, so primary_use and reserve floors hold) not in `taken` and not cooling, healthy before demoted;
+    None when there is none."""
+    pool = eligible(author, cfg, headroom) if cfg["routing"]["mode"] == "quota" else candidates(author, cfg)
+    return next(iter(sorted((a for a in pool if a not in taken and not quota.cooling(a)), key=health.is_demoted)), None)
 
 
 def eligible(author, cfg, headroom):
